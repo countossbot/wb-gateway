@@ -127,3 +127,122 @@ export async function computeTopProviders(days: number): Promise<TopProviderRowR
     .sort((a, b) => b.requests - a.requests)
     .slice(0, 5);
 }
+
+// ---- v4.3.2：服务质量 SLO（RequestLog 延迟分位数 / 成功率 / 流式占比 / 延迟分布直方图）----
+
+/** SLO 窗口小时数白名单（与前端 1h/6h/24h 按钮组一致） */
+const ALLOWED_SLO_HOURS = new Set([1, 6, 24]);
+
+export function normalizeSloHours(raw: unknown): number {
+  const n = Number(raw);
+  return ALLOWED_SLO_HOURS.has(n) ? n : 24;
+}
+
+/** 直方图单桶（右开区间 [fromMs, toMs)；末桶闭区间含 max） */
+export interface SloHistogramBucket {
+  fromMs: number;
+  toMs: number;
+  count: number;
+}
+
+/** 与 types.ts SloData 同形（此处局部定义避免 lib 层反向依赖 console 类型层） */
+export interface SloDataResult {
+  windowHours: number;
+  /** 窗口内日志总条数（含错误请求） */
+  samples: number;
+  okCount: number;
+  errCount: number;
+  /** 成功率 0-100（一位小数；samples=0 时 null） */
+  successRate: number | null;
+  /** 延迟分位数（毫秒；基于成功且有耗时记录的请求；样本 <5 时 null 避免误导） */
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  /** 平均耗时（毫秒；口径同分位数） */
+  avgMs: number | null;
+  /** 流式请求数与占比 0-100 */
+  streamCount: number;
+  streamShare: number | null;
+  /** 延迟分布直方图（线性等宽桶，桶数 = 样本数>0 ? 20 : 0） */
+  histogram: SloHistogramBucket[];
+}
+
+/** 就地排序后取分位数（nearest-rank 法：ceil(p*n)-1 号位） */
+function percentileSorted(sorted: number[], p: number): number | null {
+  if (sorted.length === 0) return null;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[idx];
+}
+
+/**
+ * 服务质量 SLO —— 近 N 小时 RequestLog 聚合。
+ * 口径说明：
+ * - 数据源为 RequestLog（滚动窗口 5000 条，超高流量下 24h 可能被截断 —— 前端脚注注明）；
+ * - 分位数 / 平均耗时仅统计「成功（2xx）且 durationMs 有值」的请求（运维惯例：失败请求
+ *   的耗时语义混杂 —— 429 预检秒拒与 504 上游超时不可比，混入会拉偏 P50）；
+ * - 成功率 / 流式占比统计窗口内全部请求（含错误）；
+ * - 直方图线性等宽 20 桶（0 → 样本最大值）；样本过少（<8）时不出直方图避免锯齿噪音。
+ */
+export async function computeSloData(hours: number): Promise<SloDataResult> {
+  const since = new Date(Date.now() - hours * 3600_000);
+  const rows = await db.requestLog.findMany({
+    where: { createdAt: { gte: since } },
+    select: { status: true, durationMs: true, stream: true },
+    orderBy: { createdAt: "asc" },
+    take: 5000,
+  });
+  const samples = rows.length;
+  const okCount = rows.filter((r) => (r.status ?? 0) >= 200 && (r.status ?? 0) < 300).length;
+  const errCount = samples - okCount;
+  const streamCount = rows.filter((r) => r.stream).length;
+
+  // 延迟样本：成功且有耗时
+  const latencies = rows
+    .filter((r) => (r.status ?? 0) >= 200 && (r.status ?? 0) < 300 && r.durationMs != null)
+    .map((r) => r.durationMs as number)
+    .sort((a, b) => a - b);
+  // 分位数门槛：样本过少时不出数（<5 条分位数无统计意义）
+  const enough = latencies.length >= 5;
+  const p50 = enough ? percentileSorted(latencies, 50) : null;
+  const p95 = enough ? percentileSorted(latencies, 95) : null;
+  const p99 = enough ? percentileSorted(latencies, 99) : null;
+  const avgMs = enough
+    ? Math.round(latencies.reduce((s, v) => s + v, 0) / latencies.length)
+    : null;
+
+  // 直方图：线性等宽 20 桶（样本 ≥8 才渲染；桶宽 = max/20，max=0 时单桶）
+  const histogram: SloHistogramBucket[] = [];
+  if (latencies.length >= 8) {
+    const max = latencies[latencies.length - 1];
+    const bucketCount = 20;
+    const width = max > 0 ? max / bucketCount : 1;
+    const counts = new Array<number>(bucketCount).fill(0);
+    for (const v of latencies) {
+      let idx = Math.floor(v / width);
+      if (idx >= bucketCount) idx = bucketCount - 1; // 末桶闭区间收 max
+      counts[idx] += 1;
+    }
+    for (let i = 0; i < bucketCount; i++) {
+      histogram.push({
+        fromMs: Math.round(i * width),
+        toMs: Math.round((i + 1) * width),
+        count: counts[i],
+      });
+    }
+  }
+
+  return {
+    windowHours: hours,
+    samples,
+    okCount,
+    errCount,
+    successRate: samples > 0 ? Math.round((okCount / samples) * 1000) / 10 : null,
+    p50,
+    p95,
+    p99,
+    avgMs,
+    streamCount,
+    streamShare: samples > 0 ? Math.round((streamCount / samples) * 1000) / 10 : null,
+    histogram,
+  };
+}

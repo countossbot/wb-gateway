@@ -89,6 +89,8 @@ export interface OverviewData {
   top_providers_7d?: TopProviderRow[];
   /** v4.2.1：模型健康 sparkline（近 7 天 RequestLog 模型 × 日点阵，Top 6 按请求数） */
   model_health?: ModelHealthData;
+  /** v4.3.2：服务质量 SLO（近 24h 种子；切窗口走独立 insights API） */
+  slo?: SloData;
   last_checkin: {
     time: string;
     provider: string;
@@ -211,7 +213,36 @@ export interface ModelHealthData {
   windowDays?: number; // v4.2.3b：窗口长度（7/14/30；缺省 7 向后兼容）
 }
 
-/** v4.2.4：总览洞察独立 API 响应（GET /api/console/overview/insights?mh_days=&tp_days=）——
+/** v4.3.2：服务质量 SLO —— 延迟分布直方图单桶（右开区间 [fromMs, toMs)；末桶闭区间含 max） */
+export interface SloHistogramBucket {
+  fromMs: number;
+  toMs: number;
+  count: number;
+}
+
+/** v4.3.2：服务质量 SLO（GET /api/console/overview 附带 24h 种子；insights?...&slo_hours= 切窗口） */
+export interface SloData {
+  windowHours: number; // 1/6/24
+  /** 窗口内日志总条数（含错误请求） */
+  samples: number;
+  okCount: number;
+  errCount: number;
+  /** 成功率 0-100（1 位小数；samples=0 时 null） */
+  successRate: number | null;
+  /** 延迟分位数（毫秒；仅统计成功且有耗时记录的请求；样本 <5 时 null 避免误导） */
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  /** 平均耗时（毫秒；口径同分位数） */
+  avgMs: number | null;
+  /** 流式请求数与占比 0-100 */
+  streamCount: number;
+  streamShare: number | null;
+  /** 延迟分布直方图（线性等宽 20 桶；样本 <8 时为空数组） */
+  histogram: SloHistogramBucket[];
+}
+
+/** v4.2.4：总览洞察独立 API 响应（GET /api/console/overview/insights?mh_days=&tp_days=&slo_hours=）——
  * 窗口切换不再触发整页 overview 重载（Task 42b 遗留清偿）；字段与主响应同形可作种子无缝切换 */
 export interface OverviewInsightsData {
   model_health: ModelHealthData;
@@ -219,6 +250,8 @@ export interface OverviewInsightsData {
   top_providers_7d: TopProviderRow[];
   /** Top 提供商实际窗口天数回显（7/14/30） */
   top_providers_window_days?: number;
+  /** v4.3.2：服务质量 SLO（窗口回显 slo.windowHours） */
+  slo?: SloData;
 }
 
 // ---- 账号管理 ----
