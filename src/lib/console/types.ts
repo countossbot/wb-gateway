@@ -266,6 +266,52 @@ export interface PricingData {
   unpricedModels: UnpricedModel[];
 }
 
+// ---- v4.5.0：月度账单（GET /api/console/usage/billing?month=YYYY-MM） ----
+export interface BillingModelRow {
+  model: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cost: { cost: number; pricedRequests: number; unpricedRequests: number };
+}
+
+export interface BillingKeyRow {
+  apiKeyName: string;
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  successRate: number | null;
+  cost: { cost: number; pricedRequests: number; unpricedRequests: number };
+  /** 该密钥的月度成本预算（$；0 = 未设/无同名虚拟密钥） */
+  monthlyCostLimit: number;
+  byModel: BillingModelRow[];
+}
+
+export interface BillingMonthTotals {
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  successRate: number | null;
+  cost: { cost: number; pricedRequests: number; unpricedRequests: number };
+}
+
+export interface BillingData {
+  month: string;
+  prevMonth: string;
+  /** 有数据的月份清单（降序 ≤ 12；当前月恒在） */
+  months: string[];
+  rows: BillingKeyRow[];
+  totals: BillingMonthTotals;
+  prevTotals: BillingMonthTotals;
+  /** 当月未计价模型提示（补录引导） */
+  unpricedModels: UnpricedModel[];
+}
+
 export interface PricingSaveResult {
   rows: PricingRow[];
   saved: number;
@@ -450,6 +496,10 @@ export interface VirtualKeyRow {
   /** v4.3.0：日配额（0 = 不限额）；超限网关入口 429（本地时区日自然重置） */
   dailyRequestLimit?: number;
   dailyTokenLimit?: number;
+  /** v4.5.0：月度成本预算（$/估算口径；0 = 不限）；超限网关入口 429（下月 1 日重置） */
+  monthlyCostLimit?: number;
+  /** v4.5.0：本月已累计估算成本（$，UsageDaily 当月行 × 单价表；与网关预算执行同口径） */
+  monthCost?: number;
   createdAt: string;
   updatedAt?: string;
   /** v3.0.4：近 24h 调用统计（无调用时 null）；v3.1.0 增 failures 精确失败次数 */

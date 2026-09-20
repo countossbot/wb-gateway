@@ -19,6 +19,7 @@ import {
   Layers,
   Network,
   PieChart,
+  ReceiptText,
   RefreshCw,
   Route as RouteIcon,
   Snowflake,
@@ -47,7 +48,7 @@ import {
 } from "@/components/console/ui";
 import { apiGet, errMessage } from "@/lib/console/api";
 import { cooldownRemaining, fmtCompact, fmtNum, fmtUsd, relativeTime } from "@/lib/console/format";
-import type { BalanceHistoryData, CostData, ModelHealthData, OverviewData, OverviewInsightsData, SloData, TopKeyRow, TopModelRow, TopProviderRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
+import type { BalanceHistoryData, BillingData, CostData, ModelHealthData, OverviewData, OverviewInsightsData, SloData, TopKeyRow, TopModelRow, TopProviderRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
 
 /** v3.0.5：近 24h 逐小时请求趋势 mini 图（纯 CSS 柱状：成功 emerald / 失败 red，Tooltip 显示明细；
  *  有流量的柱可点击 → 跳转运行日志按该小时窗口过滤；移动端横向滚动保证 24 柱可读性） */
@@ -481,6 +482,362 @@ function UsagePivotCard() {
                     {costMode ? " · 成本为单价表估算口径（$ = Σ tokens × $/1M，未计价不计入）" : ""}
                   </p>
                 )}
+              </>
+            )}
+          </div>
+        </CollapsibleContent>
+      </div>
+    </Collapsible>
+  );
+}
+
+/**
+ * v4.5.0：月度账单卡 —— Task 47 顺延项落地（按密钥分组的月度成本报表，「看话费账单」视角）。
+ * - 折叠卡（默认收起，不抢占总览首屏）；展开时懒加载 /api/console/usage/billing?month=…
+ * - 月份选择器（有数据的月份 ≤ 12 + 当前月恒在；切换不整页重载，60s 按月缓存）
+ * - 摘要条：月总成本大数字 + 环比上月徽标（上期为 0 不出环比防 ↑∞）+ 总请求/tokens + 计价覆盖率
+ * - 密钥分组表：密钥（预算进度条 v4.5.0 打通）| 请求 | 成功率 | tokens | 成本 | 占比条（相对月总成本）
+ * - 行可展开 → byModel 模型明细（缩进 mono 行，成本/已计价同列语义）
+ * - 未计价模型 chips（amber 提示补录，与设置页同口径）；CSV 导出（按密钥 + 模型明细 + 合计/环比）
+ * - 空态三分支：本月无用量 / 单价表空（全未计价 → 成本恒 $0 引导补录）/ 正常
+ */
+const BILLING_CACHE = new Map<string, { at: number; data: BillingData }>();
+
+function monthLabel(month: string): string {
+  const y = month.slice(0, 4);
+  const m = Number(month.slice(5, 7));
+  return `${y} 年 ${m} 月`;
+}
+
+function MonthlyBillingCard() {
+  const [open, setOpen] = React.useState(false);
+  const [month, setMonth] = React.useState<string>("");
+  const [data, setData] = React.useState<BillingData | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [expandedKeys, setExpandedKeys] = React.useState<Set<string>>(new Set());
+
+  const load = React.useCallback(async (m?: string) => {
+    const key = m || "";
+    setLoading(true);
+    setError("");
+    try {
+      // 60s 按月缓存：反复展开/收起/切月不重复请求（当前月缓存 30s 保证盯盘新鲜度）
+      const cached = BILLING_CACHE.get(key);
+      const ttl = key === "" || key >= new Date().toISOString().slice(0, 7) ? 30_000 : 60_000;
+      if (cached && Date.now() - cached.at < ttl) {
+        setData(cached.data);
+        return;
+      }
+      const res = await apiGet<BillingData>(`/api/console/usage/billing${key ? `?month=${key}` : ""}`);
+      BILLING_CACHE.set(res.month, { at: Date.now(), data: res });
+      setData(res);
+    } catch (e) {
+      setError(errMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleOpen = (o: boolean) => {
+    setOpen(o);
+    if (o && !data) void load();
+  };
+
+  const changeMonth = (m: string) => {
+    if (m === month) return;
+    setMonth(m);
+    void load(m);
+  };
+
+  // v4.5.0：账单 CSV 导出（BOM + RFC 4180，与透视/日志导出同口径）
+  const exportBillingCsv = React.useCallback(() => {
+    if (!data) return;
+    const esc = (v: string | number | null) => {
+      const s = String(v ?? "");
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines: string[] = [];
+    lines.push(`Universal AI Gateway · 月度账单（${data.month}）`);
+    lines.push(`口径,成本为模型单价表估算（$/1M tokens × tokens；未配置单价的模型不计入）`);
+    lines.push("");
+    lines.push("视图,按密钥汇总");
+    lines.push(["密钥", "请求数", "成功数", "成功率%", "输入 tokens", "输出 tokens", "缓存命中 tokens", "成本估算$", "已计价请求", "未计价请求", "月预算$"].map(esc).join(","));
+    for (const r of data.rows) {
+      lines.push(
+        [r.apiKeyName, r.requests, r.okRequests, r.successRate ?? "", r.inputTokens, r.outputTokens, r.cachedTokens, r.cost.cost.toFixed(6), r.cost.pricedRequests, r.cost.unpricedRequests, r.monthlyCostLimit > 0 ? r.monthlyCostLimit.toFixed(2) : ""]
+          .map(esc)
+          .join(",")
+      );
+    }
+    lines.push("");
+    lines.push("视图,密钥 × 模型明细");
+    lines.push(["密钥", "模型", "请求数", "输入 tokens", "输出 tokens", "缓存命中 tokens", "成本估算$", "已计价请求", "未计价请求"].map(esc).join(","));
+    for (const r of data.rows) {
+      for (const m of r.byModel) {
+        lines.push(
+          [r.apiKeyName, m.model, m.requests, m.inputTokens, m.outputTokens, m.cachedTokens, m.cost.cost.toFixed(6), m.cost.pricedRequests, m.cost.unpricedRequests]
+            .map(esc)
+            .join(",")
+        );
+      }
+    }
+    const t = data.totals;
+    const p = data.prevTotals;
+    lines.push("");
+    lines.push(["合计", t.requests, t.okRequests, t.successRate ?? "", t.inputTokens, t.outputTokens, t.cachedTokens, t.cost.cost.toFixed(6), t.cost.pricedRequests, t.cost.unpricedRequests, ""].map(esc).join(","));
+    lines.push([`上期合计（${data.prevMonth}）`, p.requests, p.okRequests, p.successRate ?? "", p.inputTokens, p.outputTokens, p.cachedTokens, p.cost.cost.toFixed(6), p.cost.pricedRequests, p.cost.unpricedRequests, ""].map(esc).join(","));
+    const csv = "\uFEFF" + lines.join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `uag-monthly-billing-${data.month}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [data]);
+
+  const totals = data?.totals;
+  const prevCost = data?.prevTotals.cost.cost ?? 0;
+  const monthCost = totals?.cost.cost ?? 0;
+  const costDelta = monthCost - prevCost;
+  const costDeltaPct = prevCost > 0 ? Math.round((costDelta / prevCost) * 100) : null;
+  const coverage =
+    totals && totals.cost.pricedRequests + totals.cost.unpricedRequests > 0
+      ? Math.round((totals.cost.pricedRequests / (totals.cost.pricedRequests + totals.cost.unpricedRequests)) * 1000) / 10
+      : null;
+  const noPricing =
+    !!data && data.rows.length > 0 && totals !== undefined && totals.cost.pricedRequests === 0;
+
+  const toggleKey = (name: string) => {
+    setExpandedKeys((s) => {
+      const next = new Set(s);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  return (
+    <Collapsible open={open} onOpenChange={handleOpen}>
+      <div className="rounded-xl border border-stone-200 bg-white">
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left transition-colors hover:bg-stone-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-lime-400"
+            aria-expanded={open}
+          >
+            <span className="flex items-center gap-2">
+              <ReceiptText className="size-4 text-lime-600" aria-hidden />
+              <span className="text-sm font-medium text-stone-700">月度账单</span>
+              <span className="hidden text-[11px] text-muted-foreground sm:inline">按密钥分组的月度成本报表 · 环比上月（点击展开）</span>
+            </span>
+            <ChevronDown className={`size-4 shrink-0 text-stone-400 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="border-t border-stone-100 px-4 py-3">
+            {loading && !data ? (
+              <LoadingBlock rows={3} />
+            ) : error ? (
+              <p className="text-xs text-red-600">加载失败：{error}</p>
+            ) : !data || data.rows.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                {data && data.month < data.months[data.months.length - 1]
+                  ? `${monthLabel(data.month)}暂无用量数据（数据来自 UsageDaily 按日聚合，月度报表不早于首次调用月份）。`
+                  : "本月暂无用量数据。调用发生后这里将生成按密钥分组的月度成本报表。"}
+              </p>
+            ) : (
+              <>
+                {/* 摘要条：月成本 + 环比 + 请求 + tokens + 覆盖率 */}
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                  <span className="flex items-baseline gap-1.5">
+                    <span className="text-[11px] text-muted-foreground">{monthLabel(data.month)}成本</span>
+                    <span className={`text-lg font-semibold tabular-nums ${monthCost > 0 ? "text-lime-700" : "text-stone-400"}`} title={`已计价 ${totals!.cost.pricedRequests} 次合计估算（$ = Σ tokens × $/1M）`}>
+                      {fmtUsd(monthCost)}
+                    </span>
+                  </span>
+                  {costDeltaPct !== null && (
+                    <Badge
+                      variant="outline"
+                      className={`px-1.5 py-0 text-[10px] font-medium tabular-nums ${costDelta > 0 ? "border-red-200 bg-red-50 text-red-600" : costDelta < 0 ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-stone-200 bg-stone-50 text-stone-500"}`}
+                      title={`上期（${monthLabel(data.prevMonth)}）估算 ${fmtUsd(prevCost)} → 本期 ${fmtUsd(monthCost)}`}
+                    >
+                      {costDelta > 0 ? "↑" : costDelta < 0 ? "↓" : "—"} {Math.abs(costDeltaPct)}% vs 上月
+                    </Badge>
+                  )}
+                  <span className="text-[11px] tabular-nums text-muted-foreground">
+                    {totals!.requests.toLocaleString()} 次请求 · 成功率 {totals!.successRate ?? "—"}% ·{" "}
+                    {fmtCompact(totals!.inputTokens + totals!.outputTokens)} tokens
+                    {totals!.cachedTokens > 0 ? ` · 缓存命中 ${fmtCompact(totals!.cachedTokens)}` : ""}
+                  </span>
+                  {coverage !== null && (
+                    <Badge
+                      variant="outline"
+                      className={`px-1.5 py-0 text-[10px] font-medium tabular-nums ${coverage >= 100 ? "border-lime-200 bg-lime-50 text-lime-700" : coverage >= 50 ? "border-amber-200 bg-amber-50 text-amber-700" : "border-stone-200 bg-stone-50 text-stone-500"}`}
+                      title={`已计价 ${totals!.cost.pricedRequests} / ${totals!.cost.pricedRequests + totals!.cost.unpricedRequests} 次请求按单价表计入估算`}
+                    >
+                      计价覆盖 {coverage}%
+                    </Badge>
+                  )}
+                  <span className="ml-auto flex items-center gap-2">
+                    <Select value={data.month} onValueChange={changeMonth}>
+                      <SelectTrigger className="h-7 w-[9.5rem] text-xs" aria-label="账单月份选择">
+                        <CalendarDays className="size-3.5 text-lime-600" aria-hidden />
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {data.months.map((m) => (
+                          <SelectItem key={m} value={m} className="text-xs">
+                            {monthLabel(m)}
+                            {m === data.months[0] ? "（本月）" : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" onClick={exportBillingCsv}>
+                      <Download className="size-3.5" />
+                      CSV
+                    </Button>
+                  </span>
+                </div>
+
+                {/* 单价表空态提示（全未计价 → 成本恒 $0 引导补录） */}
+                {noPricing && (
+                  <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-700">
+                    本月 {totals!.cost.unpricedRequests} 次请求的模型均未配置单价 —— 成本估算恒为 $0。前往「设置 → 模型单价」补录后，月度账单与密钥月预算即可生效。
+                    {data.unpricedModels.length > 0 && (
+                      <span className="mt-1.5 flex flex-wrap gap-1">
+                        {data.unpricedModels.slice(0, 8).map((u) => (
+                          <Badge key={u.model} variant="outline" className="border-amber-200 bg-white px-1 py-0 font-mono text-[10px] text-amber-700" title={`本月 ${u.requests} 次请求未计价`}>
+                            {u.model}
+                            <span className="ml-1 tabular-nums opacity-70">{u.requests}</span>
+                          </Badge>
+                        ))}
+                        {data.unpricedModels.length > 8 && <span className="self-center text-[10px] opacity-70">+{data.unpricedModels.length - 8}</span>}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* 密钥分组表（行可展开模型明细） */}
+                <div className="mt-2 overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="h-8 text-xs">密钥</TableHead>
+                        <TableHead className="h-8 text-right text-xs">请求</TableHead>
+                        <TableHead className="h-8 text-right text-xs">成功率</TableHead>
+                        <TableHead className="hidden h-8 text-right text-xs sm:table-cell">tokens（入/出）</TableHead>
+                        <TableHead className="h-8 text-right text-xs">成本估算</TableHead>
+                        <TableHead className="hidden h-8 text-right text-xs md:table-cell">占比</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.rows.slice(0, 15).map((r) => {
+                        const expanded = expandedKeys.has(r.apiKeyName);
+                        const share = monthCost > 0 ? (r.cost.cost / monthCost) * 100 : 0;
+                        const budget = r.monthlyCostLimit;
+                        const budgetCapped = budget > 0 && r.cost.cost >= budget;
+                        return (
+                          <React.Fragment key={r.apiKeyName}>
+                            <TableRow className={expanded ? "bg-stone-50/60" : undefined}>
+                              <TableCell className="max-w-56 py-1.5 text-xs font-medium text-stone-800">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleKey(r.apiKeyName)}
+                                  className="group flex max-w-full items-center gap-1 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-lime-400"
+                                  aria-expanded={expanded}
+                                  aria-label={`${expanded ? "收起" : "展开"}密钥 ${r.apiKeyName} 的模型明细（${r.byModel.length} 个模型）`}
+                                >
+                                  <ChevronDown className={`size-3 shrink-0 text-stone-400 transition-transform ${expanded ? "rotate-180" : ""}`} aria-hidden />
+                                  <span className="truncate group-hover:text-stone-900" title={r.apiKeyName}>
+                                    {r.apiKeyName}
+                                  </span>
+                                </button>
+                                {/* v4.5.0：月预算进度（lime 三档；≥100% 红档 + 「超预算」） */}
+                                {budget > 0 && (
+                                  <span className="mt-1 flex items-center gap-1.5" title={`月预算 ${fmtUsd(budget)} · 本月已估算 ${fmtUsd(r.cost.cost)}（网关预算执行同口径；预算耗尽入口 429）`}>
+                                    <span className="h-1 w-16 overflow-hidden rounded-full bg-stone-100" aria-hidden>
+                                      <span
+                                        className={`block h-full rounded-full ${budgetCapped ? "bg-red-500" : r.cost.cost / budget >= 0.8 ? "bg-amber-500" : "bg-lime-500"}`}
+                                        style={{ width: `${Math.max(3, Math.min(100, (r.cost.cost / budget) * 100))}%` }}
+                                      />
+                                    </span>
+                                    <span className={`text-[9px] tabular-nums ${budgetCapped ? "font-semibold text-red-600" : "text-stone-400"}`}>
+                                      {fmtUsd(r.cost.cost)}/{fmtUsd(budget)}
+                                      {budgetCapped ? " 超预算" : ""}
+                                    </span>
+                                  </span>
+                                )}
+                              </TableCell>
+                              <TableCell className="py-1.5 text-right text-xs tabular-nums">{r.requests.toLocaleString()}</TableCell>
+                              <TableCell className={`py-1.5 text-right text-xs tabular-nums ${rateClass(r.successRate)}`}>
+                                {r.successRate === null ? "—" : `${r.successRate}%`}
+                              </TableCell>
+                              <TableCell className="hidden py-1.5 text-right text-xs tabular-nums text-muted-foreground sm:table-cell">
+                                {fmtNum(r.inputTokens)} / {fmtNum(r.outputTokens)}
+                              </TableCell>
+                              <TableCell
+                                className="py-1.5 text-right text-xs tabular-nums"
+                                title={`已计价 ${r.cost.pricedRequests} 次 · 未计价 ${r.cost.unpricedRequests} 次（未配置单价的模型不计入估算）`}
+                              >
+                                <span className={r.cost.cost > 0 ? "text-lime-700" : "text-stone-300"}>
+                                  {r.cost.cost > 0 ? fmtUsd(r.cost.cost) : "—"}
+                                </span>
+                                {r.cost.unpricedRequests > 0 && <span className="ml-1 text-[10px] text-amber-600">+{r.cost.unpricedRequests}</span>}
+                              </TableCell>
+                              <TableCell className="hidden py-1.5 md:table-cell">
+                                <span className="flex items-center justify-end gap-1.5">
+                                  <span className="h-1.5 w-20 overflow-hidden rounded-full bg-stone-100" aria-hidden>
+                                    <span className="block h-full rounded-full bg-lime-400/70" style={{ width: `${Math.max(2, Math.min(100, share))}%` }} />
+                                  </span>
+                                  <span className="w-10 text-right text-[10px] tabular-nums text-muted-foreground" title={`占本月总成本 ${fmtUsd(monthCost)} 的 ${share.toFixed(1)}%`}>
+                                    {share > 0 ? `${share.toFixed(1)}%` : "—"}
+                                  </span>
+                                </span>
+                              </TableCell>
+                            </TableRow>
+                            {expanded &&
+                              r.byModel.map((m) => (
+                                <TableRow key={`${r.apiKeyName}\u0000${m.model}`} className="bg-stone-50/40">
+                                  <TableCell className="max-w-56 py-1 pl-7 text-xs">
+                                    <span className="block truncate font-mono text-[11px] text-stone-600" title={`${r.apiKeyName} · ${m.model}`}>
+                                      <Boxes className="mr-1 inline size-3 text-stone-300" aria-hidden />
+                                      {m.model}
+                                    </span>
+                                  </TableCell>
+                                  <TableCell className="py-1 text-right text-xs tabular-nums text-stone-500">{m.requests.toLocaleString()}</TableCell>
+                                  <TableCell className="py-1 text-right text-xs text-stone-300">—</TableCell>
+                                  <TableCell className="hidden py-1 text-right text-xs tabular-nums text-stone-500 sm:table-cell">
+                                    {fmtNum(m.inputTokens)} / {fmtNum(m.outputTokens)}
+                                  </TableCell>
+                                  <TableCell className="py-1 text-right text-xs tabular-nums" title={`已计价 ${m.cost.pricedRequests} 次 · 未计价 ${m.cost.unpricedRequests} 次`}>
+                                    <span className={m.cost.cost > 0 ? "text-lime-700" : "text-stone-300"}>
+                                      {m.cost.cost > 0 ? fmtUsd(m.cost.cost) : "—"}
+                                    </span>
+                                    {m.cost.unpricedRequests > 0 && <span className="ml-1 text-[10px] text-amber-600">+{m.cost.unpricedRequests}</span>}
+                                  </TableCell>
+                                  <TableCell className="hidden py-1 md:table-cell" />
+                                </TableRow>
+                              ))}
+                          </React.Fragment>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+                {(data.rows.length > 15 || (expandedKeys.size > 0 && data.rows.some((r) => r.byModel.length > 6))) && (
+                  <p className="mt-1.5 text-[11px] text-muted-foreground">
+                    仅展示成本 Top 15 密钥（共 {data.rows.length} 个）· 点击密钥名展开模型明细 · 完整数据可导出 CSV 或调 GET /api/console/usage/billing?month={data.month}
+                  </p>
+                )}
+                <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                  口径说明：成本 = Σ(tokens × 模型单价)/1M，按设置页单价表估算（非计费）；未配置单价的模型归「未计价」（amber +N 与 chips 提示）；
+                  密钥行内预算进度为 v4.5.0 月度成本预算（网关入口执行同口径，耗尽即 429）；环比对比上月同口径合计。usage 为网关字符估算的请求其 token 本身为折算值。
+                </p>
               </>
             )}
           </div>
@@ -2013,6 +2370,9 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
 
       {/* v4.4.0：成本估算卡（模型单价表 × UsageDaily；未配置单价时渲染引导空态） */}
       <CostCard data={data.cost} />
+
+      {/* v4.5.0：月度账单卡（按密钥分组月成本报表 + 预算进度 + 环比 + CSV；折叠懒加载） */}
+      <MonthlyBillingCard />
 
       {/* v3.0.4：近 24h 逐小时趋势（v3.0.5：柱可点击跳转该小时日志） */}
       {(data.trend24h?.length || 0) > 0 && <Trend24hCard buckets={data.trend24h || []} onHourClick={onHourClick} />}

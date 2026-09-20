@@ -145,6 +145,33 @@ export function peekUsageDailyToday(apiKeyName: string): {
   return out;
 }
 
+/**
+ * v4.5.0：读取内存缓冲中某密钥今日（本地时区日）未 flush 的**按模型分组**聚合量（零 IO 同步读）。
+ * 供月度成本预算执行（quota.ts）：当月成本 = UsageDaily 当月已落库行（含今日已 flush）按模型计价
+ * + 本缓冲今日未 flush 部分按模型计价（与 peekUsageDailyToday 同口径，多保留 model 维度）。
+ * 单价按模型配置，聚合 token 直接乘单价会算错，必须按模型分组后逐组计价。
+ */
+export function peekUsageDailyTodayByModel(apiKeyName: string): Array<{
+  model: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+}> {
+  const day = localDayKey();
+  const byModel = new Map<string, { model: string; requests: number; inputTokens: number; outputTokens: number; cachedTokens: number }>();
+  for (const cell of usageDailyBuffer.values()) {
+    if (cell.day !== day || cell.apiKeyName !== apiKeyName) continue;
+    const b = byModel.get(cell.model) || { model: cell.model, requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+    b.requests += cell.requests;
+    b.inputTokens += cell.inputTokens;
+    b.outputTokens += cell.outputTokens;
+    b.cachedTokens += cell.cachedTokens;
+    byModel.set(cell.model, b);
+  }
+  return Array.from(byModel.values());
+}
+
 /** 幂等调度：缓冲非空且无 pending timer 时排一次 flush（30s） */
 function scheduleUsageFlush(): void {
   if (usageFlushTimer) return;

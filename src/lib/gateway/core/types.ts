@@ -44,6 +44,8 @@ export interface VirtualKeyEntry {
   /** v4.3.0：密钥级日配额（0/缺省 = 不限额）；入口超限直接 429，不触上游 */
   dailyRequestLimit?: number;
   dailyTokenLimit?: number;
+  /** v4.5.0：密钥级月度成本预算（$/估算口径；0/缺省 = 不限）。当月估算成本 ≥ 预算入口 429 */
+  monthlyCostLimit?: number;
 }
 
 export interface GatewayConfig {
