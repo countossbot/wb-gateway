@@ -1924,3 +1924,39 @@ Stage Summary:
 4. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康 60/90 天窗口；UsageDaily 模型维度历史天回填工具；试跑对话框可扩展「最近试跑历史」列表（当前仅保留最后一次）
 5. console-test 今日统计格（qa-rt-model/qa-rt-chain/qa-rt-noroute-x/qa-ui-rt-model 等）已随 UsageDaily 落库——7 天窗口自然老化，与既有 qa-* 历史格同类，不影响业务配置
 6. mock-upstream（3040）单实例保持运行供后续巡检复用；如被 reaper 清理用 `( setsid bun run dev < /dev/null >> /tmp/mock-upstream.log 2>&1 & )` 在 mini-services/mock-upstream 下重启
+---
+Task ID: 46
+Agent: 主会话（Z.ai Code，持续迭代轮，trace: 1a0bc1e5e26e0a89-web-cron-review-202609201059）
+Task: 巡检 QA → 新功能开发「运维监控体验升级」（Task 45 顺延项「试跑历史」清偿 + SLO 服务质量卡 + 总览自动刷新）；版本 4.3.1 → 4.3.2
+
+Work Log:
+- 【巡检】dev server 存活（v4.3.1，基线 2 提供商/6 模型一致）；git 工作树干净（Task 45 已入库）；mock-upstream 3040 存活（__stats 正常，/health 404 属路径不存在非故障）；agent-browser 8 页签遍历零 console/页面错误；dev.log 干净 → 项目稳定，进入功能开发
+- 【决策】项目稳定无 bug，自主选择三项高价值运维监控功能（用户要求「功能越做越多、样式越做越细」）：①SLO 服务质量卡（RequestLog 有 durationMs/status/stream 字段但从未被聚合展示——运维视角第一优先级）；②总览自动刷新（盯盘场景免手动刷新）；③试跑历史（Task 45 顺延项正式清偿）
+- 【新功能 1：服务质量 SLO 卡（v4.3.2 核心）】
+  - 后端：overviewInsights.ts 新增 computeSloData(hours)——近 N 小时 RequestLog 聚合（take 5000 滚动窗口口径）：P50/P95/P99（nearest-rank 法，仅统计成功 2xx 且 durationMs 有值的请求——失败请求耗时语义混杂不拉偏分布；样本 <5 不出数）、平均耗时、成功率（含全部请求）、流式占比、延迟分布直方图（线性等宽 20 桶，样本 <8 不出图避免锯齿噪音）；normalizeSloHours 白名单 1/6/24 回落 24
+  - API：insights 独立端点增 slo_hours 参数（与 mh_days/tp_days 同范式三路并行）——切 SLO 窗口不整页重载；主 overview 响应附带 24h slo 种子（首屏即渲染，独立拉取同口径替换）
+  - 前端：SloCard 组件（cyan 主题与现有 emerald/orange/teal/violet/rose 六色区分；Activity 图标）——分位数四格大数字（P95 cyan/P99 amber 着色语义）+ 直方图 20 桶柱（≥P95 桶染 amber、P50/P95 竖虚线标位 + 横轴刻度 0/P50/P95/max、逐柱 title 桶区间+计数）+ 成功率（SLO 严格口径 ≥99 emerald/≥95 amber/<95 red）/流式/样本/错误徽标行 + 口径脚注（5000 条滚动窗口截断说明、分位数成功请求口径、样本门槛）
+- 【新功能 2：总览自动刷新】三档 segmented control（关/30s/60s，emerald 选中态）+ 「Ns 后自动刷新」倒计时微文案（aria-live）；localStorage uag_overview_autorefresh 持久化跨会话；到 0 触发三路拉取（overview + insights + balances/history）；页面不可见（visibilityState）时跳过该轮并重置倒计时（后台不空转、切回不连刷）；倒计时走 ref 避免 setState updater 内副作用的 StrictMode 双调用风险
+- 【新功能 3：试跑历史（Task 45 顺延项清偿）】
+  - 存储：localStorage uag_route_test_history 上限 8 条 FIFO（跨开合/跨会话持久；容错读取 + 配额满静默）；entry 含完整表单参数（同参数重跑用）/状态/首字节与总时长/trace 完整事件/hit 落点/usage/SSE 帧数/streamText 截 2KB/bodyPreview 截 4KB
+  - 记录点：流式在流内 finally 统一落位（正常/中断/手动停止均记，流中断改内层 catch 捕获记录原因不再外抛）；非流式在 setResult 后落位；连接失败/参数错在外层 catch 补录（streamHistoryRecorded 标志防双记）
+  - UI：试跑对话框左栏底部「最近试跑」折叠区——数量徽标 + 清空按钮（Trash2）+ 每条摘要行（200/ERR 状态 pill + 模型名 mono + 流式徽标 + 相对时间）可展开详情（协议/耗时/命中提供商/账号/故障转移/tokens/SSE 帧徽标行 + errorText + TraceRow 时间线复用 + 输出预览/响应体截断 pre 块）+ RotateCcw 同参数回填表单（回填后折叠历史区，用户点「发送试跑」执行）
+- 【验证：API 数学】slo_hours=24 → 755 样本/成功率 96.4%/P50=1907ms/P95=4746ms/P99=14998ms/流式 56%/直方图 20 桶；直方图计数总和 728 == okCount（延迟样本=成功请求，严格自洽 ✓）；p50≤p95≤p99 单调 ✓；slo_hours=1 独立计算（68 样本 P50=3ms——近期 mock 快请求主导，合理）；slo_hours=99 → 回落 24 ✓；主 overview 响应含 slo 种子 ✓
+- 【验证：浏览器行为】①SLO 切 1h 窗口 → fetch 计数 insights:1 / overview:0（不整页重载，slo_hours=1 参数正确）+ 标题联动「近 1 小时」；②自动刷新点 30s → aria-pressed=true + 「30s 后自动刷新」出现 + 3 秒后倒计时 30→27 + localStorage stored="30"；等 29.5s 完整一轮 → overview:1 + insights:1 + balances:1 三路拉取 + 倒计时重置继续递减；③试跑历史：空态提示 → 跑一次 deepseek-v4-flash（HTTP 200/1289ms，例行真实回归，正常计费路径）→ localStorage 1 条（model/status/latency/trace 2 事件/bodyPreview 全对）→ 展开详情五要素（时间线/响应体/耗时/回填按钮/清空按钮）→ 同参数回填（prompt 恢复 14 字符）
+- 【验证：VLM 视觉】SLO 卡六项检查全过（标题+按钮组/P50=1.91s P95=4.75s P99=15.00s 平均 1.99s 四格/直方图柱+基准线/成功率 96.4% 流式 56% 756 样本 27 错误徽标/无布局缺陷/视觉协调；756=755+1 刚才的试跑，数据动态正确）；试跑历史六项全过（标题行/200 摘要行/详情徽标+时间线+响应体/回填图标/无缺陷/协调）
+- 【验证：回归矩阵】8 页签遍历零页面错误零 console 错误；lint 零错误；tsc src/ 零错误；dev.log 无运行时错误；healthz v4.3.2 基线 2/6 前后一致
+- 【清理】浏览器 localStorage 测试残留清除（uag_route_test_history + autorefresh 置 off）；QA 截图与临时脚本按惯例清除；git 独立 commit（7 文件 +826/-22）
+
+Stage Summary:
+- 三项运维监控功能全链路落地并验证（SLO 卡 + 自动刷新 + 试跑历史）；版本 4.3.2
+- 架构要点：SLO 与模型健康/Top 提供商共用 insights 独立 API 范式（三窗口独立参数，切窗口零整页重载）；分位数刻意只统计成功请求（运维惯例口径，脚注透明）；自动刷新三路全量拉取（与手动刷新同语义）
+- Task 45 顺延项「试跑最近历史」正式清偿；顺延池更新：剩 getBalance 池形态（优先级低）/模型健康 60-90 天窗口/UsageDaily 历史天回填工具
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（唯一真实调用 1 次 deepseek-v4-flash 试跑为例行回归，正常计费路径；localStorage 测试数据已清）
+2. SLO 延迟分布直方图为线性等宽桶：长尾场景（P99 远大于 P50，如本轮 1.9s vs 15s）下前段桶拥挤——如需更优可改对数刻度桶（暂可接受，P50/P95 竖虚线已辅助定位）
+3. SLO 数据受 RequestLog 5000 条滚动窗口限制（24h 高流量下可能截断，脚注已注明）；如需跨窗口持久可后续仿 UsageDaily 加延迟分位数按日聚合表（当前规模无需）
+4. 自动刷新倒计时在窗口参数切换（mh/tp/slo 窗口）时会重置（interval 重建）——语义可接受（刚切完窗口立刻有新数据）
+5. 试跑历史 entry 的 trace/body 截断存储（2KB/4KB）：超长响应只留预览——回看完整响应用运行日志；如需完整可在详情加「查看完整」跳转日志（暂无需求）
+6. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康 60/90 天窗口；UsageDaily 模型维度历史天回填工具
+7. mock-upstream（3040）保持运行供后续巡检复用；dev server v4.3.2 正常运行
