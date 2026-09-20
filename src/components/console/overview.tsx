@@ -46,7 +46,7 @@ import {
 } from "@/components/console/ui";
 import { apiGet, errMessage } from "@/lib/console/api";
 import { cooldownRemaining, fmtCompact, fmtNum, relativeTime } from "@/lib/console/format";
-import type { BalanceHistoryData, ModelHealthData, OverviewData, OverviewInsightsData, TopKeyRow, TopModelRow, TopProviderRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
+import type { BalanceHistoryData, ModelHealthData, OverviewData, OverviewInsightsData, SloData, TopKeyRow, TopModelRow, TopProviderRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
 
 /** v3.0.5：近 24h 逐小时请求趋势 mini 图（纯 CSS 柱状：成功 emerald / 失败 red，Tooltip 显示明细；
  *  有流量的柱可点击 → 跳转运行日志按该小时窗口过滤；移动端横向滚动保证 24 柱可读性） */
@@ -915,6 +915,230 @@ function ModelHealthCard({
   );
 }
 
+// ---- v4.3.2：服务质量 SLO 卡 ----
+
+/** SLO 窗口切换选项（与后端 normalizeSloHours 白名单一致） */
+const SLO_WINDOW_OPTIONS: Array<{ hours: 1 | 6 | 24; label: string }> = [
+  { hours: 1, label: "1h" },
+  { hours: 6, label: "6h" },
+  { hours: 24, label: "24h" },
+];
+
+/** 延迟人读格式：<1s → "812 ms"；≥1s → "1.35 s" */
+function fmtLatency(ms: number): string {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
+}
+
+/** 服务质量色阶：≥99 emerald / ≥95 amber / <95 red（SLO 运维口径比模型健康卡更严） */
+function sloRateClass(rate: number): string {
+  return rate >= 99 ? "text-emerald-600" : rate >= 95 ? "text-amber-600" : "text-red-600";
+}
+
+function SloCard({
+  data,
+  windowHours = 24,
+  onWindowChange,
+  loading,
+}: {
+  data?: SloData;
+  windowHours?: 1 | 6 | 24;
+  onWindowChange?: (hours: 1 | 6 | 24) => void;
+  loading?: boolean;
+}) {
+  const nHours = data?.windowHours || windowHours;
+  const samples = data?.samples ?? 0;
+
+  // 空态：窗口内零请求（保持窗口切换可用，等流量进来）
+  if (samples === 0) {
+    return (
+      <div className="rounded-xl border border-stone-200 bg-white p-4">
+        <div className="flex items-baseline gap-1.5">
+          <p className="text-sm font-medium text-stone-700">服务质量 · 近 {nHours} 小时</p>
+          {onWindowChange ? (
+            <span className="ml-auto" role="group" aria-label="切换服务质量窗口长度">
+              {SLO_WINDOW_OPTIONS.map((o) => (
+                <button
+                  key={o.hours}
+                  type="button"
+                  onClick={() => onWindowChange(o.hours)}
+                  aria-pressed={windowHours === o.hours}
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                    windowHours === o.hours
+                      ? "bg-cyan-100 text-cyan-700"
+                      : "text-stone-400 hover:bg-stone-100 hover:text-stone-600"
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </span>
+          ) : null}
+        </div>
+        <p className={`mt-2 text-xs text-muted-foreground ${loading ? "animate-pulse" : ""}`}>
+          近 {nHours} 小时暂无网关调用。调用发生后将展示延迟分位数（P50/P95/P99）、成功率与延迟分布直方图。
+        </p>
+      </div>
+    );
+  }
+
+  const hist = data?.histogram || [];
+  const maxCount = hist.length > 0 ? Math.max(1, ...hist.map((b) => b.count)) : 1;
+  const lastBucket = hist.length > 0 ? hist[hist.length - 1] : null;
+  const axisMax = lastBucket ? lastBucket.toMs : 0;
+  // 分位数在直方图横轴上的落点（%）；null 时不渲染标线
+  const markerPct = (v: number | null) => (v != null && axisMax > 0 ? Math.min(100, (v / axisMax) * 100) : null);
+  const p50Pct = markerPct(data?.p50 ?? null);
+  const p95Pct = markerPct(data?.p95 ?? null);
+  const successRate = data?.successRate ?? null;
+  const streamShare = data?.streamShare ?? null;
+
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white p-4">
+      <div className="flex items-baseline gap-1.5">
+        <Activity className="size-4 shrink-0 self-center text-cyan-600" aria-hidden />
+        <p className="shrink-0 text-sm font-medium text-stone-700">服务质量 · 近 {nHours} 小时</p>
+        {onWindowChange ? (
+          <span className="ml-auto shrink-0" role="group" aria-label="切换服务质量窗口长度">
+            {SLO_WINDOW_OPTIONS.map((o) => (
+              <button
+                key={o.hours}
+                type="button"
+                onClick={() => onWindowChange(o.hours)}
+                aria-pressed={windowHours === o.hours}
+                title={`按 ${o.hours} 小时窗口查看服务质量`}
+                className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                  windowHours === o.hours
+                    ? "bg-cyan-100 text-cyan-700"
+                    : "text-stone-400 hover:bg-stone-100 hover:text-stone-600"
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </span>
+        ) : null}
+      </div>
+
+      {/* v4.3.2：独立 API 拉取期间内容半透明脉冲（切窗口不闪整页 loading） */}
+      <div className={`mt-3 transition-opacity ${loading ? "animate-pulse opacity-50" : ""}`}>
+        {/* 分位数四格：P50 / P95 / P99 / 平均（口径 = 成功且有耗时记录的请求） */}
+        <div className="grid grid-cols-4 gap-2" role="list" aria-label="延迟分位数">
+          {([
+            { label: "P50", v: data?.p50 ?? null, cls: "text-stone-900" },
+            { label: "P95", v: data?.p95 ?? null, cls: "text-cyan-700" },
+            { label: "P99", v: data?.p99 ?? null, cls: "text-amber-600" },
+            { label: "平均", v: data?.avgMs ?? null, cls: "text-stone-900" },
+          ] as const).map((m) => (
+            <div
+              key={m.label}
+              role="listitem"
+              className="rounded-lg bg-stone-50 px-2 py-2 text-center"
+              title={`${m.label} 延迟（成功请求口径）`}
+            >
+              <p className="text-[10px] font-medium tracking-wide text-stone-500">{m.label}</p>
+              <p className={`mt-0.5 text-sm font-semibold tabular-nums sm:text-base ${m.v == null ? "text-stone-300" : m.cls}`}>
+                {m.v == null ? "—" : fmtLatency(m.v)}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        {/* 延迟分布直方图（线性等宽 20 桶；≥P95 桶染 amber；P50/P95 竖虚线标位） */}
+        {hist.length > 0 && (
+          <div className="mt-3">
+            <p className="text-[10px] font-medium tracking-wide text-stone-500">
+              延迟分布（{hist.length} 桶 · 桶宽 {fmtLatency(Math.max(1, Math.round((hist[1]?.fromMs ?? hist[0].toMs) - hist[0].fromMs)))}）
+            </p>
+            <div className="relative mt-1.5">
+              {/* P50 / P95 标线（绝对定位于直方图横轴比例处） */}
+              {p50Pct != null && (
+                <span
+                  className="pointer-events-none absolute bottom-0 top-0 z-10 border-l border-dashed border-stone-400/70"
+                  style={{ left: `${p50Pct}%` }}
+                  title={`P50 = ${fmtLatency(data?.p50 ?? 0)}`}
+                />
+              )}
+              {p95Pct != null && (
+                <span
+                  className="pointer-events-none absolute bottom-0 top-0 z-10 border-l border-dashed border-amber-500/70"
+                  style={{ left: `${p95Pct}%` }}
+                  title={`P95 = ${fmtLatency(data?.p95 ?? 0)}`}
+                />
+              )}
+              <div
+                className="flex h-14 items-end gap-[2px] sm:gap-[3px]"
+                role="img"
+                aria-label={`延迟分布直方图：${hist.length} 个桶，横轴 0 到 ${fmtLatency(axisMax)}`}
+              >
+                {hist.map((b, i) => {
+                  const bucketMid = (b.fromMs + b.toMs) / 2;
+                  const beyondP95 = (data?.p95 ?? Infinity) < bucketMid;
+                  const h = b.count > 0 ? Math.max(6, Math.round((b.count / maxCount) * 100)) : 2;
+                  return (
+                    <span
+                      key={i}
+                      title={`${fmtLatency(b.fromMs)} – ${fmtLatency(b.toMs)} · ${b.count} 次${beyondP95 ? " · 超出 P95" : ""}`}
+                      className={`block min-w-0 flex-1 rounded-[2px] transition-colors ${
+                        beyondP95 ? "bg-amber-400" : b.count > 0 ? "bg-cyan-400" : "bg-stone-200"
+                      }`}
+                      style={{ height: `${h}%` }}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+            {/* 横轴刻度：0 / P50 / P95 / max */}
+            <div className="mt-1 flex justify-between text-[10px] tabular-nums text-stone-400">
+              <span>0</span>
+              {p50Pct != null && p50Pct > 12 && p50Pct < 88 && (
+                <span className="text-stone-400">P50</span>
+              )}
+              {p95Pct != null && p95Pct > 12 && p95Pct < 92 && (
+                <span className="text-amber-500/80">P95</span>
+              )}
+              <span>{fmtLatency(axisMax)}</span>
+            </div>
+          </div>
+        )}
+
+        {/* 成功率 / 流式占比 / 样本徽标行 */}
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px]">
+          {successRate != null && (
+            <Badge
+              variant="outline"
+              className={`border-stone-200 bg-stone-50 font-medium tabular-nums ${sloRateClass(successRate)}`}
+              title={`成功 ${data?.okCount ?? 0} / 共 ${samples}（含错误请求）`}
+            >
+              成功率 {successRate}%
+            </Badge>
+          )}
+          {streamShare != null && (
+            <Badge
+              variant="outline"
+              className="border-stone-200 bg-stone-50 tabular-nums text-stone-600"
+              title={`流式请求 ${data?.streamCount ?? 0} 次`}
+            >
+              流式 {streamShare}%
+            </Badge>
+          )}
+          <Badge variant="outline" className="border-stone-200 bg-stone-50 tabular-nums text-stone-600">
+            {samples} 样本
+          </Badge>
+          {(data?.errCount ?? 0) > 0 && (
+            <Badge variant="outline" className="border-red-200 bg-red-50 tabular-nums text-red-600" title="窗口内非 2xx 请求数">
+              {data?.errCount} 错误
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      <p className="mt-2.5 border-t border-stone-100 pt-2 text-[10px] leading-relaxed text-muted-foreground">
+        分位数 / 直方图仅统计成功（2xx）且有耗时记录的请求（失败请求耗时语义混杂不拉偏分布）；成功率与流式占比含全部请求；数据来自滚动日志（5000 条上限，超高流量下长窗口可能截断）；样本 &lt;5 不出分位数、&lt;8 不出直方图。
+      </p>
+    </div>
+  );
+}
+
 /**
  * v4.2.1：余额可用天数外推（Task 32 顺延项落地）—— 纯前端复用余额快照序列。
  * 算法：carry-forward 填充后取首末已知点，净消耗速率 slope = (last - first) / 跨度天数；
@@ -1134,9 +1358,23 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
   const [mhWindow, setMhWindow] = React.useState<7 | 14 | 30>(7);
   // v4.2.4：Top 提供商排行窗口（7/14/30 天；share 语义随窗口联动自洽）
   const [tpWindow, setTpWindow] = React.useState<7 | 14 | 30>(7);
+  // v4.3.2：服务质量 SLO 窗口（1/6/24 小时；与 mh/tp 同范式走独立 insights API，切窗口不整页重载）
+  const [sloWindow, setSloWindow] = React.useState<1 | 6 | 24>(24);
   // v4.2.4：洞察独立数据（模型健康 + Top 提供商；主响应 7 天种子初始化，窗口切换/刷新由独立 API 更新）
   const [insights, setInsights] = React.useState<OverviewInsightsData | null>(null);
   const [insightsLoading, setInsightsLoading] = React.useState(false);
+  // v4.3.2：总览自动刷新（关 / 30 秒 / 60 秒；localStorage 持久化；页面不可见时跳过该轮并重置倒计时）
+  const [autoRefresh, setAutoRefresh] = React.useState<"off" | "30" | "60">("off");
+  const [nextRefreshIn, setNextRefreshIn] = React.useState(0);
+  React.useEffect(() => {
+    const saved = localStorage.getItem("uag_overview_autorefresh");
+    if (saved === "30" || saved === "60") setAutoRefresh(saved);
+  }, []);
+  const applyAutoRefresh = React.useCallback((mode: "off" | "30" | "60") => {
+    setAutoRefresh(mode);
+    localStorage.setItem("uag_overview_autorefresh", mode);
+    setNextRefreshIn(0);
+  }, []);
   // v3.4.0：一键清冷却操作反馈（内联轻提示，非报错；3s 自动消失）
   const [cdNotice, setCdNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
   // v3.6.0：余额历史快照（14 天窗口；静默拉取，失败不影响主视图）
@@ -1166,12 +1404,13 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
 
   // v4.2.4：洞察独立拉取 —— 切窗口只重拉模型健康/Top 提供商（两个 UsageDaily 轻量查询），
   // 页面其余数据（余额/账号/趋势等）不动；加载期间卡片内容半透明脉冲而非整页 loading。
+  // v4.3.2：追加 SLO（slo_hours；RequestLog 窗口聚合）同请求合并拉取。
   const loadInsights = React.useCallback(
-    async (mh: 7 | 14 | 30, tp: 7 | 14 | 30) => {
+    async (mh: 7 | 14 | 30, tp: 7 | 14 | 30, slo: 1 | 6 | 24) => {
       setInsightsLoading(true);
       try {
         const d = await apiGet<OverviewInsightsData>(
-          `/api/console/overview/insights?mh_days=${mh}&tp_days=${tp}`
+          `/api/console/overview/insights?mh_days=${mh}&tp_days=${tp}&slo_hours=${slo}`
         );
         setInsights(d);
       } catch {
@@ -1184,18 +1423,19 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
   );
   // 挂载/切窗口 → 独立拉取（与主 load 并行，互不阻塞）
   React.useEffect(() => {
-    void loadInsights(mhWindow, tpWindow);
-  }, [loadInsights, mhWindow, tpWindow]);
+    void loadInsights(mhWindow, tpWindow, sloWindow);
+  }, [loadInsights, mhWindow, tpWindow, sloWindow]);
   // 主响应到达且洞察仍为空（首次挂载）→ 用 7 天种子即时渲染，随后被独立拉取的同口径数据替换
   React.useEffect(() => {
-    if (data && !insights && mhWindow === 7 && tpWindow === 7) {
+    if (data && !insights && mhWindow === 7 && tpWindow === 7 && sloWindow === 24) {
       setInsights({
         model_health: data.model_health ?? { days: [], models: [] },
         top_providers_7d: data.top_providers_7d || [],
         top_providers_window_days: 7,
+        slo: data.slo,
       });
     }
-  }, [data, insights, mhWindow, tpWindow]);
+  }, [data, insights, mhWindow, tpWindow, sloWindow]);
 
   // v3.6.0：余额趋势独立拉取（quiet；接口/数据缺失时优雅降级为无 footer）
   // v4.2.3b：抽出为可重拉回调 —— 刷新按钮同步重拉（旧实现仅组件挂载时拉取一次，
@@ -1208,6 +1448,37 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
   React.useEffect(() => {
     loadBalTrend();
   }, [loadBalTrend]);
+
+  // v4.3.2：总览自动刷新 —— 秒级倒计时驱动（关 / 30 秒 / 60 秒）。
+  // 细节：①倒计时走 ref（interval 回调里直接副作用，避免 setState updater 内二次 setState 的
+  // StrictMode 双调用风险）；②页面不可见（visibilityState）时跳过该轮并重置倒计时
+  //（后台标签页不空转刷请求，切回来也不会瞬间连刷）；③窗口参数变化会重建 interval 重置倒计时。
+  const nextRefreshRef = React.useRef(0);
+  React.useEffect(() => {
+    if (autoRefresh === "off") {
+      nextRefreshRef.current = 0;
+      setNextRefreshIn(0);
+      return;
+    }
+    const seconds = Number(autoRefresh);
+    nextRefreshRef.current = seconds;
+    setNextRefreshIn(seconds);
+    const t = window.setInterval(() => {
+      nextRefreshRef.current -= 1;
+      if (nextRefreshRef.current <= 0) {
+        nextRefreshRef.current = seconds;
+        setNextRefreshIn(seconds);
+        if (document.visibilityState === "visible") {
+          void load();
+          loadBalTrend();
+          void loadInsights(mhWindow, tpWindow, sloWindow);
+        }
+      } else {
+        setNextRefreshIn(nextRefreshRef.current);
+      }
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [autoRefresh, load, loadBalTrend, loadInsights, mhWindow, tpWindow, sloWindow]);
 
   // v3.6.0：聚合余额逐日序列 —— 各账号 carry-forward 后按日求和
   //（存量指标语义：账号当日无快照沿用最近已知值，避免「没测=归零」的错误断崖）
@@ -1304,10 +1575,53 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
         title="总览"
         description="聚合余额、账号与路由状态、上游缓存命中率"
         actions={
-          <Button variant="outline" size="sm" onClick={() => { void load(); loadBalTrend(); void loadInsights(mhWindow, tpWindow); }} disabled={loading}>
-            <RefreshCw className={loading ? "animate-spin" : undefined} />
-            刷新
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* v4.3.2：自动刷新（关/30s/60s；localStorage 持久化；页面不可见时暂停轮询） */}
+            <span
+              className="inline-flex items-center rounded-md border border-stone-200 bg-white p-0.5"
+              role="group"
+              aria-label="总览自动刷新间隔"
+            >
+              {([
+                { v: "off", label: "关" },
+                { v: "30", label: "30s" },
+                { v: "60", label: "60s" },
+              ] as const).map((o) => (
+                <button
+                  key={o.v}
+                  type="button"
+                  onClick={() => applyAutoRefresh(o.v)}
+                  aria-pressed={autoRefresh === o.v}
+                  title={
+                    o.v === "off"
+                      ? "关闭自动刷新"
+                      : `每 ${o.v} 秒自动刷新总览（页面不可见时暂停；localStorage 持久化）`
+                  }
+                  className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+                    autoRefresh === o.v
+                      ? "bg-emerald-100 text-emerald-700"
+                      : "text-stone-400 hover:bg-stone-100 hover:text-stone-600"
+                  }`
+                }
+              >
+                {o.label}
+              </button>
+              ))}
+            </span>
+            {autoRefresh !== "off" && (
+              <span
+                className="text-xs tabular-nums text-muted-foreground"
+                aria-live="polite"
+                title={`下次自动刷新倒计时（每 ${autoRefresh} 秒）`}
+              >
+                {nextRefreshIn}s 后自动刷新
+              </span>
+            )}
+            <Button variant="outline" size="sm" onClick={() => { void load(); loadBalTrend(); void loadInsights(mhWindow, tpWindow, sloWindow); }} disabled={loading}>
+              <RefreshCw className={loading ? "animate-spin" : undefined} />
+              刷新
+            </Button>
+          </div>
         }
       />
 
@@ -1455,6 +1769,15 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
           clickHint={onTodayClick && data.today_stats && data.today_stats.requests > 0 ? "点击查看今日请求日志 →" : undefined}
         />
       </div>
+
+      {/* v4.3.2：服务质量 SLO 卡（延迟分位数 / 成功率 / 流式占比 / 延迟分布直方图；
+          窗口切换走独立 insights API 不整页重载；置于趋势卡之前 —— 运维视角第一优先级） */}
+      <SloCard
+        data={insights?.slo}
+        windowHours={sloWindow}
+        onWindowChange={setSloWindow}
+        loading={insightsLoading}
+      />
 
       {/* v3.0.4：近 24h 逐小时趋势（v3.0.5：柱可点击跳转该小时日志） */}
       {(data.trend24h?.length || 0) > 0 && <Trend24hCard buckets={data.trend24h || []} onHourClick={onHourClick} />}

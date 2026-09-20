@@ -8,7 +8,7 @@ import { getConfig } from "@/lib/gateway/config/configService";
 import { getProviderFleet } from "@/lib/gateway/core/fleet";
 import { VERSION } from "@/lib/gateway/config/configService";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
-import { computeModelHealthData, normalizeWindowDays } from "@/lib/console/overviewInsights";
+import { computeModelHealthData, computeSloData, normalizeWindowDays } from "@/lib/console/overviewInsights";
 
 /** v3.9.0：Top 模型行结构（与 types.ts TopModelRow 同形；API 内部局部定义避免跨层依赖） */
 interface TopModelRowShape {
@@ -235,6 +235,10 @@ export async function GET(request: NextRequest) {
   const mhWindow = mhDaysParam !== null ? normalizeWindowDays(mhDaysParam) : 7;
   const modelHealth = await computeModelHealthData(mhWindow);
 
+  // v4.3.2：服务质量 SLO 种子（默认 24h 窗口；前端切窗口由独立 insights API 承接）——
+  // 延迟分位数 / 成功率 / 流式占比 / 延迟分布直方图（RequestLog 聚合）。
+  const slo = await computeSloData(24);
+
   // v3.9.1：上游前缀缓存命中统计改为 RequestLog 持久聚合（修复「命中率一直 0%」）。
   // 旧实现 snapshotCacheStats() 为进程内存计数，dev 重启/HMR 后清零导致页面恒显 0%；
   // 新口径：分母 = 上游报告了精确 usage 的请求（usageExact=true），分子 = 其中 cachedTokens>0 者
@@ -329,6 +333,8 @@ export async function GET(request: NextRequest) {
     top_providers_7d: topProviders,
     /** v4.2.3：模型健康 sparkline（UsageDaily 模型维度聚合，跨滚动窗口持久；Top 6 按请求数） */
     model_health: modelHealth,
+    /** v4.3.2：服务质量 SLO（近 24h 种子；切窗口走独立 insights API） */
+    slo,
     last_checkin: lastCheckinLog
       ? {
           time: lastCheckinLog.createdAt.toISOString(),

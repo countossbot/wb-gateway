@@ -1,5 +1,5 @@
 // 路由试跑对话框（v4.3.1 控制台调试工具）——「模型路由」页每行的 FlaskConical 按钮打开。
-// 左侧：请求构造（路由/协议/系统提示/用户消息/参数/流式开关）；
+// 左侧：请求构造（路由/协议/系统提示/用户消息/参数/流式开关）+ 最近试跑历史（v4.3.2）；
 // 右侧：结果面板（状态/耗时/落点徽标/候选链时间线/响应体查看）。
 // 流式模式：fetch 增量读取 SSE，实时渲染 token 输出（含 ping 保活计数与原始帧查看）。
 "use client";
@@ -14,12 +14,15 @@ import {
   Circle,
   CircleStop,
   FlaskConical,
+  History as HistoryIcon,
   Loader2,
   OctagonX,
   Play,
+  RotateCcw,
   Snowflake,
   StopCircle,
   Timer,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,6 +34,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { CopyButton } from "@/components/console/ui";
 import { authHeaders, errMessage } from "@/lib/console/api";
+import { relativeTime } from "@/lib/console/format";
 import type { RouteRow, RouteTestResult, RouteTestTraceEvent, RouteTestUsage } from "@/lib/console/types";
 
 /** 手动输入哨兵值：与候选编辑器同款约定（冒号不在模型名字符集内） */
@@ -61,6 +65,59 @@ const DEFAULT_FORM: TestFormState = {
 };
 
 type BodyView = "pretty" | "text" | "sse";
+
+// ---- v4.3.2：最近试跑历史（localStorage 持久化，跨开合/跨会话；上限 8 条 FIFO）----
+
+interface RouteTestHistoryEntry {
+  id: string;
+  /** 完成时刻（epoch ms） */
+  at: number;
+  /** 该次试跑的完整表单参数（「同参数重跑」恢复用） */
+  form: TestFormState;
+  status: number | null;
+  latencyMs: number | null;
+  /** 流式总时长（非流式缺省） */
+  totalMs?: number | null;
+  /** 失败/中止原因 */
+  errorText?: string;
+  trace: RouteTestTraceEvent[];
+  hit?: { provider?: string; model?: string; account?: string | null; fallback: boolean } | null;
+  usage?: RouteTestUsage | null;
+  sseEvents?: number;
+  /** 流式聚合文本（截断 2KB） */
+  streamText?: string;
+  /** 非流式响应体 JSON 序列化截断（4KB） */
+  bodyPreview?: string;
+}
+
+const HISTORY_KEY = "uag_route_test_history";
+const HISTORY_MAX = 8;
+
+function readHistory(): RouteTestHistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (!raw) return [];
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((e): e is RouteTestHistoryEntry => !!e && typeof (e as RouteTestHistoryEntry).id === "string")
+      .slice(0, HISTORY_MAX);
+  } catch {
+    return [];
+  }
+}
+
+function persistHistory(entries: RouteTestHistoryEntry[]) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, HISTORY_MAX)));
+  } catch {
+    /* 配额满等异常静默（历史属增强体验，不阻断主流程） */
+  }
+}
+
+function newHistoryId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 // ---- SSE 帧解析（OpenAI delta / Anthropic text_delta 双协议）----
 function extractSseDelta(obj: unknown, protocol: "openai" | "anthropic"): string {
@@ -243,6 +300,33 @@ export function RouteTestDialog({
   const [bodyView, setBodyView] = React.useState<BodyView>("pretty");
   const [rawSse, setRawSse] = React.useState<string[]>([]);
   const abortRef = React.useRef<AbortController | null>(null);
+  // v4.3.2：最近试跑历史（localStorage 持久；成功/失败/手动停止均记录，供回看与同参数重跑）
+  const [history, setHistory] = React.useState<RouteTestHistoryEntry[]>(() => readHistory());
+  const [historyOpen, setHistoryOpen] = React.useState(false);
+  const [historyDetailId, setHistoryDetailId] = React.useState("");
+
+  /** 追加一条试跑历史（FIFO 截断；localStorage 同步持久化） */
+  const pushHistory = React.useCallback((entry: RouteTestHistoryEntry) => {
+    setHistory((h) => {
+      const next = [entry, ...h].slice(0, HISTORY_MAX);
+      persistHistory(next);
+      return next;
+    });
+  }, []);
+
+  const clearHistory = React.useCallback(() => {
+    setHistory([]);
+    setHistoryDetailId("");
+    persistHistory([]);
+  }, []);
+
+  /** 「同参数重跑」：恢复该次的完整表单并折叠详情（用户点「发送试跑」执行） */
+  const restoreForm = React.useCallback((e: RouteTestHistoryEntry) => {
+    setForm({ ...e.form });
+    setHistoryDetailId("");
+    setFormError("");
+    setHistoryOpen(false);
+  }, []);
 
   // 打开时：预选模型 + 初始化视图态
   React.useEffect(() => {
@@ -298,6 +382,9 @@ export function RouteTestDialog({
     const timer = window.setInterval(() => setElapsed(Date.now() - t0), 100);
     const ac = new AbortController();
     abortRef.current = ac;
+    // v4.3.2：本轮流式路径是否已在流内 finally 记录历史（外层 catch 补录前检查，避免双记）
+    let streamHistoryRecorded = false;
+    const historyForm: TestFormState = { ...form, model, maxTokens: String(maxTokens) };
     try {
       const res = await fetch("/api/console/routes/test", {
         method: "POST",
@@ -353,6 +440,8 @@ export function RouteTestDialog({
         let usage: RouteTestUsage | undefined;
         let rawFrames: string[] = [];
         let lastPaint = 0;
+        // v4.3.2：流中断原因（正常结束时为空串；进 finally 统一写入历史）
+        let streamError = "";
         const paint = (force = false) => {
           // 节流实时渲染（≥120ms 一次）：token 增量立即可见，又不至于每帧触发 React 更新
           const now = Date.now();
@@ -404,6 +493,12 @@ export function RouteTestDialog({
             }
           }
           if (buf.trim()) consume(buf);
+        } catch (streamErr) {
+          // v4.3.2：流中断/熔断/手动停止 —— 记录中断原因后统一收尾（不再向外抛，避免双重报错）
+          streamError =
+            streamErr instanceof Error && streamErr.name === "AbortError"
+              ? "已手动停止"
+              : errMessage(streamErr);
         } finally {
           // 流结束（正常 / 中断 / 熔断统一收尾）：聚合增量结果一次性落位
           setResult((r) =>
@@ -421,6 +516,25 @@ export function RouteTestDialog({
           );
           setRawSse(rawFrames);
           setElapsed(Date.now() - t0);
+          // v4.3.2：流式历史落位（含部分输出的中断记录；streamText 截断 2KB）
+          const successEv = trace.find((ev) => ev.type === "success");
+          pushHistory({
+            id: newHistoryId(),
+            at: Date.now(),
+            form: historyForm,
+            status: base.status,
+            latencyMs: base.latencyMs,
+            totalMs: Date.now() - t0,
+            errorText: streamError || undefined,
+            trace,
+            hit: successEv
+              ? { provider: successEv.provider, model: successEv.model, account: base.meta.account, fallback: base.meta.fallback }
+              : null,
+            usage: usage ?? null,
+            sseEvents: events,
+            streamText: text.slice(0, 2048),
+          });
+          streamHistoryRecorded = true;
         }
       } else {
         // ---- 非流式：JSON 信封 ----
@@ -429,13 +543,46 @@ export function RouteTestDialog({
         if (!env.ok) throw new Error(env.error || `试跑失败（HTTP ${res.status}）`);
         const data = env.data;
         if (!data) throw new Error("服务端返回数据缺失");
-        setResult({ ...data, usage: extractJsonUsage(data.body) });
+        const usageFinal = extractJsonUsage(data.body);
+        setResult({ ...data, usage: usageFinal });
+        // v4.3.2：非流式历史落位（响应体序列化截断 4KB）
+        const successEv = (data.trace || []).find((ev) => ev.type === "success");
+        let bodyPreview: string | undefined;
+        try {
+          bodyPreview = data.body === undefined || data.body === null ? undefined : JSON.stringify(data.body, null, 2)?.slice(0, 4096);
+        } catch {
+          bodyPreview = undefined;
+        }
+        pushHistory({
+          id: newHistoryId(),
+          at: Date.now(),
+          form: historyForm,
+          status: data.status,
+          latencyMs: data.latencyMs,
+          trace: data.trace || [],
+          hit: successEv
+            ? { provider: successEv.provider, model: successEv.model, account: data.meta?.account ?? null, fallback: !!data.meta?.fallback }
+            : null,
+          usage: usageFinal ?? null,
+          bodyPreview,
+        });
       }
     } catch (e) {
-      if ((e as Error).name === "AbortError") {
-        setError("已手动停止（上游连接随之中断）");
-      } else {
-        setError(errMessage(e));
+      const abortMsg = (e as Error).name === "AbortError";
+      const msg = abortMsg ? "已手动停止（上游连接随之中断）" : errMessage(e);
+      setError(msg);
+      // v4.3.2：非流式失败 / 连接失败补录历史（流式部分数据已在流内 finally 记录，不双记）
+      if (!streamHistoryRecorded) {
+        pushHistory({
+          id: newHistoryId(),
+          at: Date.now(),
+          form: historyForm,
+          status: null,
+          latencyMs: null,
+          errorText: msg,
+          trace: [],
+          hit: null,
+        });
       }
     } finally {
       window.clearInterval(timer);
@@ -631,6 +778,175 @@ export function RouteTestDialog({
               <Timer className="mr-0.5 inline size-3" />
               试跑走真实链路：上游正常计费，计入运行日志（密钥名 <code className="font-mono">console-test</code>）与今日统计。
             </p>
+
+            {/* v4.3.2：最近试跑历史（localStorage 持久化，跨开合/跨会话；上限 8 条 FIFO；
+                成功/失败/手动停止均记录；点击条目展开回看（trace 时间线 + 输出预览），RotateCcw 同参数重跑） */}
+            <div className="rounded-lg border border-stone-200">
+              <div className="flex items-center gap-1.5 border-b border-stone-100 px-3 py-2">
+                <HistoryIcon className="size-3.5 shrink-0 text-stone-400" aria-hidden />
+                <button
+                  type="button"
+                  onClick={() => setHistoryOpen((o) => !o)}
+                  aria-expanded={historyOpen}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                >
+                  <span className="text-[11px] font-medium text-stone-600">最近试跑</span>
+                  {history.length > 0 && (
+                    <Badge variant="outline" className="h-4 shrink-0 px-1 text-[9px] tabular-nums text-stone-500">
+                      {history.length}
+                    </Badge>
+                  )}
+                  <ChevronRight
+                    className={`ml-auto size-3.5 shrink-0 text-stone-400 transition-transform ${historyOpen ? "rotate-90" : ""}`}
+                    aria-hidden
+                  />
+                </button>
+                {history.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={clearHistory}
+                    title="清空试跑历史（仅本机浏览器记录，不影响运行日志）"
+                    aria-label="清空试跑历史"
+                    className="shrink-0 rounded p-1 text-stone-400 transition-colors hover:bg-red-50 hover:text-red-500"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                )}
+              </div>
+              {historyOpen && (
+                <div className="max-h-80 overflow-y-auto">
+                  {history.length === 0 ? (
+                    <p className="px-3 py-3 text-[10px] leading-relaxed text-stone-400">
+                      暂无试跑记录。完成一次试跑后，最近 8 次将保留在本机浏览器（跨会话持久），可随时回看候选链与输出。
+                    </p>
+                  ) : (
+                    <ul className="divide-y divide-stone-50">
+                      {history.map((h) => {
+                        const isErr = h.status === null;
+                        const successEv = h.trace.find((ev) => ev.type === "success");
+                        const expanded = historyDetailId === h.id;
+                        return (
+                          <li key={h.id}>
+                            {/* 摘要行：状态 pill + 模型 + 相对时间 */}
+                            <div className="flex items-center gap-1.5 px-3 py-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setHistoryDetailId((cur) => (cur === h.id ? "" : h.id))}
+                                aria-expanded={expanded}
+                                className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-stone-50"
+                                title={expanded ? "收起详情" : "展开该次试跑详情（候选链时间线 + 输出预览）"}
+                              >
+                                <span
+                                  className={`inline-flex shrink-0 items-center rounded border px-1 py-px text-[9px] font-semibold tabular-nums ${
+                                    isErr
+                                      ? "border-red-200 bg-red-50 text-red-600"
+                                      : statusPillClass(h.status ?? 0)
+                                  }`}
+                                >
+                                  {isErr ? "ERR" : h.status}
+                                </span>
+                                <span className="min-w-0 truncate font-mono text-[10px] text-stone-700">{h.form.model}</span>
+                                {h.form.stream && (
+                                  <Badge variant="outline" className="h-3.5 shrink-0 px-1 text-[8px] text-cyan-700">
+                                    流式
+                                  </Badge>
+                                )}
+                                <span className="ml-auto shrink-0 text-[9px] text-stone-400" title={new Date(h.at).toLocaleString()}>
+                                  {relativeTime(new Date(h.at).toISOString())}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => restoreForm(h)}
+                                title="以该次参数回填表单（回填后点「发送试跑」重跑）"
+                                aria-label={`以 ${h.form.model} 的该次参数回填表单`}
+                                className="shrink-0 rounded p-1 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600"
+                              >
+                                <RotateCcw className="size-3" />
+                              </button>
+                            </div>
+                            {/* 展开详情：元信息徽标行 + trace 时间线 + 输出预览 */}
+                            {expanded && (
+                              <div className="space-y-1.5 px-3 pb-2.5 pt-0.5">
+                                <div className="flex flex-wrap items-center gap-1 text-[9px]">
+                                  <Badge variant="outline" className="h-4 px-1 text-stone-500">
+                                    {h.form.protocol === "openai" ? "OpenAI" : "Anthropic"}
+                                  </Badge>
+                                  {h.latencyMs != null && (
+                                    <Badge variant="outline" className="h-4 px-1 tabular-nums text-stone-500">
+                                      {h.totalMs != null ? `首字节 ${h.latencyMs}ms · 总 ${h.totalMs}ms` : `耗时 ${h.latencyMs}ms`}
+                                    </Badge>
+                                  )}
+                                  {successEv && (
+                                    <Badge variant="outline" className="h-4 max-w-36 truncate px-1 text-emerald-700" title={`${successEv.provider} / ${successEv.model}`}>
+                                      {providerName(successEv.provider)}
+                                      <ChevronRight className="size-2.5" />
+                                      <code className="font-mono">{successEv.model}</code>
+                                    </Badge>
+                                  )}
+                                  {h.hit?.account && (
+                                    <Badge variant="outline" className="h-4 max-w-28 truncate px-1 text-violet-700" title={`落点账号 ${h.hit.account}`}>
+                                      账号 {h.hit.account}
+                                    </Badge>
+                                  )}
+                                  {h.hit?.fallback && (
+                                    <Badge variant="outline" className="h-4 px-1 border-amber-300 bg-amber-50 text-amber-700">
+                                      故障转移
+                                    </Badge>
+                                  )}
+                                  {h.usage && (h.usage.input != null || h.usage.output != null) && (
+                                    <Badge variant="outline" className="h-4 px-1 tabular-nums text-stone-500">
+                                      ↑{h.usage.input ?? "?"} / ↓{h.usage.output ?? "?"}{h.usage.cached ? `（缓存 ${h.usage.cached}）` : ""}
+                                    </Badge>
+                                  )}
+                                  {h.sseEvents != null && h.sseEvents > 0 && (
+                                    <Badge variant="outline" className="h-4 px-1 tabular-nums text-stone-500">
+                                      SSE {h.sseEvents} 帧
+                                    </Badge>
+                                  )}
+                                </div>
+                                {h.errorText && (
+                                  <p className="rounded border border-red-100 bg-red-50/70 px-2 py-1 text-[10px] text-red-600" role="note">
+                                    {h.errorText}
+                                  </p>
+                                )}
+                                {h.trace.length > 0 && (
+                                  <div className="rounded border border-stone-100">
+                                    <ScrollArea className="max-h-32">
+                                      <ul className="divide-y divide-stone-50 px-2 py-0.5">
+                                        {h.trace.map((ev, i) => (
+                                          <TraceRow key={`${ev.type}-${i}-${ev.t}`} ev={ev} providerName={providerName} />
+                                        ))}
+                                      </ul>
+                                    </ScrollArea>
+                                  </div>
+                                )}
+                                {h.streamText != null && h.streamText !== "" && (
+                                  <div>
+                                    <p className="text-[9px] font-medium text-stone-400">输出预览（截断）</p>
+                                    <pre className="mt-0.5 max-h-24 overflow-y-auto whitespace-pre-wrap break-all rounded border border-stone-100 bg-stone-50/60 px-2 py-1 font-mono text-[9px] leading-relaxed text-stone-600">
+                                      {h.streamText}
+                                    </pre>
+                                  </div>
+                                )}
+                                {h.bodyPreview != null && h.bodyPreview !== "" && (
+                                  <div>
+                                    <p className="text-[9px] font-medium text-stone-400">响应体（截断）</p>
+                                    <pre className="mt-0.5 max-h-24 overflow-y-auto whitespace-pre-wrap break-all rounded border border-stone-100 bg-stone-50/60 px-2 py-1 font-mono text-[9px] leading-relaxed text-stone-600">
+                                      {h.bodyPreview}
+                                    </pre>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* ---------- 右：结果面板 ---------- */}
