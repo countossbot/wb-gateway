@@ -1,8 +1,14 @@
 import type { ProviderAdapter, ProviderConfig, ChatPayload, CallOptions, BalanceResult } from "../core/types";
 import { fetchWithProxy } from "../proxy/proxyAgent";
+import { poolAccounts, callWithAccountPool } from "./standardPool";
 
 // OpenAI 兼容端点适配器（OpenRouter / DeepSeek 官方 / 硅基流动等）。
 // 全部出站请求走 fetchWithProxy（全局代理作用域：提供商调用受代理覆盖/bypass 控制）。
+//
+// v4.2.2：多账号池轮换 —— 控制台账号页为本提供商添加的账号（credentials.apiKey）
+// 自动进入引擎调度：会话粘性 / round-robin / 冷却退避（SQLite 持久化） / 失败切换，
+// 响应注入 X-Gateway-Account 供日志与排障定位落点。无账号池时回退 provider 级
+// config.apiKey 单密钥直发（v4.2.1 行为零变化）。
 export class OpenAIStandardProvider implements ProviderAdapter {
   id: string;
   name: string;
@@ -26,23 +32,34 @@ export class OpenAIStandardProvider implements ProviderAdapter {
 
   async callChat(payload: ChatPayload, options: CallOptions = {}): Promise<Response> {
     const url = `${this.baseUrl}/chat/completions`;
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${this.apiKey}`,
-      Connection: "keep-alive",
-      ...((this.config.defaultHeaders as Record<string, string>) || {}),
-    };
+    const defaultHeaders = (this.config.defaultHeaders as Record<string, string>) || {};
 
-    return await fetchWithProxy(
-      url,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: options.signal ?? undefined,
-      },
-      { providerId: this.id }
-    );
+    const makeRequest = (apiKey: string): Promise<Response> =>
+      fetchWithProxy(
+        url,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            Connection: "keep-alive",
+            ...defaultHeaders,
+          },
+          body: JSON.stringify(payload),
+          signal: options.signal ?? undefined,
+        },
+        { providerId: this.id }
+      );
+
+    return await callWithAccountPool({
+      providerId: this.id,
+      accounts: poolAccounts(this.config),
+      fallbackApiKey: this.apiKey,
+      payload,
+      options,
+      makeRequest,
+      label: `OpenAI:${this.id}`,
+    });
   }
 
   async getBalance(): Promise<BalanceResult> {

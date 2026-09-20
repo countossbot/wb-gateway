@@ -8,6 +8,7 @@ import {
   Download,
   FileJson,
   FileUp,
+  KeyRound,
   Loader2,
   Pencil,
   Plus,
@@ -532,6 +533,30 @@ export function AccountsModule({ onViewLogs }: { onViewLogs?: (target: { provide
                 <Badge variant="secondary" className="text-[11px]">
                   {g.accounts.length} 个账号
                 </Badge>
+                {/* v4.2.2：标准适配器密钥池轮换徽标（openai/anthropic + ≥1 个启用且带 key 的账号） */}
+                {(g.provider.type === "openai" || g.provider.type === "anthropic") &&
+                  g.accounts.filter((a) => a.enabled !== false && a.credentials?.apiKey).length > 0 && (
+                    <TooltipProvider delayDuration={150}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Badge
+                            variant="outline"
+                            className="gap-1 border-violet-200 bg-violet-50 text-violet-700 text-[11px] font-medium"
+                          >
+                            <KeyRound className="size-3" aria-hidden="true" />
+                            密钥池轮换 · {g.accounts.filter((a) => a.enabled !== false && a.credentials?.apiKey).length}
+                          </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-64 text-left leading-relaxed">
+                          <p className="font-medium">多密钥调度已启用</p>
+                          <p className="mt-1 text-stone-500">
+                            请求在启用账号间轮换：同一会话粘性落点（上游缓存保热）· 无标识时轮转 · 429/402/401
+                            冷却退避（SQLite 持久化）· 失败自动切换下一密钥。响应头 X-Gateway-Account 可见落点。
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
                 {/* v3.1.0：per-provider 余额徽标（workbuddy 家族）+ 独立刷新（穿透 fleet 60s 缓存） */}
                 {g.provider.type === "workbuddy" && g.accounts.length > 0 && (
                   <BalanceBadge

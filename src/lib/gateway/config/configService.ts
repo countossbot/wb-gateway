@@ -17,7 +17,7 @@ import { db } from "@/lib/db";
 import type { GatewayConfig, ProviderConfig, AccountConfig, RouteCandidateConfig, VirtualKeyEntry } from "../core/types";
 import { refreshRuntimeSettings } from "./runtimeSettings";
 
-export const VERSION = "4.2.1"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.2.1：总览三卡落地 —— 近 7 天 Top 提供商排行（UsageDaily 持久聚合）+ 模型健康 7 天 sparkline + 余额预计可用天数外推；中转表单错误固定 footer 上方）
+export const VERSION = "4.2.2"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.2.2：标准适配器多账号轮换 —— openai/anthropic 账号池进引擎调度（粘性/轮转/冷却退避/失败切换/X-Gateway-Account 落点上报），classify 新增 402 欠费惩罚；无池回退单密钥零变化）
 
 // ---- 默认路由表（等价保留原 getDefaultConfig 的 routes；用于读路径回填） ----
 export const DEFAULT_ROUTES: Record<string, RouteCandidateConfig[]> = {
