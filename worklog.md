@@ -1960,3 +1960,41 @@ Stage Summary:
 5. 试跑历史 entry 的 trace/body 截断存储（2KB/4KB）：超长响应只留预览——回看完整响应用运行日志；如需完整可在详情加「查看完整」跳转日志（暂无需求）
 6. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康 60/90 天窗口；UsageDaily 模型维度历史天回填工具
 7. mock-upstream（3040）保持运行供后续巡检复用；dev server v4.3.2 正常运行
+---
+Task ID: 47
+Agent: 主会话（Z.ai Code，持续迭代轮，trace: 1a0bc1e5e26e0a89-web-cron-review-202609201115）
+Task: 巡检 QA（全绿）→ 新功能开发「用量成本估算 Cost Estimation」（全新「钱」的维度，覆盖全站 6 个视图面）；版本 4.3.2 → 4.4.0
+
+Work Log:
+- 【巡检】dev server 存活（v4.3.2 基线 2 提供商/6 模型一致）；mock-upstream 3040 存活；git 工作树干净；agent-browser 8 页签遍历零 console/页面错误；dev.log 干净 → 项目稳定，进入功能开发
+- 【决策】确认用户提示中的遗留优先项全部完成（SSE 修复=Task 39、多账号轮换=Task 41 standardPool、外推/排行卡/sparkline=Task 41/42），当前顺延池仅剩低价值项（getBalance 池形态/60-90 天窗口——UsageDaily 仅 4 天数据，长窗口无意义）→ 自主选择全新能力维度：**成本估算**（UsageDaily 有日×提供商×密钥×模型四维 token 记账但无「钱」的视图）
+- 【Schema】prisma 新增 ModelPricing 表（model 唯一 + inputPerMTok/outputPerMTok/cachedPerMTok 三单价 $/1M tokens + updatedAt/updatedBy）；db push 增量零迁移风险；dev server 重启加载新 Prisma Client（Task 44 教训：不重启会 PrismaClientValidationError）
+- 【核心库】src/lib/console/pricing.ts：loadPricingMap/estimateRowCost（未配置单价 → null 保守不计价，绝不拍脑袋估值）/CostAgg 聚合口径/unpricedModels（近 30 天未计价模型 Top20 提示）；计价语义注释即契约：cost = Σ(tokens × 单价)/1M，cachedTokens 独立维度（Anthropic cache_read / OpenAI cached_tokens 均不含于 input）
+- 【API】/api/console/pricing GET（rows + unpricedModels 提示）/ PUT（整表保存语义：全量 upsert + 缺席行删除；校验模型名同路由正则/单价 0~100k/载荷 ≤200 行/重复拒绝；auditUpdate(setting/model-pricing) 审计留痕）
+- 【API 集成】usage/daily：原始行级 cost + 四维透视桶级 cost/priced/unpriced（模型维度逐行计价后归桶——不能由聚合 token 直接乘单价）；overview：cost 卡数据（今日/近 7 天/环比上期/逐日趋势/Top3 成本模型/pricingRows，复用已拉 todayRows+14 天 trend7Rows 仅新增一次单价表查询；Top 提供商种子行附成本）；insights computeTopProviders：窗口桶级成本（select 增 model 维度）；logs：行级 cost；日志 CSV 导出增「估算成本$」列（requestLog.ts，静态导入 pricing.ts，unpricedModels 里的动态 import 无循环依赖问题）
+- 【设置页】PricingSection 新组件（pricing-section.tsx 独立文件）：表格编辑（模型名+三单价+更新时间+删行）/加一行/整表保存+反馈（已保存 N 个模型单价，移除 M 条过期行）/批量粘贴导入（每行 model,input,output[,cached]，Tab/逗号分隔，#注释忽略，同名覆盖+无效行反馈——首轮发现 3 列行被误判无效的 UX 缺陷，修复为 3/4 列均可、3 列缓存缺省 0）/未计价模型 chips（amber 提示框+请求量徽标，点击补录，已配置的灰态禁用）；Section 组件抽到 settings-sections.tsx 共享（settings.tsx 同步改造复用）
+- 【总览】CostCard（lime 主题与现有 emerald/orange/teal/violet/rose/cyan 六色区分，Wallet 图标）：空态引导卡（未配置单价 → 虚线框+「前往设置 → 模型单价」引导，不渲染 0 美元误导数字）→ 数据态：今日/近 7 天双大数字卡（7 天卡 lime 底+环比 ↑↓ 徽标，上期 0 不出环比防 ↑∞）+ 逐日成本 MiniBars（lime 柱+峰值标注+未计价次数 tooltip）+ Top 成本模型 chips（首位 lime 高亮）+ 已计价/未计价（amber）徽标行 + 非计费口径脚注；usage 网关字符估算的 token 本身为折算值的二次估算说明在 title
+- 【用量透视】Tokens ⇄ 成本模式切换（lime 按钮组）+ 新增「按模型」Tab（API byModel 早已存在但 UI 从未暴露）：成本模式列变为 成本 $估算/已计价（未计价 +N amber 尾注）；头部摘要附估算合计；CSV 导出增成本列 + 按模型分区
+- 【密钥页】近 7 天用量列升级：MiniBars 下方新增「≈ $金额」7 天估算成本徽标（lime；未计价淡态 —），Tooltip 每日明细附当日成本
+- 【日志页】Token 用量列内新增行级「≈ $金额」徽标（lime，title 全公式：输入+输出+缓存 tokens × 对应单价）
+- 【前端共享】format.ts 新增 fmtUsd（$ + 智能小数位：<0.01 保 4 位微成本 / <1 保 3 位 / ≥1 保 2 位 / ≥1000 千分位）
+- 【e2e】tests/cost-estimate-e2e.ts 36/36 通过：A 空态清场+未计价提示；B PUT 定价回显；C 输入校验三拒（非法模型名/负单价/重复）；D 透视数学（byModel 行级/totals/byProvider 逐桶 1e-6 容差 + priced/unpriced 计数守恒 + 行级 rows null 语义）；E overview 数学（today/window7d/trend7d 逐日/topModels[0]/种子行）；F insights Top 提供商桶级数学；G 日志行级数学；H CSV 含成本列+列序（BOM 用 arrayBuffer 字节级验证——fetch text() 按 Encoding 规范剥离前导 BOM，测试断言初版踩坑）；I 审计落点（saved=2）；J 清理（PUT rows=[] 全删→空态恢复→healthz 等价）
+- 【UI 验证】agent-browser 全流程：总览空态卡（VLM 四项：虚线引导框/lime 钱包图标/估算徽标/无缺陷）→ 设置页 chip 点击补录（deepseek 行自动带入）→ 批量粘贴（3 列行 + 无效行反馈「已导入 2 行；1 行格式无效已忽略」）→ 填单价保存（「已保存 3 个模型单价」）→ 总览数据态成本卡（VLM 五项：双数字卡 $0.0036/$12.93/逐日柱+峰值 $12.92/Top 成本模型 chips/已计价未计价徽标+脚注，全过）→ 透视成本模式+按模型（VLM 五项全过：deepseek-v4.1-flash $12.92 406 已计价，未计价模型 — 与 +N）→ 密钥页成本徽标（VLM：≈$0.0016/≈$12.92）→ 日志页按模型筛选后 50 行成本徽标（VLM：≈$0.038 格式）→ 定价清空（deleted=3）→ 空态恢复 → 提交后终验 v4.4.0/成本卡/空态/登录态全对
+- 【agent-browser 怪癖沉淀（第三例）】Radix Tabs 的 TabsTrigger 用 JS el.click() 不激活（aria-selected 不变），物理 click（snapshot @ref）正常——与 Dialog footer 恰好相反（JS click 走通、物理点击落空）。QA 遇「点了没反应」先换物理/JS 另一种方式再怀疑应用
+- 【HMR 干扰排障】交互中编辑代码触发 Turbopack Fast Refresh 整页重载（console 里 6 条 React DevTools banner 为证）→ Collapsible/Tab 状态全部丢失伪装成「卡片自己折叠」bug。教训：UI 验证序列期间零编辑，编辑后先 reload 再交互
+- 【验证矩阵】lint 零错误；tsc src/ 零错误；8 页签回归零 console/页面错误；dev.log 无运行时错误；healthz v4.4.0 基线 2/6 前后一致；QA 截图按惯例清除；supervisor（/tmp/dev-supervisor.sh）本轮重建并运行（3000/3040 双服务 8s 自愈）
+- 【git】独立 commit（19 文件：schema+push、pricing 库/API、4 页面集成、e2e、VERSION 4.4.0）
+
+Stage Summary:
+- 全新能力维度「成本估算」从 schema 到 6 个视图面全链路落地并 36/36 e2e 数学验证；版本 4.4.0
+- 架构要点：计价核心单点（lib/console/pricing.ts，注释即契约）被 5 个 API 共享防口径漂移；未计价保守可见（null → 覆盖徽标，绝不估值）；桶级成本必须模型维度逐行计价后归桶；单价表查询每请求一次（≤200 行整表，开销可忽略）
+- 覆盖面：设置页定价管理（表格/粘贴/chips 补录）→ 总览成本卡（空态引导→数据态五区）→ 透视成本模式+按模型视图 → Top 提供商成本列 → 密钥 7 天成本 → 日志行级成本 + 两处 CSV 导出列
+- 排障资产沉淀：agent-browser Tabs JS-click 怪癖（第三例）+ HMR 整页重载伪装 UI bug + Encoding 规范 BOM 剥离（text() vs arrayBuffer）
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（ModelPricing 表自建自删三轮：e2e 2 行→UI 3 行→清空，最终交付态 pricingRows=0 空态引导；qa-cost-* 前缀清场防御未触发）
+2. 成本估算依赖管理员填写的单价真实性：网关不做价格校验（单位 $/1M 由文案与列头锚定）；如需更强防呆可在保存时对照常见公模价格区间给 warning（暂无必要）
+3. cachedPerMTok 默认 0 = 缓存命中不计价（多数中转口径）；若用户上游对 cache read 计费需手动填缓存单价——设置页 title 已说明
+4. UsageDaily model="" 历史行（v4.2.3 前）天然无法计价，归未计价口径（与模型维度统计同语义，一致）
+5. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康 60/90 天窗口（当前仅 4 天历史数据，暂无意义）；UsageDaily 模型维度历史天回填工具；成本估算可扩展「月度账单视图」（按密钥分组 + CSV 导出，等真实需求）
+6. supervisor 与 mock-upstream（3040）保持运行；本机 4GB 内存 OOM 风险常在（supervisor 是生命线）
