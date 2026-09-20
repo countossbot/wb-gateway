@@ -2189,3 +2189,28 @@ Stage Summary:
 2. 若日后仍想让 INTL 记独立使用端：合法路径是找国际站 Web 端（www.workbuddy.ai）的实测枚举值（需重新抓 HAR / bundle 分析），而不是自定义字符串
 3. 顺延项持续开放：标准适配器 getBalance 池形态（低优先级）；模型健康 60-90 天窗口；UsageDaily 历史天回填工具；GET /v1/responses/{id}
 4. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+
+---
+Task ID: 54
+Agent: 主会话（Z.ai Code，用户直派任务轮：源码打包下载）
+Task: 用户要求把项目源码打包下载（文件太大需剔除无用文件）—— 白名单 staging 打包 → public/downloads 静态托管 → 提供下载链接；无代码变更，版本维持 4.6.4
+
+Work Log:
+- 【大小分析】项目 1.7G：node_modules 1.2G / .next 375M / skills 61M（design-templates 49M，沙箱技能资产非项目文件）/ .git 51M / upload 10M（HAR 9.6M + 旧 tar）/ db 0.5M（SQLite 含账户凭证，敏感）
+- 【打包方式】白名单 rsync staging（杜绝敏感文件意外混入）→ zip 顶层目录 universal-ai-gateway-src/；保留：src / prisma(schema+init.sql) / mini-services / tests / examples / docs / scripts / .zscripts(去 dev.log+dev.pid) / public(仅 logo.svg+robots.txt，排除旧 tar) / 全套配置 / README / worklog / package.json / bun.lock / Caddyfile / docker-compose.yml / .gitignore / 新生成 .env.example（DATABASE_URL 示例 + RETRY_BASE_MS 注释）；剔除：node_modules / .next / .git / skills / db(凭证敏感) / upload / tool-results / .env / tsbuildinfo / dev.log / next-env.d.ts / download/ / 旧 tar / zip 自身
+- 【零泄漏校验】unzip -l 全清单扫描：custom.db / .env / node_modules / .git / upload / skills / tool-results / *.db-wal 等全部零命中
+- 【验证矩阵】体积 1.7G → 888K（308 文件，解压 2.5M）；HTTP 200（Content-Type: application/zip，Content-Length 909175，Accept-Ranges 断点续传）；端到端完整性：curl 下载 md5 与源 zip 一致（51b883c1…）+ unzip -t 308 文件全部可解压
+- 【部署】public/downloads/uag-src-v4.6.4.zip（Next.js 静态托管，先例：public/ 下 20260919 旧 tar 同方案）；.gitignore 追加 /public/downloads/（zip 产物不入库）
+- 【临时产物清理】/tmp staging 与下载测试文件全部删除
+
+Stage Summary:
+- 源码下载链接：/downloads/uag-src-v4.6.4.zip（888K，含完整可运行源码 + 搭建文档 + 交接 worklog；不含数据库/密钥/依赖，bun install + prisma init.sql 后即可复现）
+- 敏感边界确认：账户凭证仅存 db/custom.db（已排除）；.env 仅 DATABASE_URL 无密钥（仍排除，包内 .env.example 替代）；源码与 docs 无硬编码凭证（rg 全量扫描）
+- 版本维持 4.6.4（无代码变更）
+
+未解决问题与风险（下一阶段建议）:
+1. zip 含 bun.lock（bun 锁定）—— 若用户本地用 npm 恢复依赖，无 package-lock.json（项目沙箱内一直用 bun/npm 混跑，package.json engines 无限制；建议本地用 bun install 或 npm i 重新解析）
+2. 下载包不含 .git 历史（51M 剔除）—— 如需完整提交历史可另打 .git 单独包（未做，用户未要求）
+3. public/ 下 20260919 旧 tar（825K）保留未动（先例产物，已入库跟踪；新 zip 未包含它）
+4. 顺延项持续开放：计费 client 字段验证（CN「你好（网关测试）」/ INTL A/B 样本）；标准适配器 getBalance 池形态；GET /v1/responses/{id}
+5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
