@@ -2098,3 +2098,39 @@ Stage Summary:
 - 每流一条完整性日志（[Responses] stream end: response_id/terminal/last_event/seq/events/bytes/upstream_error/client_aborted/finish_frame/duration_ms），Codex 报 stream closed before response.completed 时可一键区分：terminal=none（客户端断）/ terminal=failed（上游断）/ terminal=completed 但客户端仍报错（中间层或 Codex 自身问题）
 - 停滞熔断语义维持（180s 零字节 → 合成 [DONE] → completed，与 chat 路径一致，finish_frame=false 诚实标注）
 - 遗留风险：①mock-upstream 热重载会污染 pump 状态（改 mock 后需 kill+setsid 重启）；②Bun.serve ctrl.error() 产生干净 chunked 终止（真断流只能靠 raw TCP 3041 复刻）；③GET /v1/responses/{id} 仍未实现（stateless 模式不需要）
+
+---
+Task ID: 51
+Agent: 主会话（Z.ai Code，用户直派任务轮：WorkBuddy 上游请求统一携带使用端标识）
+Task: 用户提供 www.workbuddy.cn HAR（55 请求/46 含响应体）的完整分析结论 —— 计费明细（/billing/meter/get-user-request-usage）的 client 字段由服务端按调用来源记账：Web 来源记 "WorkBuddy"，网关 CLI/plugin 通道（copilot.tencent.com）记 ""。用户要求：①修改前先创建回退点；②让网关 workbuddy 提供商所有上游请求携带该使用端标识；③修改后用 marbella 账户 + deepseek-v4.1-flash 发送一条消息（明确不验证计费效果）；版本 4.6.1 → 4.6.2
+
+Work Log:
+- 【HAR 实证（upload/www.workbuddy.cn.har 9.2MB，本轮直接解析原始文件）】
+  - www.workbuddy.cn 全部 12 个 XHR API 请求（billing/console/pay 系）统一携带 `x-client-platform: web` 头；页面导航与 /v2/report 埋点（text/plain）不携带
+  - 计费明细响应 10 条：UUID 前缀（Web 端 agent 会话，input 含 "<session>…" 包装，agentPurpose=conversation/conversation_topic，模型 deepseek-v4.1-flash）与 crb- 前缀 enhance-prompt 记录（hy3）均 client="WorkBuddy"；唯一 client="" 的记录是 crb- 前缀 glm-5.2「回复: 正常」（2026-09-20 09:39）—— 即无标识的 CLI 通道流量（网关直连 copilot.tencent.com 的请求形态）
+  - 关键推断：crb- 通道（copilot.tencent.com 同系后端）接受并记录 Web 来源标识（enhance-prompt 的 crb- 记录带 WorkBuddy）→ 网关同走 crb- 通道，补标识后有较大概率被记账为 WorkBuddy（效果未验证，用户明确要求不验证）
+- 【标识机制三层证据链（顺藤摸瓜到 Web 端 bundle）】
+  - ① 用户中心 bundle（download.codebuddy.cn/web/usercenter/…/config-BxH8baql.js，公开 CDN 直接拉取）：axios 请求拦截器 `e.headers["X-Client-Platform"]=te()` 对所有 API 请求注入；`te()` 返回 j="web"（浏览器）/ $="miniprogram"（微信小程序内嵌，sessionStorage growth-center-platform 标记判定）
+  - ② WorkBuddy 主站 bundle（/ 首页 24 个资源）与 webchat bundle（acc-…myqcloud.com/web/webchat，/chat 路由，title "Tencent Cloud CodeBuddy"）：均无 X-Client-Platform —— webchat 走 /console/chat/completions cookie 通道 + X-Request-Id/X-Message-Id/X-Conversation-Id 头组，说明标识机制属 workbuddy.cn Web 产品系（usercenter + agent 应用），webchat（CodeBuddy 产品）另一套
+  - ③ HAR 请求头全量扫描：全生态唯一的 client 标识头就是 x-client-platform（Chrome sec-ch-ua-platform / Google x-client-data 等均为浏览器/广告 SDK 噪声）
+- 【回退点（修改前）】git tag `rollback-pre-wb-client-tag` @ 1075b55（Task 50 完成态，v4.6.1）；回退命令 `git reset --hard rollback-pre-wb-client-tag`
+- 【修改】src/lib/gateway/providers/workbuddy/index.ts：
+  - 新增模块级常量 WORKBUDDY_CLIENT_PLATFORM = "web"（注释完整记录 HAR + bundle 证据链与记账语义）
+  - 四通道请求头全覆盖（全仓检索确认该文件是唯一发起 WorkBuddy 上游请求的位置；CN/INTL 同构代码路径自动覆盖两个 provider）：①attemptAccount.makeRequest（chat 主链路，X-Product 旁）②refreshAccessToken（token 续签）③getBalance.queryAccountBalance（余额）④doDailyCheckin.checkinSingle（签到）
+- 【测试消息（用户指定协议）】.zscripts 一次性脚本直接调用 provider.attemptAccount(marbella)（与生产 callChat→runFailover→attemptAccount 的上游请求构造代码完全同源 —— makeRequest 含新标识头；绕过账号排序保证落点确定为 marbella，绕过路由因 deepseek-v4.1-flash 路由首选 workbuddy-intl）：model=deepseek-v4.1-flash、stream:true、消息「你好（网关测试）」（与用户 Web 端实测的「你好」区分，方便日后在计费明细中辨认）
+  - 结果：HTTP 200（774ms），X-Gateway-Account: marbella，SSE 37 帧完整消费，finish_reason=stop，usage 9+37 tokens、credit=0，回复正常 —— 上游完全接受携带新标识头的请求（无 4xx/风控拒绝）
+  - 计费 client 字段效果未查询（用户明确「不验证是否正确」）
+- 【验证矩阵】lint 零错误；tsc src/ 零错误（examples/tests/skills 既有冲突维持 Task 44-50 口径）；healthz v4.6.2（HMR 生效）2 提供商/6 模型与修改前一致；dev.log 无运行时错误；.zscripts 两个临时脚本用后即删（工作树干净）
+- 【git】独立 commit（provider 四通道 + configService VERSION 4.6.2 + worklog 本节）
+
+Stage Summary:
+- 网关 → WorkBuddy 上游的全部请求（chat/token refresh/余额/签到，CN+INTL）现统一携带 `X-Client-Platform: web` 使用端标识 —— 与 WorkBuddy Web 端 axios 拦截器行为完全对齐（bundle 级实证），预期计费明细 client 字段从 "" 变为 "WorkBuddy"（未验证）
+- 证据链沉淀：client 标识机制 = x-client-platform 头（"web"/"miniprogram"），非 body 字段、非 User-Agent、非 Origin/Referer；crb- 记录带 WorkBuddy 证明 CLI 系后端也按该标识记账
+- 回退点：tag rollback-pre-wb-client-tag @ 1075b55（一条命令完整回退）
+
+未解决问题与风险（下一阶段建议）:
+1. 计费 client 字段是否真的变为 "WorkBuddy" 未验证（用户明确要求不验证）。后续验证方法：登录 www.workbuddy.cn → profile/plans-usage 计费明细，找 inputTrunc=「你好（网关测试）」、model=deepseek-v4.1-flash 的最新记录（requestId 应为 crb- 前缀），看 client 取值
+2. 若仍为空值的备选机制（按证据强度排序）：①标识可能仅 www.workbuddy.cn Web BFF 通道生效 —— 可试验 chat 端点换 https://www.workbuddy.cn/v2/chat/completions（需先探测该路径是否接受 Bearer plugin token，当前网关走 copilot.tencent.com CLI 通道）；②X-Product 头取值实验（现值 "SaaS"，Web 端不发送）；③webchat 通道头组（X-Request-Id/X-Message-Id/X-Conversation-Id，但那是 cookie 通道）
+3. 本轮消息内容「你好（网关测试）」已在 marbella 账户计费侧落地一条真实记录（credit=0，零消耗），用户日后核对时以此辨认
+4. 顺延项持续开放：标准适配器 getBalance 池形态（低优先级）；模型健康 60-90 天窗口；UsageDaily 历史天回填工具；GET /v1/responses/{id}
+5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在

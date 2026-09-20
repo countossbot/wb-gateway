@@ -39,6 +39,17 @@ export function retryDelayMs(): number {
 // - 只有「无 system 的简单调用」（curl / SDK 快速验证 / 脚本）原本必然 11128 失败，注入只赚不赔。
 const INTL_FALLBACK_SYSTEM = "You are a helpful assistant.";
 
+// v4.6.2：客户端平台标识 —— 对齐 WorkBuddy Web 端（用户要求：网关全部上游请求携带使用端标识）。
+// 实测证据（www.workbuddy.cn HAR + 用户中心 bundle config-BxH8baql.js 的 axios 请求拦截器
+// `e.headers["X-Client-Platform"]=te()`）：
+//   1) WorkBuddy Web 端所有 API 请求统一携带 X-Client-Platform 头，浏览器取值 "web"
+//（微信小程序内嵌取值 "miniprogram"）；
+//   2) 计费明细 /billing/meter/get-user-request-usage 返回的 client 字段由服务端按调用来源记账：
+//      Web 来源（带该标识）记为 "WorkBuddy"，无标识的 CLI/plugin 通道（copilot.tencent.com）记为 ""。
+// 网关对上游的全部请求（chat / token refresh / billing / checkin，CN 与 INTL 同构）统一携带该标识，
+// 使服务端记账侧可将网关流量归入「使用端 = WorkBuddy」。
+const WORKBUDDY_CLIENT_PLATFORM = "web";
+
 // 会话粘性键：优先客户端透传的会话头；回退 system+tools 指纹
 // （同一编码会话内稳定；跨会话碰撞只影响落点、不影响正确性）。
 // 取不到返回 null → orderAccounts 走纯轮询。只读不写。
@@ -253,6 +264,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
             Accept: "application/json",
             "X-Refresh-Token": refreshToken,
             "X-Auth-Refresh-Source": "workbuddy",
+            "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
             "User-Agent": ep.userAgent,
             Origin: ep.origin,
             Referer: ep.referer,
@@ -412,6 +424,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
         Authorization: `Bearer ${tk}`,
         "X-User-Id": userId,
         "X-Product": "SaaS",
+        "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
       };
       return await fetchWithProxy(
         ep.chat,
@@ -608,6 +621,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
             headers: {
               Authorization: `Bearer ${token}`,
               "X-User-Id": userId,
+              "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
               "User-Agent": ep.userAgent,
               Origin: ep.origin,
               Referer: ep.referer,
@@ -744,6 +758,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
             headers: {
               Authorization: `Bearer ${token}`,
               "X-User-Id": userId,
+              "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
               "Content-Type": "application/json",
               Accept: "application/json",
             },
