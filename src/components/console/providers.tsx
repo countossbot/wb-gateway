@@ -13,6 +13,7 @@ import {
   Eye,
   Gift,
   Globe,
+  KeyRound,
   Loader2,
   Pencil,
   Plus,
@@ -648,6 +649,17 @@ export function ProvidersModule({
                   <Badge variant="secondary" className="text-[11px]">
                     账号 {p.accountEnabledCount}/{p.accountCount}
                   </Badge>
+                  {/* v4.2.2：标准适配器多密钥轮换徽标（openai/anthropic + 启用账号 ≥1） */}
+                  {(p.type === "openai" || p.type === "anthropic") && p.accountEnabledCount > 0 && (
+                    <Badge
+                      variant="outline"
+                      className="gap-1 border-violet-200 bg-violet-50 text-[11px] font-medium text-violet-700"
+                      title="多密钥轮换：请求在启用账号间调度（会话粘性 + 轮转 + 冷却退避 + 失败切换），响应头 X-Gateway-Account 可见落点；未配账号时使用下方单密钥直连"
+                    >
+                      <KeyRound className="size-3" aria-hidden="true" />
+                      多密钥轮换
+                    </Badge>
+                  )}
                   {p.proxyOverride === "direct" && (
                     <Badge variant="outline" className="border-amber-200 bg-amber-50 text-[11px] text-amber-700">
                       <X className="size-3" /> 直连

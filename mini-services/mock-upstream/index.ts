@@ -4,10 +4,29 @@
 //     stream=true 返回 SSE（先 reasoning_content 思维链、再 content 正文、带 usage cached_tokens、[DONE] 收尾）
 //   GET /v1/models：返回模型目录
 //   可控失败：header X-Mock-Status: 429 → 返回 429（验证网关冷却与故障转移）
+//   v4.2.2 多账号池验证：
+//     Authorization: Bearer <key> 感知 —— key 前缀注入失败 / 指纹 echo / per-key 计数
+//     sk-bad-*   → 401 invalid_api_key（验证网关账号级切换 + 冷却）
+//     sk-quota-* → 429 quota exceeded（验证惩罚性退避）
+//     正常 key → 响应正文附 [key:后4位] 指纹（验证轮换落点均匀）
+//     GET /__stats 返回 { cancelledCount, perKey: {key: count} }
+//     POST /__stats/reset 清零（测试隔离）
 const PORT = 3040;
 
 // v4.2.0：网关停滞熔断 cancel 计数（GET /__stats 查询，验证级联取消生效）
 let cancelledCount = 0;
+// v4.2.2：per-key 请求计数（验证多账号轮换均匀性）
+const perKeyCounts = new Map<string, number>();
+
+function bearerKey(req: Request): string {
+  const auth = req.headers.get("authorization") || "";
+  const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
+  return m ? m[1].trim() : "";
+}
+
+function keyFingerprint(key: string): string {
+  return key.length > 4 ? key.slice(-4) : key || "none";
+}
 
 function stallMsCap(ms: number): number {
   return Number.isFinite(ms) ? Math.min(Math.max(ms, 0), 600_000) : 0;
@@ -32,16 +51,69 @@ const server = Bun.serve({
     }
 
     if (req.method === "GET" && url.pathname === "/__stats") {
-      return Response.json({ cancelledCount });
+      return Response.json({ cancelledCount, perKey: Object.fromEntries(perKeyCounts) });
+    }
+
+    if (req.method === "POST" && url.pathname === "/__stats/reset") {
+      cancelledCount = 0;
+      perKeyCounts.clear();
+      return Response.json({ ok: true });
+    }
+
+    // v4.2.2：Anthropic 原生 /v1/messages 端点（x-api-key 感知，与 chat 端点同款 key 行为）
+    if (req.method === "POST" && url.pathname === "/v1/messages") {
+      const apiKey = req.headers.get("x-api-key") || "";
+      if (apiKey) perKeyCounts.set(apiKey, (perKeyCounts.get(apiKey) || 0) + 1);
+      if (apiKey.startsWith("sk-bad")) {
+        return Response.json(
+          { type: "error", error: { type: "authentication_error", message: `invalid x-api-key: ${apiKey.slice(0, 8)}***` } },
+          { status: 401 }
+        );
+      }
+      if (apiKey.startsWith("sk-quota")) {
+        return Response.json(
+          { type: "error", error: { type: "rate_limit_error", message: `quota exceeded for ${apiKey.slice(0, 8)}***` } },
+          { status: 429 }
+        );
+      }
+      const body = await req.json().catch(() => ({}));
+      const userText = extractUserText(body.messages);
+      return Response.json({
+        id: "msg_mock_" + Date.now(),
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: `Hello from mock anthropic! [key:${keyFingerprint(apiKey)}] You said: ${userText.slice(0, 60)}` }],
+        model: body.model || "mock-anthropic",
+        stop_reason: "end_turn",
+        usage: { input_tokens: 25, output_tokens: 12 },
+      });
     }
 
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
+      // v4.2.2：per-key 计数（轮换均匀性验证；所有 chat 请求都计入，包括失败注入路径）
+      const apiKey = bearerKey(req);
+      if (apiKey) perKeyCounts.set(apiKey, (perKeyCounts.get(apiKey) || 0) + 1);
+
       // 可控失败注入：验证网关 classify 冷却 / failover
       const mockStatus = req.headers.get("x-mock-status");
       if (mockStatus) {
         return Response.json(
           { error: { message: `mock injected failure ${mockStatus}` } },
           { status: Number(mockStatus) }
+        );
+      }
+
+      // v4.2.2：按 key 前缀注入失败（多账号池切换/冷却验证）
+      if (apiKey.startsWith("sk-bad")) {
+        return Response.json(
+          { error: { type: "invalid_api_key", message: `Incorrect API key provided: ${apiKey.slice(0, 8)}***` } },
+          { status: 401 }
+        );
+      }
+      if (apiKey.startsWith("sk-quota")) {
+        return Response.json(
+          { error: { type: "insufficient_quota", message: `You exceeded your current quota for ${apiKey.slice(0, 8)}***` } },
+          { status: 429 }
         );
       }
 
@@ -61,6 +133,8 @@ const server = Bun.serve({
         );
       }
       const userText = extractUserText(body.messages);
+      // v4.2.2：响应正文附 key 指纹（客户端可断言轮换落点）
+      const keyTag = `[key:${keyFingerprint(apiKey)}]`;
       // OpenAI 规范：stream 默认 false，显式 stream === true 才流式
       // （v3.0.8 修复：旧实现 `!== false` 把省略 stream 的请求也当流式，偏离规范默认值）
       const stream = body.stream === true;
@@ -69,7 +143,7 @@ const server = Bun.serve({
         // 非流式：标准 chat.completion（带 tool_calls 若用户文本包含 "USE_TOOL"）
         const message: Record<string, unknown> = {
           role: "assistant",
-          content: `Hello from mock upstream! You said: ${userText.slice(0, 80)}`,
+          content: `Hello from mock upstream! ${keyTag} You said: ${userText.slice(0, 80)}`,
         };
         let finish = "stop";
         if (userText.includes("USE_TOOL")) {
@@ -108,7 +182,7 @@ const server = Bun.serve({
       const chunks: Array<Record<string, unknown>> = [
         { choices: [{ delta: { reasoning_content: "Let me think about the request... " } }] },
         { choices: [{ delta: { reasoning_content: "mock thinking done." } }] },
-        { choices: [{ delta: { content: `Hello from mock upstream stream! You said: ${userText.slice(0, 60)}` } }] },
+        { choices: [{ delta: { content: `Hello from mock upstream stream! ${keyTag} You said: ${userText.slice(0, 60)}` } }] },
         { choices: [{ delta: {}, finish_reason: "stop" }] },
       ];
       const readable = new ReadableStream({

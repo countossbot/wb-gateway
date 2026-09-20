@@ -172,6 +172,9 @@ export function classify(
 
   // 2. 状态码直接判定
   if (status === 429) return "cooldown";
+  // v4.2.2：402 Payment Required（OpenAI/Anthropic 标准协议账号欠费）—— 账号级错误，
+  // 换账号/候选可能恢复，惩罚性退避而非直接失败（标准适配器账号池的主要配额信号）。
+  if (status === 402) return "cooldown";
   if (status >= 500) return "retry";
 
   // 3. 仅在没有结构化码时，才使用文本关键词兜底
