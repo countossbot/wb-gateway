@@ -483,6 +483,12 @@ export interface SettingsData {
   auditRetentionDays?: number;
   /** v3.7.0：余额快照保留天数（0 = 永久保留） */
   balanceRetentionDays?: number;
+  /** v4.2.0：上游停滞熔断阈值 ms（0 = 默认 180s） */
+  streamStallMs?: number;
+  /** v4.2.0：undici 等待响应头超时 ms */
+  upstreamHeadersTimeoutMs?: number;
+  /** v4.2.0：undici body 字节间隔超时 ms */
+  upstreamBodyTimeoutMs?: number;
   hasMasterKey: boolean;
   hasCronSecret: boolean;
   configVersion: number;

@@ -21,6 +21,10 @@ export interface RuntimeSettingsShape {
   maxContextTurns: number; // 0 = 不限
   auditRetentionDays: number; // v3.2.2：操作审计保留天数（默认 90，0 = 永久保留，每小时节流清扫）
   balanceRetentionDays: number; // v3.7.0：余额快照保留天数（默认 365，0 = 永久保留，每小时节流清扫）
+  // ---- v4.2.0：SSE 流式保活与上游超时（Task 33 诊断 R1/R2/R6 修复，可热调） ----
+  streamStallMs: number; // 上游停滞熔断阈值（默认 180_000；0 = 用默认；转译/透传/聚合三条路径统一）
+  upstreamHeadersTimeoutMs: number; // undici 等待响应头超时（默认 300_000）
+  upstreamBodyTimeoutMs: number; // undici body 字节间隔超时（默认 600_000，作为停滞熔断之后的安全网）
 }
 
 const DEFAULTS: RuntimeSettingsShape = {
@@ -39,7 +43,24 @@ const DEFAULTS: RuntimeSettingsShape = {
   maxContextTurns: 0,
   auditRetentionDays: 90,
   balanceRetentionDays: 365,
+  streamStallMs: 180_000,
+  upstreamHeadersTimeoutMs: 300_000,
+  upstreamBodyTimeoutMs: 600_000,
 };
+
+// v4.2.0：带范围钳制的整数解析（超时类设置共用；非法/越界回落默认值）
+function clampInt(
+  raw: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+  allowZero: boolean
+): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n)) return fallback;
+  if (allowZero && n === 0) return 0;
+  return n >= min && n <= max ? n : fallback;
+}
 
 let cached: RuntimeSettingsShape = { ...DEFAULTS };
 let loaded = false;
@@ -113,6 +134,20 @@ function applyRows(rows: Array<{ key: string; value: unknown }>): void {
         case "balanceRetentionDays": {
           const n = Math.floor(Number(row.value));
           merged.balanceRetentionDays = Number.isFinite(n) && n >= 0 ? n : DEFAULTS.balanceRetentionDays;
+          break;
+        }
+        // v4.2.0：SSE 流式保活与上游超时（范围与设置页 PUT 校验一致；0 = 用默认仅 stall 支持语义）
+        case "streamStallMs": {
+          // 0 = 用默认 180s；有效范围 10s~900s
+          merged.streamStallMs = clampInt(row.value, DEFAULTS.streamStallMs, 10_000, 900_000, true);
+          break;
+        }
+        case "upstreamHeadersTimeoutMs": {
+          merged.upstreamHeadersTimeoutMs = clampInt(row.value, DEFAULTS.upstreamHeadersTimeoutMs, 5_000, 3_600_000, false);
+          break;
+        }
+        case "upstreamBodyTimeoutMs": {
+          merged.upstreamBodyTimeoutMs = clampInt(row.value, DEFAULTS.upstreamBodyTimeoutMs, 10_000, 3_600_000, false);
           break;
         }
         default:

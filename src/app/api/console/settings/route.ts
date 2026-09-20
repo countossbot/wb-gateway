@@ -41,6 +41,10 @@ interface SettingsPayload {
   usageProviderId?: string;
   auditRetentionDays?: number;
   balanceRetentionDays?: number;
+  // v4.2.0：SSE 流式保活与上游超时（热生效；超时变更后重建出站 dispatcher）
+  streamStallMs?: number;
+  upstreamHeadersTimeoutMs?: number;
+  upstreamBodyTimeoutMs?: number;
   regenerateMasterKey?: boolean;
   regenerateCronSecret?: boolean;
 }
@@ -104,6 +108,37 @@ export async function PUT(request: NextRequest) {
       return fail("balanceRetentionDays 必须为 0~3650 的整数（0 = 永久保留）");
     }
     updates.balanceRetentionDays = n;
+  }
+  // ---- v4.2.0：SSE 流式保活与上游超时（范围与 runtimeSettings clampInt 一致） ----
+  let timeoutsChanged = false;
+  if (body.streamStallMs !== undefined) {
+    const n = Math.floor(Number(body.streamStallMs));
+    // 0 = 用默认 180s；有效范围 10s~900s
+    if (!Number.isFinite(n) || (n !== 0 && (n < 10_000 || n > 900_000))) {
+      return fail("停滞熔断阈值必须为 0（默认 180s）或 10000~900000 ms（10s~15min）");
+    }
+    updates.streamStallMs = n;
+    timeoutsChanged = true;
+  }
+  if (body.upstreamHeadersTimeoutMs !== undefined) {
+    const n = Math.floor(Number(body.upstreamHeadersTimeoutMs));
+    if (!Number.isFinite(n) || n < 5_000 || n > 3_600_000) {
+      return fail("响应头超时必须为 5000~3600000 ms（5s~1h）");
+    }
+    updates.upstreamHeadersTimeoutMs = n;
+    timeoutsChanged = true;
+  }
+  if (body.upstreamBodyTimeoutMs !== undefined) {
+    const n = Math.floor(Number(body.upstreamBodyTimeoutMs));
+    if (!Number.isFinite(n) || n < 10_000 || n > 3_600_000) {
+      return fail("body 字节间隔超时必须为 10000~3600000 ms（10s~1h）");
+    }
+    updates.upstreamBodyTimeoutMs = n;
+    timeoutsChanged = true;
+  }
+  // 超时变更 → 重建出站 dispatcher（直连 Agent 与代理 Agent 均按新超时重建；close 优雅等待在途请求）
+  if (timeoutsChanged) {
+    invalidateProxyDispatchers();
   }
 
   await saveRuntimeSettings(updates);

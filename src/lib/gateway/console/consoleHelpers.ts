@@ -96,6 +96,9 @@ export async function consoleSettingsSnapshot(): Promise<Record<string, unknown>
     usageProviderId: settings.usageProviderId,
     auditRetentionDays: settings.auditRetentionDays,
     balanceRetentionDays: settings.balanceRetentionDays, // v3.7.0
+    streamStallMs: settings.streamStallMs, // v4.2.0
+    upstreamHeadersTimeoutMs: settings.upstreamHeadersTimeoutMs, // v4.2.0
+    upstreamBodyTimeoutMs: settings.upstreamBodyTimeoutMs, // v4.2.0
     hasMasterKey: typeof map.master_key === "string" && (map.master_key as string).length > 0,
     hasCronSecret: typeof map.cron_secret === "string" && (map.cron_secret as string).length > 0,
     configVersion: map.config_version ?? 1,

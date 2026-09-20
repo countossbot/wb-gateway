@@ -1678,3 +1678,37 @@ Stage Summary:
 3. 顺延项持续开放：标准适配器多账号轮换；「预计可用天数」外推；Top 提供商排行卡；模型健康 sparkline；新增中转对话框 formError 在长表单底部可能需滚动可见（可考虑固定 footer 上方显示）
 4. 用户导入的备份 requestLogs 仅 478 条（导出上限 take:1000 内），聚合重建覆盖 9/17-9/20 四天；如需完整历史统计需更大导出上限
 5. .env 的 DATABASE_URL 指向绝对路径 /home/z/my-project/db/custom.db（沙箱专属）；Docker 部署走 compose 内置路径不受影响
+
+---
+Task ID: 39
+Agent: 巡检轮 1（Z.ai Code，webDevReview 定时任务）
+Task: 实施 Task 33 SSE 诊断报告的三大遗留修复：R6（透传分支保活 ping + 停滞熔断）> R2（undici 超时显式化）> R1（熔断阈值可配置化）；版本 4.1.2 → 4.2.0
+
+Work Log:
+- 【巡检】dev server 存活（v4.1.2，2 提供商/6 模型）；agent-browser 快速 QA 全部页签正常零错误；用户无并发操作痕迹
+- 【R1 配置层】runtimeSettings 新增 streamStallMs（默认 180s，0=默认，范围 10s~900s）/ upstreamHeadersTimeoutMs（默认 300s，5s~1h）/ upstreamBodyTimeoutMs（默认 600s，10s~1h）；clampInt 带范围钳制解析（非法/越界回落默认）；consoleSettingsSnapshot 暴露三字段；settings PUT 校验（非法值 400）+ 超时变更后 invalidateProxyDispatchers 重建出站 dispatcher
+- 【R2 出站超时】proxyAgent.ts：①新增 getDirectDispatcher()（直连 Agent 按超时参数缓存，参数变更 close 旧实例优雅退役）；②ProxyAgent 显式注入 headersTimeout/bodyTimeout；③socksDispatcher 第二参数透传 Agent.Options（fetch-socks 原生支持）；④fetchWithProxy 直连路径从全局 fetch（undici 隐式默认 300s）改为 undici fetch + 显式超时 Agent —— 三条出站路径（直连/HTTP 代理/SOCKS）统一从 runtimeSettings 读超时，设置页热生效；旁注：顺带绕开 Next.js 对全局 fetch 的补丁
+- 【R6 透传保活】stream.ts 新增 passthroughSseWithKeepAlive（替代裸 passthroughUsageTee 于 SSE 透传分支）：①保活帧协议适配 —— Anthropic 客户端注入原生 ping 事件（与转译分支 KEEP_ALIVE_BYTES 同款），OpenAI 客户端注入 SSE 注释行（: keep-alive，规范合法帧全解析器忽略）；②事件边界保护 —— 仅在上一完整行为空行（事件闭合）时注入，半开事件（data 行已到、结束空行未到）期间零注入，防多行 data 帧截断；③停滞熔断 —— 上游零字节超阈值 → cancel 上游读取 → 补协议终帧（OpenAI: data: [DONE] / Anthropic: event: message_stop）→ 干净关闭（客户端拿到截断内容+正常终态，优于裸断连/挂到 bodyTimeout）；④客户端中断级联（request.signal abort → cancel reader + abort writer + 清定时器）；⑤旁路 usage 统计（与 passthroughUsageTee 同口径：精确帧优先/字符估算兜底）
+- 【R6 边界 bug 修复（测试驱动发现）】chunk 以半行结尾时行扫描循环体不执行，atEventBoundary 停留在旧值 → 半开事件期间误注入 ping 截断帧。修复：chunk 处理后 `scanner.bufferedChars > 0`（残行未闭合）强制非边界。单测 17 项中该项由 ✗ 转 ✓
+- 【R6 聚合路径】aggregateOpenAIToChatJson（客户端要 JSON 但上游 forceStream 返回 SSE）补停滞看门狗：readWithStallWatchdog 每 1s 轮询字节间隔（Promise.race + unref 定时器），停滞 → cancel 上游 → 用已聚合内容拼装 JSON + 正文附 [Gateway Warning: Upstream stalled...] 注记（与转译分支口径一致）
+- 【dispatch 接线】三条流式路径统一消费 settings stallMs：streamOpenAIToAnthropic（转译）/ passthroughSseWithKeepAlive（透传，clientProtocol 按客户端协议适配）/ aggregateOpenAIToChatJson（聚合）；getRuntimeSettings 同步缓存读零开销
+- 【设置页 UI】系统参数区新增「SSE 流式保活与上游超时」子分组（stone-50 圆角卡片 + 三输入框 + 用途说明）：停滞熔断阈值（秒，0=默认 180s）/ 响应头超时（秒）/ Body 字节间隔超时（秒）；秒态编辑保存转 ms；前端校验与后端一致；aria-describedby 关联提示文本
+- 【mock 上游增强】mini-services/mock-upstream：①STALL:<ms> 消息内容触发首帧后静默（用消息内容而非 header —— 网关不透传客户端自定义 header，但消息体原样到达上游）；②cancel() 计数 + GET /__stats（验证级联取消）；③idleTimeout: 255 —— 排查发现 Bun.serve 默认 idleTimeout=10s 会杀静默中的流式连接（曾干扰测试被误判为网关断流）
+- 【验证：单元级】tests/sse-keepalive-test.ts（直接流测试，4 组 17 项全过）：OpenAI 注释 ping+[DONE] 终帧+usage 估算+上游级联 cancel+及时关闭；Anthropic ping 事件+message_stop 终帧+无 OpenAI 帧混入；正常完成流零注入+[DONE] 恰一次+usage 精确帧；半开事件 3.5s 跨 ping 周期零注入+字节完整透传
+- 【验证：端到端】tests/sse-keepalive-e2e.ts（经网关全链路，15 项全过）：自建 qa-mock 中转+qa-mock-model 路由→A 正常流式透传（content-type/思维链正文帧/[DONE] 恰一次/快速完成零 ping）→B 熔断（PUT streamStallMs=10000 热生效 + 非法 8000 被 400 拒 + 流 ~11s 熔断关闭 + 期间注入保活注释帧 + 补 [DONE] 终帧 + 首帧已透传 + 无迟到内容帧 + 上游 cancelledCount≥1 + dev.log 出现 [Passthrough Stall] 告警）→C 恢复默认 0 + 快照三新字段回读→自清理（删自建路由/中转 200）+ healthz 数据等价（2/6 前后一致）
+- 【验证：浏览器】设置页 SSE 区块渲染（三输入框预填 0/300/600 + 说明文字）；UI 改 stall=240 → 保存 → toast「系统设置已保存（热生效）」→ API 快照回读 240000 → 重置 0 回读一致；8 页签回归全部正常渲染；零页面错误零 console 错误
+- 【验证：质量】lint 零错误；tsc src/ 零错误；版本 4.2.0（healthz 已验证）
+- 【排障开关】passthroughSseWithKeepAlive 入口保留 UAG_SSE_DEBUG=1 环境变量（默认静默，输出生效 stallMs/ping/协议参数供运维排障）
+
+Stage Summary:
+- Task 33 诊断报告 R1/R2/R6 三大遗留项全部实施并端到端验证（17 单测 + 15 e2e 全过）；SSE 三条流式路径（转译/透传/聚合）现在统一具备：保活注入（协议适配）+ 停滞熔断（补终帧干净收尾）+ 阈值热配置
+- R5（dispatcher close 切断活动流）风险缓解：超时参数变更走 close() 优雅退役（等待在途请求）而非 destroy
+- 重要发现：Bun.serve 默认 idleTimeout=10s —— 用 Bun 做 SSE 测试服务器必须显式调大，否则静默 10s 被杀易误判
+- mock 上游成为可复用 QA 资产（STALL 注入/__stats cancel 计数）；两份测试脚本沉淀到 tests/ 可回归复跑
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（qa-mock/qa-mock-model 自建自删，healthz 等价核对通过；streamStallMs 测试后已恢复默认 0）
+2. dev server 长时间多次 HMR 后可能出现模块状态陈旧（本轮曾遇到 settings 传播失灵，重启后消失）——dev 现象非生产 bug（生产单模块实例），但巡检轮如遇诡异行为优先重启 dev server 再排查
+3. Task 33 R3（客户端经中间层断开误判）与 R4（OOM 完全无收尾）属环境/部署侧，代码层无进一步动作空间；R5 的「代理池热更新瞬间活动流」场景仍理论上存在（close 优雅化已缓解）
+4. 顺延功能项：标准适配器多账号轮换；「预计可用天数」外推；Top 提供商排行卡；模型健康 sparkline；新增中转对话框 formError 固定 footer 上方显示
+5. mock-upstream 服务保持运行（3040 端口）供后续巡检复用；其 STALL 注入与 __stats 能力已在本轮验证
