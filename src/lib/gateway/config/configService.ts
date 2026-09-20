@@ -17,7 +17,7 @@ import { db } from "@/lib/db";
 import type { GatewayConfig, ProviderConfig, AccountConfig, RouteCandidateConfig, VirtualKeyEntry } from "../core/types";
 import { refreshRuntimeSettings } from "./runtimeSettings";
 
-export const VERSION = "4.2.4"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.2.4：runtimeSettings globalThis 共享存储根治 dev 跨模块实例缓存不传播（签到白名单实测复现）；/checkin 与 /admin/api/checkin 机器接口接入签到白名单 + scope 透明化；总览洞察独立 API（模型健康/Top 提供商窗口切换不再整页重载）+ Top 提供商窗口选择器）
+export const VERSION = "4.3.0"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.3.0：虚拟密钥日配额 —— 密钥级请求次/token 日限额，入口超限 429（零上游成本）+ RateLimit 标准头组 + 控制台配额进度条；账本复用 UsageDaily + 内存 peek 同源口径；4.2.4：runtimeSettings globalThis + 机器接口签到白名单 + 总览洞察独立 API）
 
 // ---- 默认路由表（等价保留原 getDefaultConfig 的 routes；用于读路径回填） ----
 export const DEFAULT_ROUTES: Record<string, RouteCandidateConfig[]> = {
@@ -503,7 +503,7 @@ async function dbToConfigRaw(): Promise<GatewayConfig> {
     if (list && list.length > 0) routesMap[r.model] = list;
   }
 
-  // virtual_keys: { key: {name, enabled, models, role, remark} }
+  // virtual_keys: { key: {name, enabled, models, role, remark, dailyRequestLimit, dailyTokenLimit} }
   const virtualKeysMap: Record<string, VirtualKeyEntry> = {};
   for (const vk of virtualKeys) {
     virtualKeysMap[vk.keyValue] = {
@@ -512,6 +512,9 @@ async function dbToConfigRaw(): Promise<GatewayConfig> {
       models: (vk.models as string[]) || ["*"],
       role: vk.role,
       ...(vk.remark ? { remark: vk.remark } : {}),
+      // v4.3.0：日配额随配置下发（0 = 不限额；变更经 invalidateConfigChanged 传播）
+      ...(vk.dailyRequestLimit > 0 ? { dailyRequestLimit: vk.dailyRequestLimit } : {}),
+      ...(vk.dailyTokenLimit > 0 ? { dailyTokenLimit: vk.dailyTokenLimit } : {}),
     };
   }
 
@@ -765,6 +768,9 @@ async function persistConfigToDb(config: GatewayConfig): Promise<void> {
         models: (entry?.models || ["*"]) as never,
         role: entry?.role || "client",
         remark: entry?.remark || null,
+        // v4.3.0：配额随 entry 全量覆盖（GET 返回含配额 → 回环 POST 自然保留；显式 0 清除限额）
+        dailyRequestLimit: Math.max(0, Math.floor(Number(entry?.dailyRequestLimit) || 0)),
+        dailyTokenLimit: Math.max(0, Math.floor(Number(entry?.dailyTokenLimit) || 0)),
       },
       update: {
         name: entry?.name || "Client Key",
@@ -772,6 +778,8 @@ async function persistConfigToDb(config: GatewayConfig): Promise<void> {
         models: (entry?.models || ["*"]) as never,
         role: entry?.role || "client",
         remark: entry?.remark || null,
+        dailyRequestLimit: Math.max(0, Math.floor(Number(entry?.dailyRequestLimit) || 0)),
+        dailyTokenLimit: Math.max(0, Math.floor(Number(entry?.dailyTokenLimit) || 0)),
       },
     });
   }

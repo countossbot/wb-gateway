@@ -363,6 +363,9 @@ export interface VirtualKeyRow {
   models: string[];
   role: string;
   remark: string | null;
+  /** v4.3.0：日配额（0 = 不限额）；超限网关入口 429（本地时区日自然重置） */
+  dailyRequestLimit?: number;
+  dailyTokenLimit?: number;
   createdAt: string;
   updatedAt?: string;
   /** v3.0.4：近 24h 调用统计（无调用时 null）；v3.1.0 增 failures 精确失败次数 */

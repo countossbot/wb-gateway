@@ -128,6 +128,8 @@ interface BackupKey {
   models?: string[];
   role?: string;
   remark?: string | null;
+  dailyRequestLimit?: number; // v4.3.0：日请求配额（旧备份缺省 → 0 不限额）
+  dailyTokenLimit?: number; // v4.3.0：日 token 配额
   createdAt?: string;
   updatedAt?: string;
 }
@@ -375,6 +377,9 @@ export async function POST(request: NextRequest) {
               enabled: k.enabled !== false,
               models: (Array.isArray(k.models) && k.models.length > 0 ? k.models : ["*"]) as never,
               role: k.role || "client",
+              // v4.3.0：配额字段随备份往返（旧备份无此字段 → 0 不限额，兼容）
+              dailyRequestLimit: Math.max(0, Math.floor(Number(k.dailyRequestLimit) || 0)),
+              dailyTokenLimit: Math.max(0, Math.floor(Number(k.dailyTokenLimit) || 0)),
               remark: k.remark ?? "备份导入",
               ...(toDateOrThrow(k.createdAt) ? { createdAt: toDateOrThrow(k.createdAt) } : {}),
             },

@@ -118,6 +118,32 @@ function bumpUsageDailyBuffered(entry: RequestLogEntry): void {
   scheduleUsageFlush();
 }
 
+/**
+ * v4.3.0：读取内存缓冲中某密钥今日（本地时区日）未 flush 的聚合量（零 IO 同步读）。
+ * 供配额执行（quota.ts）与 UsageDaily 落库行合并，消除 30s flush 窗口内的统计盲区：
+ * DB 已落库量 + 本缓冲量 = 该密钥今日真实累计（同模块图内精确；dev 跨路由模块实例
+ * 间仍存在理论盲区——生产单实例无此问题）。
+ */
+export function peekUsageDailyToday(apiKeyName: string): {
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+} {
+  const day = localDayKey();
+  const out = { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  for (const cell of usageDailyBuffer.values()) {
+    if (cell.day !== day || cell.apiKeyName !== apiKeyName) continue;
+    out.requests += cell.requests;
+    out.okRequests += cell.okRequests;
+    out.inputTokens += cell.inputTokens;
+    out.outputTokens += cell.outputTokens;
+    out.cachedTokens += cell.cachedTokens;
+  }
+  return out;
+}
+
 /** 幂等调度：缓冲非空且无 pending timer 时排一次 flush（30s） */
 function scheduleUsageFlush(): void {
   if (usageFlushTimer) return;

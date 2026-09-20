@@ -121,6 +121,11 @@ model VirtualKey {
   models    Json // 数组，如 ["*"] 或 ["deepseek-v4.1-flash"]
   role      String   @default("client") // client | cron
   remark    String?
+  // v4.3.0：密钥级日配额（本地时区日；0 = 不限额）。超限后网关入口直接 429（不触上游、不消耗额度）。
+  // 请求配额按次数计；token 配额按 input+output 累计计。
+  // 配额账本复用 UsageDaily 按日聚合（day × apiKeyName 求和）+ 内存缓冲 peek，统计口径与控制台一致。
+  dailyRequestLimit Int @default(0)
+  dailyTokenLimit   Int @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

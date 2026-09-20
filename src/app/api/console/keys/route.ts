@@ -1,4 +1,4 @@
-// /api/console/keys —— 虚拟密钥管理（增删改查、启停、备注、模型白名单）。
+// /api/console/keys —— 虚拟密钥管理（增删改查、启停、备注、模型白名单、v4.3.0 日配额）。
 // 密钥值只在创建时返回一次明文；列表/编辑回显掩码，保存时掩码 → DB 原值（回填契约）。
 import { NextRequest } from "next/server";
 import { randomBytes } from "node:crypto";
@@ -9,6 +9,13 @@ import { localDayKey } from "@/lib/gateway/config/requestLog";
 import { auditCreate, auditDelete, auditUpdate } from "@/lib/gateway/console/auditService";
 
 export const dynamic = "force-dynamic";
+
+/** v4.3.0：配额入参清洗（非负整数；上限 1 亿防溢出；非法/缺省 → 0 不限额） */
+function sanitizeLimit(raw: unknown): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(n, 100_000_000);
+}
 
 export async function GET(request: NextRequest) {
   const session = await requireSessionOr401(request);
@@ -79,6 +86,8 @@ export async function GET(request: NextRequest) {
       models: k.models,
       role: k.role,
       remark: k.remark,
+      dailyRequestLimit: k.dailyRequestLimit,
+      dailyTokenLimit: k.dailyTokenLimit,
       createdAt: k.createdAt,
       updatedAt: k.updatedAt,
       stats24h: statsMap.get(k.name) || null,
@@ -97,6 +106,8 @@ export async function POST(request: NextRequest) {
     models?: string[];
     role?: string;
     remark?: string;
+    dailyRequestLimit?: number; // v4.3.0：日请求配额（0 = 不限额）
+    dailyTokenLimit?: number; // v4.3.0：日 token 配额（0 = 不限额）
   };
   const keyValue = body.keyValue?.trim() || "sk-uag-" + randomBytes(20).toString("base64url");
   if (keyValue.length < 16) return fail("密钥长度至少 16 位");
@@ -111,6 +122,8 @@ export async function POST(request: NextRequest) {
       models: (body.models && body.models.length > 0 ? body.models : ["*"]) as never,
       role: body.role || "client",
       remark: body.remark || null,
+      dailyRequestLimit: sanitizeLimit(body.dailyRequestLimit),
+      dailyTokenLimit: sanitizeLimit(body.dailyTokenLimit),
     },
   });
   await invalidateConfigChanged();
@@ -119,7 +132,7 @@ export async function POST(request: NextRequest) {
     "key",
     key.id,
     key.name,
-    { models: key.models, role: key.role, keyPrefix: key.keyPrefix, customKey: !!body.keyValue?.trim() },
+    { models: key.models, role: key.role, keyPrefix: key.keyPrefix, customKey: !!body.keyValue?.trim(), dailyRequestLimit: key.dailyRequestLimit, dailyTokenLimit: key.dailyTokenLimit },
     request
   );
   return ok({ id: key.id, keyValue });
@@ -135,10 +148,16 @@ export async function PUT(request: NextRequest) {
     models?: string[];
     role?: string;
     remark?: string | null;
+    dailyRequestLimit?: number; // v4.3.0：日请求配额（0 = 不限额；缺省保留现值）
+    dailyTokenLimit?: number; // v4.3.0：日 token 配额（0 = 不限额；缺省保留现值）
   };
   if (!body.id) return fail("缺少 key id");
   const existing = await db.virtualKey.findUnique({ where: { id: body.id } });
   if (!existing) return fail("密钥不存在", 404);
+  // v4.3.0：配额缺省保留现值（开关切换 toggleEnabled 不传配额时不误清限额）；
+  // 显式传 0 清除限额。非负整数入参清洗与创建一致。
+  const nextReqLimit = body.dailyRequestLimit !== undefined ? sanitizeLimit(body.dailyRequestLimit) : existing.dailyRequestLimit;
+  const nextTokLimit = body.dailyTokenLimit !== undefined ? sanitizeLimit(body.dailyTokenLimit) : existing.dailyTokenLimit;
   await db.virtualKey.update({
     where: { id: body.id },
     data: {
@@ -147,6 +166,8 @@ export async function PUT(request: NextRequest) {
       models: (body.models ?? (existing.models as string[])) as never,
       role: body.role ?? existing.role,
       remark: body.remark !== undefined ? body.remark : existing.remark,
+      dailyRequestLimit: nextReqLimit,
+      dailyTokenLimit: nextTokLimit,
     },
   });
   await invalidateConfigChanged();
@@ -159,6 +180,8 @@ export async function PUT(request: NextRequest) {
       enabled: body.enabled ?? existing.enabled,
       models: body.models ?? (existing.models as string[]),
       role: body.role ?? existing.role,
+      dailyRequestLimit: nextReqLimit,
+      dailyTokenLimit: nextTokLimit,
     },
     request
   );

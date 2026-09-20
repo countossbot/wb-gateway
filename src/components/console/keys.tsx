@@ -6,6 +6,7 @@ import * as React from "react";
 import {
   AlertTriangle,
   Check,
+  Gauge,
   KeyRound,
   Loader2,
   Pencil,
@@ -51,6 +52,66 @@ import type { CreatedKey, KeysData, VirtualKeyRow } from "@/lib/console/types";
 /** v3.5.0：密钥名 → 近 7 天逐日用量（sparkline 数据源） */
 type Usage7dMap = Map<string, Array<{ day: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number }>>;
 
+/** v4.3.0：配额用量占比条颜色档（与模型健康日柱同套三档语义：<80 安全 / ≥80 临近 / ≥100 已限额） */
+function quotaBarClass(pct: number): string {
+  if (pct >= 100) return "bg-red-500";
+  if (pct >= 80) return "bg-amber-500";
+  return "bg-emerald-500";
+}
+
+/**
+ * v4.3.0：密钥日配额用量单元（列表「今日配额」列）。
+ * - 仅对设置了任一限额的密钥渲染；未设限额显示「不限」淡态
+ * - 两行进度条：请求 N/限额 · token N/限额（今日累计，本地时区日）
+ * - 三档色：绿 <80% / 黄 ≥80% / 红 ≥100%（已限额，网关入口拒绝中）
+ * - 用量口径与网关配额执行同源（UsageDaily + 缓冲，约 30s 内同步）；
+ *   被拒请求不计入（未触达上游）
+ */
+function QuotaBars({ k }: { k: VirtualKeyRow }) {
+  const reqLimit = k.dailyRequestLimit || 0;
+  const tokLimit = k.dailyTokenLimit || 0;
+  if (reqLimit <= 0 && tokLimit <= 0) {
+    return <span className="text-xs text-stone-400">不限</span>;
+  }
+  const todayReq = k.todayStats?.requests ?? 0;
+  const todayTok = (k.todayStats?.inputTokens ?? 0) + (k.todayStats?.outputTokens ?? 0);
+  const reqPct = reqLimit > 0 ? Math.min(100, (todayReq / reqLimit) * 100) : 0;
+  const tokPct = tokLimit > 0 ? Math.min(100, (todayTok / tokLimit) * 100) : 0;
+  const reqCapped = reqLimit > 0 && todayReq >= reqLimit;
+  const tokCapped = tokLimit > 0 && todayTok >= tokLimit;
+  const fmt = (n: number) => n.toLocaleString();
+  return (
+    <div className="w-36 space-y-1.5">
+      {reqLimit > 0 && (
+        <div>
+          <div className="flex items-baseline justify-between gap-1">
+            <span className={`text-[10px] tabular-nums ${reqCapped ? "font-semibold text-red-600" : "text-stone-500"}`}>
+              {fmt(todayReq)}/{fmt(reqLimit)} 次
+            </span>
+            {reqCapped && <span className="text-[9px] font-medium text-red-600">已限额</span>}
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-stone-100" role="progressbar" aria-valuemin={0} aria-valuemax={reqLimit} aria-valuenow={Math.min(todayReq, reqLimit)} aria-label={`密钥 ${k.name} 今日请求 ${todayReq}/${reqLimit}`}>
+            <div className={`h-full rounded-full transition-all ${quotaBarClass(reqPct)}`} style={{ width: `${Math.max(2, reqPct)}%` }} />
+          </div>
+        </div>
+      )}
+      {tokLimit > 0 && (
+        <div>
+          <div className="flex items-baseline justify-between gap-1">
+            <span className={`text-[10px] tabular-nums ${tokCapped ? "font-semibold text-red-600" : "text-stone-500"}`}>
+              {fmt(todayTok)}/{fmt(tokLimit)} tk
+            </span>
+            {tokCapped && <span className="text-[9px] font-medium text-red-600">已限额</span>}
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-stone-100" role="progressbar" aria-valuemin={0} aria-valuemax={tokLimit} aria-valuenow={Math.min(todayTok, tokLimit)} aria-label={`密钥 ${k.name} 今日 token ${todayTok}/${tokLimit}`}>
+            <div className={`h-full rounded-full transition-all ${quotaBarClass(tokPct)}`} style={{ width: `${Math.max(2, tokPct)}%` }} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => void } = {}) {
   const [data, setData] = React.useState<KeysData | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -60,12 +121,15 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
   // 新建 / 编辑
   const [editOpen, setEditOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<VirtualKeyRow | null>(null);
-  const [form, setForm] = React.useState<{ name: string; keyValue: string; models: string[]; role: string; remark: string }>({
+  // v4.3.0：配额输入用字符串态（空串=不限额；允许临时清空编辑）；提交时统一清洗
+  const [form, setForm] = React.useState<{ name: string; keyValue: string; models: string[]; role: string; remark: string; dailyRequestLimit: string; dailyTokenLimit: string }>({
     name: "",
     keyValue: "",
     models: ["*"],
     role: "client",
     remark: "",
+    dailyRequestLimit: "",
+    dailyTokenLimit: "",
   });
   const [saving, setSaving] = React.useState(false);
   const [formError, setFormError] = React.useState("");
@@ -148,7 +212,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
 
   const openCreate = () => {
     setEditing(null);
-    setForm({ name: "", keyValue: "", models: ["*"], role: "client", remark: "" });
+    setForm({ name: "", keyValue: "", models: ["*"], role: "client", remark: "", dailyRequestLimit: "", dailyTokenLimit: "" });
     setFormError("");
     setEditOpen(true);
   };
@@ -161,9 +225,20 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
       models: k.models?.length ? k.models : ["*"],
       role: k.role || "client",
       remark: k.remark || "",
+      dailyRequestLimit: k.dailyRequestLimit && k.dailyRequestLimit > 0 ? String(k.dailyRequestLimit) : "",
+      dailyTokenLimit: k.dailyTokenLimit && k.dailyTokenLimit > 0 ? String(k.dailyTokenLimit) : "",
     });
     setFormError("");
     setEditOpen(true);
+  };
+
+  /** v4.3.0：配额输入清洗（空串/非正整数 → 0 不限额；上限 1 亿与后端一致） */
+  const parseLimitInput = (s: string): number | "invalid" => {
+    const t = s.trim();
+    if (t === "") return 0;
+    if (!/^\d{1,9}$/.test(t)) return "invalid";
+    const n = parseInt(t, 10);
+    return n > 100_000_000 ? "invalid" : n;
   };
 
   const save = async () => {
@@ -180,6 +255,12 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
       setFormError("自定义密钥至少 16 位");
       return;
     }
+    const reqLimit = parseLimitInput(form.dailyRequestLimit);
+    const tokLimit = parseLimitInput(form.dailyTokenLimit);
+    if (reqLimit === "invalid" || tokLimit === "invalid") {
+      setFormError("配额必须为正整数（留空或 0 表示不限额，上限 1 亿）");
+      return;
+    }
     setSaving(true);
     try {
       if (editing) {
@@ -190,6 +271,8 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
           models: form.models,
           role: form.role,
           remark: form.remark.trim() || null,
+          dailyRequestLimit: reqLimit,
+          dailyTokenLimit: tokLimit,
         });
         setNotice("密钥已更新");
       } else {
@@ -199,6 +282,8 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
           models: form.models,
           role: form.role,
           remark: form.remark.trim() || undefined,
+          dailyRequestLimit: reqLimit,
+          dailyTokenLimit: tokLimit,
         });
         setCreated(r);
       }
@@ -298,6 +383,8 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                   <TableHead>密钥</TableHead>
                   <TableHead className="hidden md:table-cell">模型白名单</TableHead>
                   <TableHead className="hidden sm:table-cell">角色</TableHead>
+                  {/* v4.3.0：今日配额用量（双进度条；未设限额显示「不限」） */}
+                  <TableHead className="hidden lg:table-cell">今日配额</TableHead>
                   <TableHead className="hidden xl:table-cell">健康面板</TableHead>
                   {/* v3.7.0：最后使用时间（RequestLog 滚动窗口 MAX(createdAt)） */}
                   <TableHead className="hidden lg:table-cell">最后使用</TableHead>
@@ -313,7 +400,27 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                   <TableRow key={k.id}>
                     <TableCell>
                       <div className="flex flex-col">
-                        <span className="font-medium text-stone-800">{k.name}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-stone-800">{k.name}</span>
+                          {/* v4.3.0：设了任一限额的密钥名旁加 Gauge 小徽标（一目了然谁在限额约束下） */}
+                          {(k.dailyRequestLimit || 0) > 0 || (k.dailyTokenLimit || 0) > 0 ? (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge variant="outline" className="border-violet-200 bg-violet-50 px-1 py-0 text-[9px] font-medium text-violet-700">
+                                  <Gauge className="mr-0.5 size-2.5" />
+                                  限额
+                                </Badge>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                该密钥设置了日配额：
+                                {(k.dailyRequestLimit || 0) > 0 ? `请求 ${k.dailyRequestLimit!.toLocaleString()} 次/日` : ""}
+                                {(k.dailyRequestLimit || 0) > 0 && (k.dailyTokenLimit || 0) > 0 ? " · " : ""}
+                                {(k.dailyTokenLimit || 0) > 0 ? `token ${k.dailyTokenLimit!.toLocaleString()}/日` : ""}
+                                （本地时区日，超限 429）
+                              </TooltipContent>
+                            </Tooltip>
+                          ) : null}
+                        </div>
                         <span className="text-[11px] text-stone-400">{absoluteTime(k.createdAt)}</span>
                       </div>
                     </TableCell>
@@ -342,6 +449,9 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                       <Badge variant={k.role === "cron" ? "outline" : "secondary"} className={k.role === "cron" ? "border-amber-200 bg-amber-50 text-amber-700" : ""}>
                         {k.role}
                       </Badge>
+                    </TableCell>
+                    <TableCell className="hidden lg:table-cell">
+                      <QuotaBars k={k} />
                     </TableCell>
                     <TableCell className="hidden xl:table-cell">
                       <Tooltip>
@@ -422,6 +532,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
       <p className="text-xs text-muted-foreground">
         提示：列表显示的是掩码，复制按钮复制的也是掩码（用于核对身份）。完整密钥仅在创建时一次性展示。
         「健康面板」按请求日志聚合该密钥 24h 调用量与成功率（进度条为成功率三色档），今日 token 数来自按日聚合表（不受滚动日志窗口截断）；
+        「今日配额」为密钥级日用量护栏（v4.3.0：设置限额后超限请求在入口被 429 拒绝，不触上游；被拒请求不计入用量；本地时区日零点重置，统计与网关执行同源，约 30 秒内同步）；
         「最后使用」取自请求日志滚动窗口内的最近一次调用（v3.7.0；窗口仅保留近期 5000 条，长期闲置的密钥可能显示为「从未使用」，语义为近期未调用）；
         「近 7 天用量」为该密钥逐日请求数迷你图（UsageDaily 聚合，悬停 ⓘ 查看每日明细），仅供全量/估算 token 的场景参考。
         {onViewLogs ? "，点击徽标可跳转该密钥的请求日志" : ""}。
@@ -464,6 +575,40 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                   <SelectItem value="cron">cron · 定时任务（降权）</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            {/* v4.3.0：日配额（可选成本护栏；超限 429 + 本地时区日自然重置） */}
+            <div className="space-y-1.5">
+              <Label className="flex items-center gap-1.5">
+                <Gauge className="size-3.5 text-violet-500" />
+                日配额（可选）
+              </Label>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Input
+                    id="vk-req-limit"
+                    inputMode="numeric"
+                    value={form.dailyRequestLimit}
+                    onChange={(e) => setForm((f) => ({ ...f, dailyRequestLimit: e.target.value.replace(/[^\d]/g, "") }))}
+                    placeholder="不限"
+                    aria-describedby="vk-req-limit-hint"
+                  />
+                  <p id="vk-req-limit-hint" className="text-[11px] leading-tight text-muted-foreground">请求次数 / 日</p>
+                </div>
+                <div className="space-y-1">
+                  <Input
+                    id="vk-tok-limit"
+                    inputMode="numeric"
+                    value={form.dailyTokenLimit}
+                    onChange={(e) => setForm((f) => ({ ...f, dailyTokenLimit: e.target.value.replace(/[^\d]/g, "") }))}
+                    placeholder="不限"
+                    aria-describedby="vk-tok-limit-hint"
+                  />
+                  <p id="vk-tok-limit-hint" className="text-[11px] leading-tight text-muted-foreground">token 总量 / 日</p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                留空 = 不限额。到达限额后网关入口直接返回 429（不触上游、零成本），本地时区每日零点自然重置；token 按入口统计（input+output，缓存命中不重复计）。
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="vk-remark">备注</Label>
