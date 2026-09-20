@@ -2165,3 +2165,27 @@ Stage Summary:
 3. 本轮消息「你好（网关INTL测试）」已在 xiaoyi550w 账户计费侧落地一条真实记录（credit=0 零消耗），用户日后核对时以此辨认
 4. 顺延项持续开放：标准适配器 getBalance 池形态（低优先级）；模型健康 60-90 天窗口；UsageDaily 历史天回填工具；GET /v1/responses/{id}
 5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+
+---
+Task ID: 53
+Agent: 主会话（Z.ai Code，用户直派任务轮：回退 4.6.3 INTL 独立标识）
+Task: 用户指令「回退，按你这么说应该都是 web 才对」—— 基于 Task 52 收尾提示（"workbuddy ai" 为自定义值，非 Web 端实测枚举 "web"/"miniprogram"，服务端若按枚举白名单记账可能记空/未知类），用户决策回退 v4.6.3 的 INTL 独立标识改动：CN+INTL 两 region 统一 X-Client-Platform: "web"（即恢复 v4.6.2 形态）；版本 4.6.3 → 4.6.4（单调递增记录回退）
+
+Work Log:
+- 【回退方式】git checkout 897b9ed -- src/lib/gateway/providers/workbuddy/index.ts（直接恢复 Task 51 完成态文件，而非 revert commit —— a398c61 含 worklog Task 52 记录，revert 会抹掉追加式历史）；随后仅追加注释块说明 v4.6.4 回退历史（diff 实证：过滤注释行后与 897b9ed 逻辑零差异）
+- 【代码现状】单一常量 WORKBUDDY_CLIENT_PLATFORM = "web"，四通道注入点（chat 主链路 / token refresh / billing / checkin）全部直用常量 —— CN（copilot.tencent.com / www.codebuddy.cn）与 INTL（www.codebuddy.ai）所有上游请求统一携带 X-Client-Platform: web，与 WorkBuddy Web 端 axios 拦截器实测枚举完全一致
+- 【版本】configService VERSION 4.6.3 → 4.6.4（注释：4.6.4 回退语义 + 4.6.3 标注「已回退」保留历史）
+- 【未再实发消息的依据】回退后代码形态与 Task 51 已实发验证的形态逐字节一致（逻辑零差异）；该形态下 CN（marbella「你好（网关测试）」）与 INTL（xiaoyi550w「你好（网关INTL测试）」）两条消息均已验证 200 可送达 —— 无新形态，不再消耗账户额度
+- 【验证矩阵】lint 零错误；tsc 全量 src/ 零错误；healthz v4.6.4（HMR 生效）2 提供商/6 模型不变；dev.log 无运行时错误
+- 【git】独立 commit（provider 恢复 + 回退注释 + configService VERSION 4.6.4 + worklog 本节）
+
+Stage Summary:
+- WorkBuddy 上游请求使用端标识回到统一形态：CN+INTL 两 region 全部 X-Client-Platform: "web"（v4.6.2 语义），"workbuddy ai" 实验已回退（历史保留于 git a398c61 + worklog Task 52）
+- 服务端记账预期：两 region 网关流量均归入「使用端 = WorkBuddy」（Web 端枚举值，把握最大；效果仍未验证，沿用用户协议）
+- 回退点链：tag rollback-pre-wb-intl-platform @ 6c07e51（回到 v4.6.3 INTL 实验态，一般无需再回）；tag rollback-pre-wb-client-tag @ 1075b55（回到无标识态 v4.6.1）
+
+未解决问题与风险（下一阶段建议）:
+1. 计费 client 字段实际取值仍未验证（用户协议）。CN 验证线索：计费明细找 input 含「你好（网关测试）」@ marbella（2026-09-20 09:5x）或「你好（网关INTL测试）」@ xiaoyi550w（2026-09-20 17:04，注意该条发送时 INTL 短暂带过 "workbuddy ai" 标识 —— v4.6.3 实验期记录，client 取值可能与 web 期不同，恰是天然的 A/B 对照样本）；回退后新流量均为 web 标识
+2. 若日后仍想让 INTL 记独立使用端：合法路径是找国际站 Web 端（www.workbuddy.ai）的实测枚举值（需重新抓 HAR / bundle 分析），而不是自定义字符串
+3. 顺延项持续开放：标准适配器 getBalance 池形态（低优先级）；模型健康 60-90 天窗口；UsageDaily 历史天回填工具；GET /v1/responses/{id}
+4. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
