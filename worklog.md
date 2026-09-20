@@ -2134,3 +2134,34 @@ Stage Summary:
 3. 本轮消息内容「你好（网关测试）」已在 marbella 账户计费侧落地一条真实记录（credit=0，零消耗），用户日后核对时以此辨认
 4. 顺延项持续开放：标准适配器 getBalance 池形态（低优先级）；模型健康 60-90 天窗口；UsageDaily 历史天回填工具；GET /v1/responses/{id}
 5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+
+---
+Task ID: 52
+Agent: 主会话（Z.ai Code，用户直派任务轮：WorkBuddy INTL 版独立使用端标识）
+Task: 用户指令「将 workbuddy 国际版也按照这个方法修改，但是使用端改为 workbuddy ai」—— 在 Task 51（v4.6.2 全部 WorkBuddy 上游请求携带 X-Client-Platform: web）基础上，INTL 版（www.codebuddy.ai）请求的使用端标识值单独改为 "workbuddy ai"，CN 版保持 "web" 对齐 Web 端实测行为；版本 4.6.2 → 4.6.3
+
+Work Log:
+- 【前置确认】git log 确认 Task 51 已落地（commit 897b9ed，CN+INTL 同构共用常量 WORKBUDDY_CLIENT_PLATFORM = "web"）；全量读取 provider 现行代码（847 行）：WorkBuddyProvider 为实例级 region（this.region: "cn" | "intl"，构造时从 config.region 归一化），四个 X-Client-Platform 注入点全部位于类方法/类内闭包（refreshAccessToken / attemptAccount.makeRequest / getBalance.queryAccountBalance / doDailyCheckin.checkinSingle），this.region 全部可用
+- 【账户池确认】DB（db/custom.db，bun:sqlite 只读）实测：workbuddy-intl provider region=intl，账户池 4 个全部启用（xiaoyi550w-gmail-com / puaservice / chfi2411-gmail-com / chfi65325-gmail-com，凭证在 Account.credentials JSON，configService.dbToConfigRaw 装配进 provider.config.accounts）；deepseek-v4.1-flash 路由首选 workbuddy-intl（sortOrder 0）备选 workbuddy（sortOrder 1）
+- 【回退点（修改前）】git tag `rollback-pre-wb-intl-platform` @ 6c07e51（v4.6.2 完成态 + 空 checkpoint commit）；回退命令 `git reset --hard rollback-pre-wb-intl-platform`
+- 【修改】src/lib/gateway/providers/workbuddy/index.ts：
+  - 常量重构：WORKBUDDY_CLIENT_PLATFORM 拆为 WORKBUDDY_CLIENT_PLATFORM_CN = "web" 与 WORKBUDDY_CLIENT_PLATFORM_INTL = "workbuddy ai"，新增分流函数 workbuddyClientPlatform(region: "cn" | "intl")（注释完整记录 v4.6.3 语义：按 provider 实例 region 分流，同一 provider 内四通道取值一致）
+  - 四通道注入点全部改为 `"X-Client-Platform": workbuddyClientPlatform(this.region)`：①refreshAccessToken（token 续签）②attemptAccount.makeRequest（chat 主链路）③queryAccountBalance（余额）④checkinSingle（签到）—— CN provider 行为零变化（region="cn" 恒返 "web"），INTL provider 全部请求改带 "workbuddy ai"
+- 【版本】configService VERSION 4.6.2 → 4.6.3（版本注释追加本轮语义）
+- 【测试消息（沿用 Task 51 协议：实发一条、不验证计费效果）】.zscripts 一次性脚本直接调用 workbuddy-intl provider.attemptAccount(xiaoyi550w-gmail-com)（与生产 callChat→runFailover→attemptAccount 上游请求构造完全同源；绕过账号排序保证落点确定为 INTL 池首个账户；手动复刻 callChat 预处理：sanitizeMessages + INTL 无 system 头注入兜底"You are a helpful assistant."防 11128 WAF 拒绝）：model=deepseek-v4.1-flash、stream:true、消息「你好（网关INTL测试）」（与 Task 51 的「你好（网关测试）」及用户 Web 端「你好」区分，方便日后计费明细辨认）
+  - 结果：HTTP 200（1103ms），X-Gateway-Account: xiaoyi550w-gmail-com，SSE 32 帧完整消费，finish_reason=stop，usage 18+31 tokens、credit=0，回复正常（「你好！很高兴见到你 😊 我是 DeepSeek…」）—— 上游完全接受携带 X-Client-Platform: "workbuddy ai" 的新请求形态（无 4xx/风控拒绝）
+  - 计费 client 字段效果未查询（沿用用户「不验证是否正确」协议）
+- 【验证矩阵】lint 零错误；tsc 全量 src/ 零错误（examples/tests/skills/mini-services 既有冲突维持 Task 44-51 口径）；healthz v4.6.3（HMR 生效）2 提供商/6 模型与修改前一致；dev.log 无运行时错误；.zscripts 冒烟脚本用后即删（工作树干净）
+- 【git】独立 commit（provider 四通道分流 + configService VERSION 4.6.3 + worklog 本节）
+
+Stage Summary:
+- WorkBuddy 上游请求使用端标识现按 region 分流：CN 版（copilot.tencent.com / www.codebuddy.cn）四通道保持 X-Client-Platform: "web"（Task 51 语义零变化）；INTL 版（www.codebuddy.ai）四通道全部改带 X-Client-Platform: "workbuddy ai"（用户指定值，WorkBuddy AI 产品名）
+- INTL 携新标识请求已实发验证可送达（200 + SSE 完整 + credit=0 零消耗），预期计费明细 client 字段记为 WorkBuddy AI 系（未验证，沿用协议）
+- 回退点：tag rollback-pre-wb-intl-platform @ 6c07e51（一条命令完整回退本轮 INTL 改动，Task 51 的 CN 改动不受影响）
+
+未解决问题与风险（下一阶段建议）:
+1. INTL 计费 client 字段实际取值未验证（用户协议：不验证）。后续验证方法：登录 www.workbuddy.ai（或对应国际站用户中心）计费明细，找 input 含「你好（网关INTL测试）」、model=deepseek-v4.1-flash 的最新记录（2026-09-20 17:04 前后，xiaoyi550w 账户），看 client 取值；CN 版验证线索见 Task 51（「你好（网关测试）」@ marbella）
+2. "workbuddy ai" 为用户指定的自定义标识值（非 Web 端实测枚举 "web"/"miniprogram"）—— 若服务端按枚举白名单记账，可能记为空或归入未知类；备选值实验路径与 Task 51 遗留项 2 相同（端点切换 / X-Product / webchat 头组）
+3. 本轮消息「你好（网关INTL测试）」已在 xiaoyi550w 账户计费侧落地一条真实记录（credit=0 零消耗），用户日后核对时以此辨认
+4. 顺延项持续开放：标准适配器 getBalance 池形态（低优先级）；模型健康 60-90 天窗口；UsageDaily 历史天回填工具；GET /v1/responses/{id}
+5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
