@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
           type: "Bearer Token, x-api-key, or Console Session Cookie",
           required_key: "MASTER_KEY",
           header: "Authorization: Bearer <MASTER_KEY>",
-          note: "Web console sessions (uag_session cookie) are also accepted on /admin/api/*. Virtual keys (client role) may carry optional daily quotas (dailyRequestLimit / dailyTokenLimit in virtual_keys entries since v4.3.0): when a key exhausts its local-day quota, gateway entrypoints /v1/messages and /v1/chat/completions return 429 with rate_limit_error and standard X-RateLimit-Limit / X-RateLimit-Remaining / X-RateLimit-Reset / Retry-After headers (quota resets at local midnight; rejected requests are not counted).",
+          note: "Web console sessions (uag_session cookie) are also accepted on /admin/api/*. Virtual keys (client role) may carry optional daily quotas (dailyRequestLimit / dailyTokenLimit in virtual_keys entries since v4.3.0): when a key exhausts its local-day quota, gateway entrypoints /v1/messages and /v1/chat/completions return 429 with rate_limit_error and standard X-RateLimit-Limit / X-RateLimit-Remaining / X-RateLimit-Reset / Retry-After headers (quota resets at local midnight; rejected requests are not counted). Since v4.5.0 virtual keys may also carry a monthly cost budget (monthlyCostLimit, USD, estimated basis): when the key's current-month estimated cost (UsageDaily month rows x ModelPricing per-model rates; unpriced models excluded) reaches the budget, entrypoints return 429 with rate_limit_error plus X-Budget-Limit / X-Budget-Remaining / X-Budget-Reset / Retry-After headers (budget resets at start of next local month; rejected requests are not counted).",
         },
         endpoints: [
           {

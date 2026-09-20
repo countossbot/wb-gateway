@@ -13,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  Wallet,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -57,6 +58,13 @@ function quotaBarClass(pct: number): string {
   if (pct >= 100) return "bg-red-500";
   if (pct >= 80) return "bg-amber-500";
   return "bg-emerald-500";
+}
+
+/** v4.5.0：月度预算进度条颜色档（lime 系「钱」语义三档：<80 安全 / ≥80 临近 / ≥100 已超预算） */
+function budgetBarClass(pct: number): string {
+  if (pct >= 100) return "bg-red-500";
+  if (pct >= 80) return "bg-amber-500";
+  return "bg-lime-500";
 }
 
 /**
@@ -112,6 +120,44 @@ function QuotaBars({ k }: { k: VirtualKeyRow }) {
   );
 }
 
+/**
+ * v4.5.0：密钥月度成本预算单元（列表「本月预算」列）。
+ * - 仅对设置了月预算的密钥渲染；未设预算显示「—」淡态
+ * - 进度条：本月估算成本 $N/预算（lime 三档；≥100% 红档 + 「已超预算」红字）
+ * - 成本口径与网关预算执行同源（UsageDaily 当月 × 单价表 + 30s 内缓冲同步）；
+ *   被拒请求不计入；未配置单价的模型不计成本（单价表为空时预算永不触发，脚注说明）
+ */
+function BudgetCell({ k }: { k: VirtualKeyRow }) {
+  const limit = k.monthlyCostLimit || 0;
+  if (limit <= 0) return <span className="text-xs text-stone-400">—</span>;
+  const used = k.monthCost || 0;
+  const pct = Math.min(100, (used / limit) * 100);
+  const capped = used >= limit;
+  return (
+    <div className="w-36 space-y-1.5">
+      <div className="flex items-baseline justify-between gap-1">
+        <span className={`text-[10px] tabular-nums ${capped ? "font-semibold text-red-600" : "text-stone-500"}`}>
+          {fmtUsd(used)} / {fmtUsd(limit)}
+        </span>
+        {capped && <span className="text-[9px] font-medium text-red-600">已超预算</span>}
+      </div>
+      <div
+        className="h-1.5 overflow-hidden rounded-full bg-stone-100"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={limit}
+        aria-valuenow={Math.min(used, limit)}
+        aria-label={`密钥 ${k.name} 本月估算成本 ${fmtUsd(used)} / 预算 ${fmtUsd(limit)}`}
+      >
+        <div className={`h-full rounded-full transition-all ${budgetBarClass(pct)}`} style={{ width: `${Math.max(2, pct)}%` }} />
+      </div>
+      <p className="text-[9px] leading-tight text-stone-400" title="成本按设置页模型单价表估算（非计费）；未配置单价的模型不计入；预算耗尽后网关入口 429，下月 1 日 0 点重置">
+        估算口径 · 本地月重置
+      </p>
+    </div>
+  );
+}
+
 export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => void } = {}) {
   const [data, setData] = React.useState<KeysData | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -122,7 +168,8 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
   const [editOpen, setEditOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<VirtualKeyRow | null>(null);
   // v4.3.0：配额输入用字符串态（空串=不限额；允许临时清空编辑）；提交时统一清洗
-  const [form, setForm] = React.useState<{ name: string; keyValue: string; models: string[]; role: string; remark: string; dailyRequestLimit: string; dailyTokenLimit: string }>({
+  // v4.5.0：月预算同为字符串态（空串=不限；允许小数）
+  const [form, setForm] = React.useState<{ name: string; keyValue: string; models: string[]; role: string; remark: string; dailyRequestLimit: string; dailyTokenLimit: string; monthlyCostLimit: string }>({
     name: "",
     keyValue: "",
     models: ["*"],
@@ -130,6 +177,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
     remark: "",
     dailyRequestLimit: "",
     dailyTokenLimit: "",
+    monthlyCostLimit: "",
   });
   const [saving, setSaving] = React.useState(false);
   const [formError, setFormError] = React.useState("");
@@ -213,7 +261,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
 
   const openCreate = () => {
     setEditing(null);
-    setForm({ name: "", keyValue: "", models: ["*"], role: "client", remark: "", dailyRequestLimit: "", dailyTokenLimit: "" });
+    setForm({ name: "", keyValue: "", models: ["*"], role: "client", remark: "", dailyRequestLimit: "", dailyTokenLimit: "", monthlyCostLimit: "" });
     setFormError("");
     setEditOpen(true);
   };
@@ -228,6 +276,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
       remark: k.remark || "",
       dailyRequestLimit: k.dailyRequestLimit && k.dailyRequestLimit > 0 ? String(k.dailyRequestLimit) : "",
       dailyTokenLimit: k.dailyTokenLimit && k.dailyTokenLimit > 0 ? String(k.dailyTokenLimit) : "",
+      monthlyCostLimit: k.monthlyCostLimit && k.monthlyCostLimit > 0 ? String(k.monthlyCostLimit) : "",
     });
     setFormError("");
     setEditOpen(true);
@@ -240,6 +289,15 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
     if (!/^\d{1,9}$/.test(t)) return "invalid";
     const n = parseInt(t, 10);
     return n > 100_000_000 ? "invalid" : n;
+  };
+
+  /** v4.5.0：月预算输入清洗（空串/非正数 → 0 不限；保留两位小数；上限 1 亿） */
+  const parseBudgetInput = (s: string): number | "invalid" => {
+    const t = s.trim();
+    if (t === "") return 0;
+    if (!/^\d{1,9}(\.\d{1,2})?$/.test(t)) return "invalid";
+    const n = parseFloat(t);
+    return !Number.isFinite(n) || n <= 0 || n > 100_000_000 ? "invalid" : Math.round(n * 100) / 100;
   };
 
   const save = async () => {
@@ -262,6 +320,11 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
       setFormError("配额必须为正整数（留空或 0 表示不限额，上限 1 亿）");
       return;
     }
+    const monthlyBudget = parseBudgetInput(form.monthlyCostLimit);
+    if (monthlyBudget === "invalid") {
+      setFormError("月度预算必须为正数（最多两位小数，留空表示不限）");
+      return;
+    }
     setSaving(true);
     try {
       if (editing) {
@@ -274,6 +337,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
           remark: form.remark.trim() || null,
           dailyRequestLimit: reqLimit,
           dailyTokenLimit: tokLimit,
+          monthlyCostLimit: monthlyBudget,
         });
         setNotice("密钥已更新");
       } else {
@@ -285,6 +349,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
           remark: form.remark.trim() || undefined,
           dailyRequestLimit: reqLimit,
           dailyTokenLimit: tokLimit,
+          monthlyCostLimit: monthlyBudget,
         });
         setCreated(r);
       }
@@ -386,6 +451,8 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                   <TableHead className="hidden sm:table-cell">角色</TableHead>
                   {/* v4.3.0：今日配额用量（双进度条；未设限额显示「不限」） */}
                   <TableHead className="hidden lg:table-cell">今日配额</TableHead>
+                  {/* v4.5.0：本月预算（月度成本进度条；未设预算显示 —） */}
+                  <TableHead className="hidden xl:table-cell">本月预算</TableHead>
                   <TableHead className="hidden xl:table-cell">健康面板</TableHead>
                   {/* v3.7.0：最后使用时间（RequestLog 滚动窗口 MAX(createdAt)） */}
                   <TableHead className="hidden lg:table-cell">最后使用</TableHead>
@@ -403,8 +470,8 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                       <div className="flex flex-col">
                         <div className="flex items-center gap-1.5">
                           <span className="font-medium text-stone-800">{k.name}</span>
-                          {/* v4.3.0：设了任一限额的密钥名旁加 Gauge 小徽标（一目了然谁在限额约束下） */}
-                          {(k.dailyRequestLimit || 0) > 0 || (k.dailyTokenLimit || 0) > 0 ? (
+                          {/* v4.3.0：设了任一限额或月预算的密钥名旁加 Gauge 小徽标（一目了然谁在护栏约束下） */}
+                          {(k.dailyRequestLimit || 0) > 0 || (k.dailyTokenLimit || 0) > 0 || (k.monthlyCostLimit || 0) > 0 ? (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Badge variant="outline" className="border-violet-200 bg-violet-50 px-1 py-0 text-[9px] font-medium text-violet-700">
@@ -413,11 +480,13 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                                 </Badge>
                               </TooltipTrigger>
                               <TooltipContent>
-                                该密钥设置了日配额：
+                                该密钥设置了护栏：
                                 {(k.dailyRequestLimit || 0) > 0 ? `请求 ${k.dailyRequestLimit!.toLocaleString()} 次/日` : ""}
                                 {(k.dailyRequestLimit || 0) > 0 && (k.dailyTokenLimit || 0) > 0 ? " · " : ""}
                                 {(k.dailyTokenLimit || 0) > 0 ? `token ${k.dailyTokenLimit!.toLocaleString()}/日` : ""}
-                                （本地时区日，超限 429）
+                                {((k.dailyRequestLimit || 0) > 0 || (k.dailyTokenLimit || 0) > 0) && (k.monthlyCostLimit || 0) > 0 ? " · " : ""}
+                                {(k.monthlyCostLimit || 0) > 0 ? `月预算 ${fmtUsd(k.monthlyCostLimit!)}` : ""}
+                                （超限 429）
                               </TooltipContent>
                             </Tooltip>
                           ) : null}
@@ -453,6 +522,9 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                     </TableCell>
                     <TableCell className="hidden lg:table-cell">
                       <QuotaBars k={k} />
+                    </TableCell>
+                    <TableCell className="hidden xl:table-cell">
+                      <BudgetCell k={k} />
                     </TableCell>
                     <TableCell className="hidden xl:table-cell">
                       <Tooltip>
@@ -548,6 +620,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
         提示：列表显示的是掩码，复制按钮复制的也是掩码（用于核对身份）。完整密钥仅在创建时一次性展示。
         「健康面板」按请求日志聚合该密钥 24h 调用量与成功率（进度条为成功率三色档），今日 token 数来自按日聚合表（不受滚动日志窗口截断）；
         「今日配额」为密钥级日用量护栏（v4.3.0：设置限额后超限请求在入口被 429 拒绝，不触上游；被拒请求不计入用量；本地时区日零点重置，统计与网关执行同源，约 30 秒内同步）；
+        「本月预算」为密钥级月度成本护栏（v4.5.0：当月估算成本到达预算后入口 429，下月 1 日 0 点重置；成本按设置页模型单价表估算，未配置单价的模型不计入，未配置任何单价时预算不生效；统计与网关执行同源）；
         「最后使用」取自请求日志滚动窗口内的最近一次调用（v3.7.0；窗口仅保留近期 5000 条，长期闲置的密钥可能显示为「从未使用」，语义为近期未调用）；
         「近 7 天用量」为该密钥逐日请求数迷你图（UsageDaily 聚合，悬停 ⓘ 查看每日明细，v4.4.0：明细与图下徽标附带按模型单价表估算的 $ 成本，非计费口径），仅供全量/估算 token 的场景参考。
         {onViewLogs ? "，点击徽标可跳转该密钥的请求日志" : ""}。
@@ -623,6 +696,34 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
               </div>
               <p className="text-xs text-muted-foreground">
                 留空 = 不限额。到达限额后网关入口直接返回 429（不触上游、零成本），本地时区每日零点自然重置；token 按入口统计（input+output，缓存命中不重复计）。
+              </p>
+            </div>
+            {/* v4.5.0：月度成本预算（$/估算口径；超限 429 + 下月 1 日重置） */}
+            <div className="space-y-1.5">
+              <Label htmlFor="vk-monthly-budget" className="flex items-center gap-1.5">
+                <Wallet className="size-3.5 text-lime-600" />
+                月度成本预算（可选，$）
+              </Label>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Input
+                    id="vk-monthly-budget"
+                    inputMode="decimal"
+                    value={form.monthlyCostLimit}
+                    onChange={(e) => setForm((f) => ({ ...f, monthlyCostLimit: e.target.value.replace(/[^\d.]/g, "") }))}
+                    placeholder="不限"
+                    aria-describedby="vk-monthly-budget-hint"
+                  />
+                  <p id="vk-monthly-budget-hint" className="text-[11px] leading-tight text-muted-foreground">当月估算成本上限 / $</p>
+                </div>
+                <div className="space-y-1 self-end">
+                  <p className="text-[11px] leading-tight text-muted-foreground">
+                    按设置页模型单价表估算（非计费）；未配置单价的模型不计入，未配置任何单价时预算不生效。
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                留空 = 不限。当月累计估算成本到达预算后入口直接 429（不触上游），下月 1 日 0 点自然重置；被拒请求不计入成本。
               </p>
             </div>
             <div className="space-y-1.5">

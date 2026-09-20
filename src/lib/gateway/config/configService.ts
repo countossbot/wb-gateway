@@ -17,7 +17,7 @@ import { db } from "@/lib/db";
 import type { GatewayConfig, ProviderConfig, AccountConfig, RouteCandidateConfig, VirtualKeyEntry } from "../core/types";
 import { refreshRuntimeSettings } from "./runtimeSettings";
 
-export const VERSION = "4.4.0"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.4.0：用量成本估算 —— ModelPricing 模型单价表 + 设置页定价管理（表格编辑/批量粘贴导入/未计价模型一键补录）+ 总览成本卡（今日/近7天成本 + 逐日趋势 + Top 成本模型 + 计价覆盖率）+ 用量透视成本模式与按模型视图 + Top 提供商成本列 + 密钥页 7 天成本 + 日志行级成本徽标）；4.3.2：运维监控体验升级；4.3.1：路由试跑控制台调试工具
+export const VERSION = "4.5.0"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.5.0：月度账单与预算 —— 虚拟密钥月度成本预算（monthlyCostLimit，估算口径月累计 ≥ 预算入口 429 + X-Budget-* 头组，下月 1 日重置）+ 总览月度账单卡（按密钥分组月成本报表 + byModel 明细 + 环比上月 + CSV 导出）；4.4.0：用量成本估算（ModelPricing 单价表 + 六视图成本）；4.3.2：运维监控体验升级；4.3.1：路由试跑控制台调试工具
 
 // ---- 默认路由表（等价保留原 getDefaultConfig 的 routes；用于读路径回填） ----
 export const DEFAULT_ROUTES: Record<string, RouteCandidateConfig[]> = {
@@ -515,6 +515,8 @@ async function dbToConfigRaw(): Promise<GatewayConfig> {
       // v4.3.0：日配额随配置下发（0 = 不限额；变更经 invalidateConfigChanged 传播）
       ...(vk.dailyRequestLimit > 0 ? { dailyRequestLimit: vk.dailyRequestLimit } : {}),
       ...(vk.dailyTokenLimit > 0 ? { dailyTokenLimit: vk.dailyTokenLimit } : {}),
+      // v4.5.0：月度成本预算随配置下发（$/估算口径；0 = 不限）
+      ...(vk.monthlyCostLimit > 0 ? { monthlyCostLimit: vk.monthlyCostLimit } : {}),
     };
   }
 
@@ -771,6 +773,8 @@ async function persistConfigToDb(config: GatewayConfig): Promise<void> {
         // v4.3.0：配额随 entry 全量覆盖（GET 返回含配额 → 回环 POST 自然保留；显式 0 清除限额）
         dailyRequestLimit: Math.max(0, Math.floor(Number(entry?.dailyRequestLimit) || 0)),
         dailyTokenLimit: Math.max(0, Math.floor(Number(entry?.dailyTokenLimit) || 0)),
+        // v4.5.0：月预算同语义全量覆盖（浮点 $；上限 1 亿防溢出）
+        monthlyCostLimit: Math.min(100_000_000, Math.max(0, Number(entry?.monthlyCostLimit) || 0)),
       },
       update: {
         name: entry?.name || "Client Key",
@@ -780,6 +784,7 @@ async function persistConfigToDb(config: GatewayConfig): Promise<void> {
         remark: entry?.remark || null,
         dailyRequestLimit: Math.max(0, Math.floor(Number(entry?.dailyRequestLimit) || 0)),
         dailyTokenLimit: Math.max(0, Math.floor(Number(entry?.dailyTokenLimit) || 0)),
+        monthlyCostLimit: Math.min(100_000_000, Math.max(0, Number(entry?.monthlyCostLimit) || 0)),
       },
     });
   }
