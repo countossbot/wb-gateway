@@ -17,7 +17,7 @@ import { db } from "@/lib/db";
 import type { GatewayConfig, ProviderConfig, AccountConfig, RouteCandidateConfig, VirtualKeyEntry } from "../core/types";
 import { refreshRuntimeSettings } from "./runtimeSettings";
 
-export const VERSION = "4.3.0"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.3.0：虚拟密钥日配额 —— 密钥级请求次/token 日限额，入口超限 429（零上游成本）+ RateLimit 标准头组 + 控制台配额进度条；账本复用 UsageDaily + 内存 peek 同源口径；4.2.4：runtimeSettings globalThis + 机器接口签到白名单 + 总览洞察独立 API）
+export const VERSION = "4.3.1"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.3.1：路由试跑控制台调试工具 —— 真实链路试跑（路由→候选故障转移→转译→上游）+ 候选链时间线 + 流式实时渲染 + 落点/用量徽标；dispatch 增 onDispatchEvent 诊断钩子（正常流量零开销）；4.3.0：虚拟密钥日配额）
 
 // ---- 默认路由表（等价保留原 getDefaultConfig 的 routes；用于读路径回填） ----
 export const DEFAULT_ROUTES: Record<string, RouteCandidateConfig[]> = {

@@ -1890,3 +1890,37 @@ Stage Summary:
 3. dev 模式跨路由模块实例（/v1/messages 与 /v1/chat/completions 各自 requestLog 实例）间仍有 30s 内理论盲区；生产单实例精确。文档已注明
 4. 首次部署本版本需 prisma db push（增量字段，无数据迁移风险）；运行中 dev server 需重启加载新 Prisma Client（本轮已验证：不重启会 PrismaClientValidationError 500）
 5. 顺延项持续开放：标准适配器 getBalance 池形态；模型健康 60/90 天窗口；UsageDaily 模型维度历史天回填工具；路由测试工具（控制台试跑调试）
+
+---
+Task ID: 45
+Agent: 主会话（Z.ai Code，持续迭代轮，trace: 1a0bc1e5e26e0a89-web-cron-review-202609201030）
+Task: 巡检 QA → 清偿 Task 44 顺延项「路由测试工具（控制台试跑调试）」+ 修复 mock-upstream 流式回归；版本 4.3.0 → 4.3.1
+
+Work Log:
+- 【巡检】dev server 存活（v4.3.0，基线 2 提供商/6 模型一致）；mock-upstream 3040 存活；git 工作树干净（Task 44 已全部入库）；agent-browser 8 页签遍历零 console 错误 + VLM 总览页视觉检查通过 → 项目稳定，进入功能开发
+- 【新功能：路由试跑 Playground（v4.3.1）】Task 44 起顺延的核心调试工具，管理员在「模型路由」页对任意路由发起真实链路调用并可视化诊断
+  - dispatch 诊断钩子：DispatchParams 新增 onDispatchEvent（正常流量不传零开销，emit 空函数兜底 + try/catch 保护主链路）；8 类事件 noroute/attempt/fatal/error/fail/retry/success/exhausted，每事件带 t=距 dispatch 开始毫秒数；发射点覆盖无路由 404、候选尝试、参数级 fatal 直返、传输异常、上游 HTTP 失败（摘要 200 字符截断）、冷却/切换动作、命中（provider/model/account/fallback/contentType）、耗尽
+  - 后端 POST /api/console/routes/test：会话鉴权 + 输入校验（模型名同口径正则/prompt 8000/system 4000/maxTokens 1-4096 默认 128/temperature 0-2）→ 构造与生产入口等价的 openai/anthropic 双协议请求体 → 合成内部 Request（AbortSignal.any 组合客户端断连 + 120s 试跑总超时，关对话框即联动上游断流）→ dispatchExchange 真实链路（apiKeyName=console-test 诚实记账）；非流式返回 {status,latencyMs,meta,trace,body}（JSON 解析失败保原文 100KB 截断）；流式 SSE 透传 + X-Test-Trace 头（候选链尝试全部发生在流开始前故头内已完整，>6KB 折叠保头尾）+ X-Test-Latency
+  - 前端 RouteTestDialog（route-test.tsx 新组件）：左表单（路由下拉含停用徽标+手动输入哨兵/协议选择带转译说明/system/prompt/max_tokens/temperature/流式开关）右结果（HTTP 状态四色徽标/耗时（流式=首字节+总时长）/命中提供商·模型·账号·故障转移·tokens·SSE 帧数徽标行/候选链时间线（8 类事件逐型渲染：图标+色彩+相对时刻+详情，noroute 显示可用模型 chips）/响应体三视图：格式化 JSON·流式聚合文本（节流 120ms 实时渲染+光标动画）·原始 SSE 帧（data: 前缀灰显）+ CopyButton）；表单草稿模块级缓存跨开合持久；运行中 0.1s 粒度计时 + 停止按钮（AbortController）；计费提示注明 console-test 记账口径
+  - routes.tsx 接线：每行新增 FlaskConical（rose-600）试跑按钮（aria-label/title 全语义）+ RouteTestDialog 挂载 + 页头描述更新
+- 【重大排障：mock-upstream 流式回归（预存 bug，非本轮引入）】e2e B 段流式透传 ECONNRESET → 假设链三级排除法：①middleware 假设 → 双探针对照（/api/console/zzprobe vs /v1/zzprobe 同款 SSE 代码）全部正常 → 否定；②我的端点假设 → curl 直打真实 /v1/chat/completions 同样首帧后停滞（只剩网关注入的 keep-alive ping）→ 否定；③mock 直连 curl/bun fetch 均只收首帧 → **定位 mock 本体**。根因：Bun 1.3.14 下 ReadableStream async start() 内 await 后再 enqueue 全部停滞（旧实现在首帧 await setTimeout(30) 后永久挂死）。修复：「定时器外部 enqueue」模式（start() 同步返回 + setTimeout 链驱动 pump；网关 passthroughSseWithKeepAlive 的 ping 定时器同款模式，实证可靠）+ cancel() 清理挂起定时器；usage 帧并入 chunks 数组统一调度。修复后直连 163ms 完整 5 帧+usage+[DONE]。附带发现 mock 有两个重复 bun --hot 进程（6312/6339）→ 清理重启单实例
+- 【排障方法论沉淀】①Next.js App Router 目录 `__` 前缀 = 私有文件夹不参与路由（探针 404 假象）；②mock 流式挂死会伪装成网关 SSE 回归（网关 ping 保活掩盖上游停滞表象）；③排查顺序应「直连上游 → 真实网关端点 → 新端点」自外向内，本轮若先直连 mock 可省 30 分钟
+- 【e2e】tests/route-test-e2e.ts 51/51 通过：A 非流式（trace=[attempt,success]+落点+usage+key 指纹）；B 流式透传（SSE+X-Test-Trace+delta+usage+[DONE]+落点头组）；C 故障转移链（429 insufficient_quota → fail → retry[cooldown] → 第 2 候选 success + fallback 双口径）；D noroute 404（available 清单）；E anthropic 协议转译（type=message+content 数组+input_tokens）；F 输入校验三拒；G 无会话 401；H RequestLog console-test 记账（providerId/outputTokens/模型维度）；I 自建自删 + healthz 等价。脚本含预清理段（幂等重跑，教训：首轮 B 崩溃未清理致二轮 409；预清理块初始误插在创建之后自删资产，修正为前置）
+- 【e2e 排障记录】C 场景首选用 sk-bad-*（401）演示失败转移失败：单密钥回退路径下 401 候选级 classify=fatal 直返不切换（正确语义）→ 改 sk-quota-*（429→cooldown→切换）才演示候选级故障转移；断言相应改为 fail.status=429 + retry.action=cooldown
+- 【UI 验证】agent-browser 全流程：烧瓶按钮（6 路由全渲染）→ 对话框打开（VLM：双栏布局/表单七要素/占位提示/无错位四项全过）→ 非流式试跑（VLM：HTTP 200 绿徽标+耗时 27ms+qa-ui-rt→mock-chat+账号 default+142/113 tokens 缓存 20+时间线 2 事件+JSON 响应体 371B 全渲染）→ 流式试跑（VLM：首字节 5ms+SSE 5 帧+聚合文本+聚合/原始切换按钮+时间线正常）→ 原始 SSE 视图（data: 前缀帧渲染）→ 零 console 错误；Dialog footer 点击怪癖按 Task 44 惯例用 JS click 规避；运行日志页 console-test 记录 28 条可见
+- 【验证矩阵】lint 零错误；tsc src/ 零错误（examples/skills/tests/mini-services 预存错误不变）；8 页签回归零错误；dev.log 无运行时错误；healthz v4.3.1 基线 2/6 前后等价；qa-rt-*/qa-rt2/qa-ui-rt* 测试资产全清理（含首轮崩溃残留 + 手工探测资产）
+- 【git】独立 commit（dispatch 钩子 + 试跑 API + route-test.tsx + routes.tsx 接线 + types + VERSION + mock 修复 + e2e）
+
+Stage Summary:
+- Task 44 顺延项「路由测试工具」完整落地：控制台内对任意路由发起真实链路试跑（与生产流量同一条代码路径：路由解析→候选故障转移→协议转译→上游含代理/账号池/冷却），候选链时间线 + 落点/用量徽标 + 流式实时渲染 + 原始 SSE 检视；版本 4.3.1
+- 附带修复重大预存回归：mock-upstream 流式生成器在 Bun 1.3.14 下全流挂死（async start await 后 enqueue 停滞）——该 bug 使一切依赖 mock 流式的 QA 基础设施失效（v4.2.0 SSE 验证能力恢复）；定时器外部 enqueue 模式已注释沉淀
+- 架构决策：诊断钩子可选注入（正常网关流量零开销零风险）；试跑请求诚实记账（RequestLog/UsageDaily 记 console-test，运行日志可追溯）；流式 trace 走响应头（候选链尝试全部先于流开始，头内天然完整）
+- 排障资产沉淀：Bun ReadableStream async-start 陷阱 + 排查自外向内顺序论 + Next.js __ 前缀私有目录 + 预清理必须前置
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（qa-rt-*/qa-ui-rt*/qa-rt2 全部自建自删含崩溃残留清理；试跑调用 30+ 次全部经 mock-upstream 零真实计费；RequestLog/UsageDaily 新增 console-test 统计行属诚实记账非污染）
+2. mock-upstream bun --hot 有启动两个重复进程的历史（6312/6339 曾并存）——如再现流式异常先查进程数；已重启单实例（2026-09-20 02:54）
+3. 试跑流式 trace 头有 6KB 折叠上限（>30 候选链事件折叠为头 2+尾 4，正常 6 路由规模远达不到）；如需全量可在响应体首帧前注入 trace 事件帧（暂无需求）
+4. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康 60/90 天窗口；UsageDaily 模型维度历史天回填工具；试跑对话框可扩展「最近试跑历史」列表（当前仅保留最后一次）
+5. console-test 今日统计格（qa-rt-model/qa-rt-chain/qa-rt-noroute-x/qa-ui-rt-model 等）已随 UsageDaily 落库——7 天窗口自然老化，与既有 qa-* 历史格同类，不影响业务配置
+6. mock-upstream（3040）单实例保持运行供后续巡检复用；如被 reaper 清理用 `( setsid bun run dev < /dev/null >> /tmp/mock-upstream.log 2>&1 & )` 在 mini-services/mock-upstream 下重启

@@ -176,6 +176,10 @@ const server = Bun.serve({
       // 可控静默注入（v4.2.0 SSE 验证）：用户文本含 STALL:<ms> → 发送首帧后静默该时长再继续
       //（模拟长思考模型 / 上游卡死；网关侧验证保活 ping 与停滞熔断。用消息内容而非 header
       //  触发 —— 网关不透传客户端自定义 header，但消息体会原样到达上游）
+      // ⚠️ Bun 1.3.14 实测（2026-09-20 排障）：async start() 内 await 后再 enqueue 会停滞
+      //（首帧后挂死，直连 curl / bun fetch 均只收到首帧；旧实现因此全流卡死）。
+      // 改用「定时器外部 enqueue」：start() 同步返回，帧调度由 setTimeout 链驱动
+      //（网关 passthrough 的 ping 定时器同款模式，实测可靠）；cancel() 清理挂起定时器。
       const stallMatch = /STALL:(\d{1,6})/.exec(userText);
       const stallMs = stallMsCap(Number(stallMatch ? stallMatch[1] : 0));
       const encoder = new TextEncoder();
@@ -184,25 +188,42 @@ const server = Bun.serve({
         { choices: [{ delta: { reasoning_content: "mock thinking done." } }] },
         { choices: [{ delta: { content: `Hello from mock upstream stream! ${keyTag} You said: ${userText.slice(0, 60)}` } }] },
         { choices: [{ delta: {}, finish_reason: "stop" }] },
+        { choices: [{ delta: {} }], usage: { prompt_tokens: 42, completion_tokens: 13, prompt_tokens_details: { cached_tokens: 20 } } },
       ];
-      const readable = new ReadableStream({
-        async start(controller) {
-          let i = 0;
-          for (const chunk of chunks) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
-            await new Promise((r) => setTimeout(r, 30));
-            i++;
-            // 首帧后注入可控静默（上游字节间隔模拟）
-            if (stallMs > 0 && i === 1) {
-              await new Promise((r) => setTimeout(r, stallMs));
-            }
-          }
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 42, completion_tokens: 13, prompt_tokens_details: { cached_tokens: 20 } } })}\n\n`));
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-          controller.close();
+      let ctrl: ReadableStreamDefaultController<Uint8Array> | null = null;
+      let frameTimer: ReturnType<typeof setTimeout> | null = null;
+      let closed = false;
+      const finishStream = () => {
+        if (closed) return;
+        closed = true;
+        if (frameTimer) clearTimeout(frameTimer);
+        try { ctrl?.close(); } catch { /* 已关闭 */ }
+      };
+      const sendFrame = (payload: string) => {
+        if (closed || !ctrl) return;
+        try { ctrl.enqueue(encoder.encode(`data: ${payload}\n\n`)); } catch { closed = true; }
+      };
+      const pump = (i: number) => {
+        if (closed || !ctrl) return;
+        if (i >= chunks.length) {
+          sendFrame("[DONE]");
+          finishStream();
+          return;
+        }
+        sendFrame(JSON.stringify(chunks[i]));
+        // 首帧后注入可控静默（上游字节间隔模拟）；其余帧 30ms 间隔保持节奏
+        const gap = stallMs > 0 && i === 0 ? stallMs : 30;
+        frameTimer = setTimeout(() => pump(i + 1), gap);
+      };
+      const readable = new ReadableStream<Uint8Array>({
+        start(controller) {
+          ctrl = controller;
+          pump(0);
         },
         cancel() {
-          // 网关停滞熔断会 cancel 上游流：此处无需清理（无外部资源），仅计数验证
+          // 网关停滞熔断会 cancel 上游流：清理挂起定时器并计数验证
+          closed = true;
+          if (frameTimer) clearTimeout(frameTimer);
           cancelledCount++;
         },
       });
