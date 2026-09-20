@@ -1747,3 +1747,37 @@ Stage Summary:
 4. UsageDaily 模型维度持久化（模型健康跨滚动窗口的根本解）持续顺延；标准适配器多账号轮换持续顺延
 5. dev server HMR 多次重载后 balTrend 仅在组件挂载时拉取（刷新按钮不重拉余额趋势）——当前语义可接受（快照日内变化小），如需实时可在 load() 中一并重拉
 6. mock-upstream（3040）保持运行供后续巡检复用
+---
+Task ID: 41
+Agent: 主会话（Z.ai Code，持续迭代轮，trace: 1a0bc1e5e26e0a89-web-cron-review-202609200836）
+Task: 巡检 QA → 清偿 Task 15 起顺延 20+ 轮的核心遗留「标准适配器多账号轮换」；版本 4.2.1 → 4.2.2
+
+Work Log:
+- 【巡检】dev server 存活（v4.2.1，2 提供商/6 模型基线一致）；mock-upstream 3040 进程被 reaper 清理 → setsid 重启（bun --hot）；agent-browser 8 页签遍历零 console 错误；dev.log 干净 → 项目稳定，进入功能开发
+- 【功能核心】新增 src/lib/gateway/providers/standardPool.ts 共享执行器：poolAccounts（enabled + apiKey 过滤，空池=单密钥回退）→ hydrateCooldowns → orderAccounts（复用 workbuddy 同款纯函数：会话粘性/round-robin/冷却排后/全冷却兜底）→ runFailover 账号级循环（429/402/403/额度文本→惩罚退避+切换；5xx→切换不惩罚；400 参数错→fatal 直返交候选级；401→key 失效无刷新能力→惩罚退避+切换 force retry；成功→清冷却+X-Gateway-Account 落点头注入）→ 耗尽 502（dispatch 候选级 classify=retry 天然级联）
+- 【适配器改造】openaiStandard.callChat / anthropicStandard.callMessages 协议头闭包化（Bearer vs x-api-key）+ callWithAccountPool 接线；**向后兼容关键契约**：无账号池时回退 provider 级 config.apiKey 单密钥直发，与 v4.2.1 行为零差异（不注入落点头，dispatch 维持 "default" 口径）
+- 【分类器】scheduler.classify 新增 402 → cooldown（OpenAI/Anthropic 标准协议 Payment Required 账号欠费信号，换账号可恢复）
+- 【UI】账号管理页分组卡 header + API 中转页提供商卡新增 violet「密钥池轮换 · N」/「多密钥轮换」徽标（KeyRound 图标 + tooltip/title 全调度语义说明；仅 openai/anthropic 且有启用带 key 账号时显示；violet 为轮换专属语义色与现有五色不冲突）
+- 【mock-upstream 增强】①Bearer key 感知：指纹 echo（[key:后4位] 进响应正文）+ perKey 计数（__stats 返回）+ __stats/reset；②key 前缀注入：sk-bad-* → 401 invalid_api_key、sk-quota-* → 429 insufficient_quota；③新增 Anthropic 原生 /v1/messages 端点（x-api-key 同款感知）
+- 【测试设计方法论沉淀】首轮 e2e B 段（多账号池等坏 key 轮到首选）出现「同代码两次结果不同」：根因是 round-robin counter 为网关模块级延续状态（历次运行累积，相位不可知）+ config 版本交叉校验传播时滞（下一请求生效）——「等相位轮到」类断言天然不稳定。修复范式：**相位无关确定性构造**——独立单坏账号池（唯一账号必首选→401 必然发生）→ 中途添加好账号（唯一健康账号必首选→冷却中坏账号必然被跳过）；A 段均匀性断言本身相位无关（连续 N 个 counter mod M 必均分）
+- 【排障过程记录】为定位「中途添加账号未入池」假象，临时给 configService.getConfig/getProviderFleet 加诊断日志实证：invalidate → DB config_version bump → 网关下一请求 TTL 命中时版本交叉校验 MISMATCH → refreshConfig（新 config 含新账号）→ fleet 按 version 判等重建（same false）→ 全链路传播正常；初判「未入池」实为相位未轮到 + 测试未打印 perKey 的误读；诊断日志已全部移除
+- 【验证：e2e】tests/standard-pool-e2e.ts 39 项全过（连续两轮 0 失败）：A 轮换均匀（3 账号 6 次 perKey 恰 2/2/2 + 落点头全真实）；B 401 确定性（单坏池 401 直返 + perKey=1 + 冷却落库 cooldownUntil/reason + 退避时长 30s~8min 内 + 中途添加好账号 config 增量传播 + 好账号接管 + 冷却期零重试）；D 日志落点（accountId 真实 id 非 default + ≥2 不同落点）；E 单密钥兼容（200 + [key:rect] 指纹 + X-Gateway-Account=default 口径不变）；F anthropic 原生通道（/v1/messages 2 账号 4 次轮换恰 2/2 + Anthropic 响应格式 + 指纹）；清理段自建自删（4 路由 4 提供商 9 账号级联无残留）+ healthz 前后等价
+- 【验证：真实回归】用户真实 workbuddy 路由 deepseek-v4-flash 调用 200（账号 0de0a237 落点 + content ok + usage 正常）——workbuddy 路径零影响
+- 【验证：浏览器】账号管理页 + API 中转页 violet 徽标渲染（临时建 qa-ui-badge openai 提供商验证后自删：「密钥池轮换 · 1」+ KeyRound 图标 + violet 样式 ✓；workbuddy 分组正确不显示徽标）；8 页签遍历零 console 错误；healthz v4.2.2 基线 2/6 一致
+- 【验证：质量】lint 零错误；tsc src/ 零错误（mini-services 的 Bun 类型预存错误不变）
+- 【git】独立 commit（standardPool.ts + 双适配器 + classify + 双页 UI + mock-upstream + e2e，9 文件 +638/-39）
+
+Stage Summary:
+- Task 15 起顺延 20+ 轮的最大遗留项「标准适配器多账号轮换」完整落地并端到端验证；版本 4.2.2
+- 架构决策：复用 workbuddy 全套调度资产（orderAccounts/cooldown 持久层/runFailover/classify），openai/anthropic 与 workbuddy 共享同一调度语义词汇表，无平行实现
+- 兼容决策：无池回退单密钥零变化（存量 mock-openai 类配置不受影响）；401 无刷新能力的语义差异已适配（惩罚+切换而非刷新重试）
+- 测试方法论沉淀：相位无关确定性构造（唯一账号必首选），可复用于一切依赖轮换顺序的测试
+- 原项目能力等价验收清单最后一项「账号调度」补齐：5 类提供商中 workbuddy/qwenweb/opencode 原已支持，openai/anthropic 标准适配器现已消费账号池
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（qa-* 测试资产自建自删 ×2 轮 + qa-ui-badge UI 验证用即删；唯一真实调用 1 次为正常计费路径回归）
+2. opencode 类型提供商仍未消费账号池（设计上无凭据字段 CRED_FIELDS 为空；如需账号池需先定义 opencode 凭据语义，建议单独评估）
+3. 标准适配器 getBalance 仍用 provider 级 apiKey（池形态的余额查询未做——openai 兼容端点余额 API 本就非标准，优先级低）
+4. 顺延项持续开放：UsageDaily 模型维度持久化（模型健康跨滚动窗口根本解）；balTrend 刷新按钮不重拉；/checkin 与 /admin/api/checkin 机器接口未接签到白名单
+5. mock-upstream（3040）保持运行（bearer/x-api-key 感知 + anthropic 端点已沉淀为可复用 QA 资产）；如被 reaper 清理可用 `( setsid bun run dev < /dev/null >> /tmp/mock-upstream.log 2>&1 & )` 在 mini-services/mock-upstream 下重启
+6. SSE 修复（Task 39 R1/R2/R6）已闭环；R3/R5 为环境侧无代码动作空间（既有结论维持）
