@@ -17,7 +17,7 @@ import { db } from "@/lib/db";
 import type { GatewayConfig, ProviderConfig, AccountConfig, RouteCandidateConfig, VirtualKeyEntry } from "../core/types";
 import { refreshRuntimeSettings } from "./runtimeSettings";
 
-export const VERSION = "4.2.0"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.2.0：SSE 加固 —— 透传分支保活 ping/停滞熔断（R6）+ undici 超时显式化可配置（R2）+ 熔断阈值热调（R1））
+export const VERSION = "4.2.1"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.2.1：总览三卡落地 —— 近 7 天 Top 提供商排行（UsageDaily 持久聚合）+ 模型健康 7 天 sparkline + 余额预计可用天数外推；中转表单错误固定 footer 上方）
 
 // ---- 默认路由表（等价保留原 getDefaultConfig 的 routes；用于读路径回填） ----
 export const DEFAULT_ROUTES: Record<string, RouteCandidateConfig[]> = {

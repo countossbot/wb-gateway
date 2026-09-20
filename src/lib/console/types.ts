@@ -85,6 +85,10 @@ export interface OverviewData {
   trend7d?: Trend7Day[];
   /** v3.5.0：上一个 7 天汇总（环比对比用；与 trend7d 等长窗口不重叠） */
   trend7d_prev?: Trend7DayPrev;
+  /** v4.2.1：近 7 天 Top 提供商排行（UsageDaily providerId 维度聚合，Top 5 按请求数） */
+  top_providers_7d?: TopProviderRow[];
+  /** v4.2.1：模型健康 sparkline（近 7 天 RequestLog 模型 × 日点阵，Top 6 按请求数） */
+  model_health?: ModelHealthData;
   last_checkin: {
     time: string;
     provider: string;
@@ -170,6 +174,40 @@ export interface TopModelRow {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+}
+
+/** v4.2.1：近 7 天 Top 提供商排行行（UsageDaily providerId 维度聚合；未命中提供商不参与排行） */
+export interface TopProviderRow {
+  providerId: string;
+  providerName: string;
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  /** 占近 7 天总请求数份额（%，1 位小数） */
+  share: number;
+}
+
+/** v4.2.1：模型健康单日点（requestLog 按模型 × 本地日聚合） */
+export interface ModelHealthPoint {
+  day: string; // YYYY-MM-DD
+  requests: number;
+  okRequests: number;
+}
+
+/** v4.2.1：模型健康单模型行（7 个日点 + 7 天汇总） */
+export interface ModelHealthModel {
+  model: string;
+  points: ModelHealthPoint[];
+  requests7d: number;
+  okRequests7d: number;
+}
+
+/** v4.2.1：模型健康 sparkline 数据（GET /api/console/overview 附带） */
+export interface ModelHealthData {
+  days: string[]; // 7 天日期轴（最旧 → 今日）
+  models: ModelHealthModel[]; // 按请求数 Top 6
 }
 
 // ---- 账号管理 ----

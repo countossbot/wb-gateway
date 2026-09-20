@@ -14,6 +14,8 @@ import {
   Copy,
   Download,
   Gauge,
+  HeartPulse,
+  Hourglass,
   Layers,
   Network,
   PieChart,
@@ -44,7 +46,7 @@ import {
 } from "@/components/console/ui";
 import { apiGet, errMessage } from "@/lib/console/api";
 import { cooldownRemaining, fmtCompact, fmtNum, relativeTime } from "@/lib/console/format";
-import type { BalanceHistoryData, OverviewData, TopKeyRow, TopModelRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
+import type { BalanceHistoryData, ModelHealthData, OverviewData, TopKeyRow, TopModelRow, TopProviderRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
 
 /** v3.0.5：近 24h 逐小时请求趋势 mini 图（纯 CSS 柱状：成功 emerald / 失败 red，Tooltip 显示明细；
  *  有流量的柱可点击 → 跳转运行日志按该小时窗口过滤；移动端横向滚动保证 24 柱可读性） */
@@ -620,6 +622,235 @@ function TopModelsCard({
   );
 }
 
+/**
+ * v4.2.1：近 7 天 Top 提供商排行卡（Task 32 顺延项落地）。
+ * - UsageDaily providerId 维度聚合（持久数据，不受滚动日志窗口截断）；Top 5 按请求数
+ * - 每行：排名徽标（orange 系）+ 提供商名 + 占比条 + 请求数/成功率/token + 份额百分比
+ * - 份额 share = 该提供商请求 / 7 天全部请求（含未命中行作分母，忠实反映总盘子）
+ * - 与 Top 密钥（emerald）/ Top 模型（teal）三色区分，一览三卡不混淆
+ */
+function TopProvidersCard({ rows }: { rows: TopProviderRow[] }) {
+  const maxReq = Math.max(1, ...rows.map((r) => r.requests));
+  const totalShare = rows.reduce((s, r) => s + r.share, 0);
+  if (rows.length === 0) {
+    return (
+      <div className="rounded-xl border border-stone-200 bg-white p-4">
+        <p className="text-sm font-medium text-stone-700">近 7 天 Top 提供商</p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          近 7 天尚无命中提供商的调用。调用发生后将按请求数排行（数据来自 UsageDaily 按日聚合，重启不丢）。
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white p-4">
+      <div className="flex items-baseline gap-1.5">
+        <Network className="size-4 shrink-0 self-center text-orange-500" aria-hidden />
+        <p className="shrink-0 text-sm font-medium text-stone-700">近 7 天 Top 提供商</p>
+        {totalShare < 99 && (
+          <Badge variant="outline" className="border-stone-200 bg-stone-50 px-1.5 py-0 text-[10px] font-medium text-stone-500" title={`另有 ${(100 - totalShare).toFixed(1)}% 请求未命中提供商（容灾或路由缺失）`}>
+            另 {Math.round((100 - totalShare) * 10) / 10}% 未命中
+          </Badge>
+        )}
+        <span className="truncate text-[11px] text-muted-foreground">按请求数 · Top {rows.length}</span>
+      </div>
+      <ol className="mt-3 space-y-2">
+        {rows.map((r, i) => {
+          const rate = r.requests > 0 ? Math.round((r.okRequests / r.requests) * 100) : 100;
+          const rateColor =
+            rate >= 90 ? "text-emerald-600" : rate >= 60 ? "text-amber-600" : "text-red-600";
+          const tokens = r.inputTokens + r.outputTokens;
+          return (
+            <li key={r.providerId}>
+              <div className="flex w-full items-center gap-3 rounded-lg px-2 py-1.5">
+                <span
+                  className={`flex size-5 shrink-0 items-center justify-center rounded text-[11px] font-bold tabular-nums ${
+                    i === 0
+                      ? "bg-orange-100 text-orange-700"
+                      : i === 1
+                        ? "bg-stone-200 text-stone-600"
+                        : i === 2
+                          ? "bg-orange-50 text-orange-600"
+                          : "bg-stone-100 text-stone-400"
+                  }`}
+                >
+                  {i + 1}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium text-stone-800" title={`${r.providerName}（${r.providerId}）`}>
+                    {r.providerName}
+                  </span>
+                  {/* 占比条：与请求峰值相对占比（orange，与 Top 密钥 emerald / Top 模型 teal 区分） */}
+                  <span className="mt-1 block h-1 w-full overflow-hidden rounded-full bg-stone-100" aria-hidden>
+                    <span
+                      className="block h-full rounded-full bg-orange-400/70 transition-[width]"
+                      style={{ width: `${Math.max(6, Math.round((r.requests / maxReq) * 100))}%` }}
+                    />
+                  </span>
+                </span>
+                <span className="shrink-0 text-right tabular-nums">
+                  <span className="block text-xs font-semibold text-stone-800">{r.requests} 次</span>
+                  <span
+                    className={`block text-[10px] ${rateColor}`}
+                    title={`tokens 精确值：${fmtNum(tokens)}${r.cachedTokens > 0 ? ` · 缓存精确值：${fmtNum(r.cachedTokens)}` : ""} · 份额 ${r.share}%`}
+                  >
+                    {rate}% · {fmtCompact(tokens)} tk · 占 {r.share}%
+                  </span>
+                </span>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+/** v4.2.1：单日健康柱颜色 —— ≥90 emerald / ≥60 amber / <60 red / 无流量 stone 平点 */
+function healthBarClass(rate: number | null): string {
+  if (rate === null) return "";
+  if (rate >= 90) return "bg-emerald-400 group-hover/bar:bg-emerald-500";
+  if (rate >= 60) return "bg-amber-400 group-hover/bar:bg-amber-500";
+  return "bg-red-400 group-hover/bar:bg-red-500";
+}
+
+/**
+ * v4.2.1：模型健康 sparkline 卡（Task 32 顺延项落地）。
+ * - 近 7 天每个模型一行：模型名 + 7 根日柱（高度=当日请求量相对峰值；颜色=当日成功率三档）
+ *   + 右侧 7 天总请求数与总成功率
+ * - 点击行 → 运行日志按「该模型 + 今日全天」过滤（复用第八跳转通道语义）
+ * - 脚注注明滚动窗口口径（超高流量下远端日可能被截断；UsageDaily 无模型维度，此为本窗口内精确）
+ */
+function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onModelClick?: (model: string) => void }) {
+  const models = data?.models || [];
+  if (models.length === 0) {
+    return (
+      <div className="rounded-xl border border-stone-200 bg-white p-4">
+        <p className="text-sm font-medium text-stone-700">模型健康 · 近 7 天</p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          近 7 天暂无网关调用。调用发生后将按模型展示每日请求量与成功率走势（数据来自请求日志滚动窗口）。
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white p-4">
+      <div className="flex items-baseline gap-1.5">
+        <HeartPulse className="size-4 shrink-0 self-center text-rose-500" aria-hidden />
+        <p className="shrink-0 text-sm font-medium text-stone-700">模型健康 · 近 7 天</p>
+        <span className="truncate text-[11px] text-muted-foreground">日柱高=请求量 · 色=成功率 · Top {models.length}</span>
+      </div>
+      <ul className="mt-3 space-y-1.5">
+        {models.map((m) => {
+          const maxDay = Math.max(1, ...m.points.map((p) => p.requests));
+          const rate7d = m.requests7d > 0 ? Math.round((m.okRequests7d / m.requests7d) * 100) : 100;
+          const rate7dColor =
+            rate7d >= 90 ? "text-emerald-600" : rate7d >= 60 ? "text-amber-600" : "text-red-600";
+          return (
+            <li key={m.model}>
+              <button
+                type="button"
+                onClick={onModelClick ? () => onModelClick(m.model) : undefined}
+                disabled={!onModelClick}
+                aria-label={`查看模型 ${m.model} 今日请求日志（近 7 天 ${m.requests7d} 次，成功率 ${rate7d}%）`}
+                className={`group flex w-full items-center gap-3 rounded-lg px-2 py-1 text-left transition-colors ${
+                  onModelClick ? "cursor-pointer hover:bg-rose-50/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-300" : "cursor-default"
+                }`}
+              >
+                <span className="w-32 shrink-0 truncate font-mono text-xs font-medium text-stone-800 sm:w-40" title={m.model}>
+                  {m.model}
+                </span>
+                {/* 7 天 sparkline：高=当日请求量（相对本模型峰值），色=当日成功率三档；无流量日渲染平点 */}
+                <span className="flex h-7 min-w-0 flex-1 items-end justify-end gap-[3px]" role="img" aria-label={`${m.model} 近 7 天每日请求与成功率`}>
+                  {m.points.map((p, i) => {
+                    const rate = p.requests > 0 ? Math.round((p.okRequests / p.requests) * 100) : null;
+                    const h = p.requests > 0 ? Math.max(15, Math.round((p.requests / maxDay) * 100)) : 0;
+                    const dateLabel = `${Number(p.day.split("-")[1])}/${Number(p.day.split("-")[2])}`;
+                    const tip =
+                      p.requests > 0
+                        ? `${dateLabel} · ${p.requests} 次 · 成功率 ${rate}%`
+                        : `${dateLabel} · 无流量`;
+                    return (
+                      <span
+                        key={i}
+                        title={tip}
+                        className={`group/bar flex h-full w-2.5 shrink-0 flex-col justify-end ${rate === null ? "items-center" : ""}`}
+                      >
+                        {p.requests > 0 ? (
+                          <span
+                            className={`block w-full rounded-[2px] transition-colors ${healthBarClass(rate)}`}
+                            style={{ height: `${h}%` }}
+                          />
+                        ) : (
+                          <span className="block h-[3px] w-full rounded-full bg-stone-200" />
+                        )}
+                      </span>
+                    );
+                  })}
+                </span>
+                <span className="shrink-0 text-right tabular-nums">
+                  <span className="block text-xs font-semibold text-stone-800">{m.requests7d} 次</span>
+                  <span className={`block text-[10px] ${rate7dColor}`} title={`近 7 天成功率（成功 ${m.okRequests7d} / 共 ${m.requests7d}）`}>
+                    7 天 {rate7d}%
+                  </span>
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-2.5 border-t border-stone-100 pt-2 text-[10px] leading-relaxed text-muted-foreground">
+        数据来自请求日志滚动窗口（保留最近约 5000 条），超高流量下远端日可能被截断；柱色阈值：绿 ≥90% · 黄 ≥60% · 红 &lt;60%。
+      </p>
+    </div>
+  );
+}
+
+/**
+ * v4.2.1：余额可用天数外推（Task 32 顺延项落地）—— 纯前端复用余额快照序列。
+ * 算法：carry-forward 填充后取首末已知点，净消耗速率 slope = (last - first) / 跨度天数；
+ * slope < -0.01（净消耗）→ 预计可用天数 = last / -slope；slope ≥ -0.01 → 净增长/持平；
+ * 已知点不足 2 个或跨度 < 1 天 → null（数据不足不出数，不误导）。
+ * 注意：外推假设消耗速率恒定（签到/充值与消耗相抵后的净速率），快照断档日沿用最近值。
+ */
+function forecastBalance(
+  points: Array<number | null>
+): { kind: "growing" } | { kind: "limited"; days: number; dailyRate: number; spanDays: number } | null {
+  let last: number | null = null;
+  const filled = points.map((v) => {
+    if (v !== null) last = v;
+    return last;
+  });
+  const knownIdx: number[] = [];
+  filled.forEach((v, i) => {
+    if (v !== null) knownIdx.push(i);
+  });
+  if (knownIdx.length < 2) return null;
+  const firstIdx = knownIdx[0];
+  const lastIdx = knownIdx[knownIdx.length - 1];
+  const span = lastIdx - firstIdx;
+  if (span < 1) return null;
+  const first = filled[firstIdx];
+  const lastV = filled[lastIdx];
+  if (first === null || lastV === null) return null;
+  const slope = (lastV - first) / span; // 每日净变化（负=净消耗）
+  if (slope >= -0.01) return { kind: "growing" };
+  return {
+    kind: "limited",
+    days: Math.max(1, Math.round(lastV / -slope)),
+    dailyRate: Math.round(-slope * 100) / 100,
+    spanDays: span,
+  };
+}
+
+/** v4.2.1：预计可用天数文案（聚合余额卡 footer 与账号表行内共用口径） */
+function forecastText(fc: ReturnType<typeof forecastBalance>): string {
+  if (!fc) return "";
+  if (fc.kind === "growing") return "长期可用";
+  if (fc.days > 999) return "999+ 天";
+  return `≈${fc.days} 天`;
+}
+
 /** v3.0.6：近 7 天日趋势卡（UsageDaily 聚合；绿=全成功/红=含失败/灰=零流量；
  *  有流量的柱可点击 → 跳转运行日志按该天 0 点-24 点窗口过滤；数据不受滚动日志窗口截断）
  *  v3.5.0：头部新增「vs 上 7 天」环比徽标（请求数/token 对比，中性 teal/stone 语义 + Tooltip 明细） */
@@ -855,6 +1086,20 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
     };
   }, [balTrend]);
 
+  // v4.2.1：聚合余额可用天数外推（净消耗速率来自 14 天快照首末已知点；数据不足/净增长时优雅降级）
+  const balForecast = React.useMemo(() => (balTrendAgg ? forecastBalance(balTrendAgg.points) : null), [balTrendAgg]);
+
+  // v4.2.1：每账号外推结果（键 providerId\0accountId → 外推；余额趋势拉取失败时为空 Map，行内不渲染）
+  const accountForecast = React.useMemo(() => {
+    const m = new Map<string, ReturnType<typeof forecastBalance>>();
+    if (balTrend) {
+      for (const acc of balTrend.accounts) {
+        m.set(`${acc.providerId}\u0000${acc.accountId}`, forecastBalance(acc.points));
+      }
+    }
+    return m;
+  }, [balTrend]);
+
   // v3.4.0：清冷却完成回调（成功与否都刷新账号状态；徽标随新数据消失/保留）
   const handleCooldownCleared = React.useCallback(
     (message: string, ok: boolean) => {
@@ -954,6 +1199,37 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
                     {fmtNum(balTrendAgg.delta)}（{fmtNum(balTrendAgg.first)} → {fmtNum(balTrendAgg.last)}）
                   </span>
                 </div>
+                {/* v4.2.1：预计可用天数外推 —— 净消耗速率线性外推；数据不足/净增长时不出数不误导 */}
+                {balForecast && balForecast.kind === "limited" && (
+                  <p
+                    className="mt-1 flex items-center gap-1 border-t border-stone-100 pt-1 text-[10px] text-muted-foreground"
+                    title={`按近 ${balForecast.spanDays + 1} 天快照外推：平均净消耗 ${fmtNum(balForecast.dailyRate)}/天（签到/充值与消耗相抵后的净速率），当前水位 ${fmtNum(balTrendAgg.last)}。假设消耗速率恒定，仅供容量规划参考。`}
+                  >
+                    <Hourglass className="size-3 shrink-0 text-amber-500" aria-hidden />
+                    预计可用
+                    <span
+                      className={
+                        balForecast.days <= 7
+                          ? "font-semibold text-red-600"
+                          : balForecast.days <= 30
+                            ? "font-semibold text-amber-600"
+                            : "font-medium text-emerald-700"
+                      }
+                    >
+                      {forecastText(balForecast)}
+                    </span>
+                    · 净耗 {fmtNum(balForecast.dailyRate)}/天
+                  </p>
+                )}
+                {balForecast && balForecast.kind === "growing" && (
+                  <p
+                    className="mt-1 flex items-center gap-1 border-t border-stone-100 pt-1 text-[10px] text-muted-foreground"
+                    title="近 14 天快照窗口内余额净增长或持平（签到/充值 ≥ 消耗），无耗尽风险"
+                  >
+                    <Hourglass className="size-3 shrink-0 text-emerald-500" aria-hidden />
+                    余额净增长/持平 · 长期可用
+                  </p>
+                )}
               </div>
             ) : undefined
           }
@@ -1114,6 +1390,14 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
             onModelClick={onModelClick}
           />
         </div>
+        {/* v4.2.1：近 7 天 Top 提供商排行（UsageDaily 持久聚合；Task 32 顺延项落地） */}
+        <div className="xl:col-span-3">
+          <TopProvidersCard rows={data.top_providers_7d || []} />
+        </div>
+        {/* v4.2.1：模型健康 sparkline（近 7 天模型 × 日成功/失败点阵；点击行 → 该模型今日日志） */}
+        <div className="xl:col-span-3">
+          <ModelHealthCard data={data.model_health} onModelClick={onModelClick} />
+        </div>
       </div>
 
       {/* 账号状态表 */}
@@ -1162,6 +1446,8 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
                   {data.accounts.map((a) => {
                     const bal = a.balance as { balance?: number; total?: number } | null;
                     const cd = cooldownRemaining(a.cooldownUntil);
+                    // v4.2.1：该账号余额可用天数外推（快照序列缺失/数据不足时为 null → 不渲染）
+                    const fc = accountForecast.get(`${a.providerId}\u0000${a.id}`);
                     return (
                       <TableRow key={`${a.providerId}/${a.id}`}>
                         <TableCell className="font-medium text-stone-800">
@@ -1196,9 +1482,33 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
                         </TableCell>
                         <TableCell className="hidden tabular-nums md:table-cell">
                           {bal && typeof bal.balance === "number" ? (
-                            <span className="flex items-center gap-1">
-                              <CircleDollarSign className="size-3.5 text-stone-400" />
-                              {fmtNum(bal.balance)}
+                            <span className="flex flex-col gap-0.5">
+                              <span className="flex items-center gap-1">
+                                <CircleDollarSign className="size-3.5 text-stone-400" />
+                                {fmtNum(bal.balance)}
+                              </span>
+                              {/* v4.2.1：预计可用天数行内徽标（净消耗外推；≤7 天红 / ≤30 天黄 / 其余绿；净增长显示「长期」） */}
+                              {fc && (
+                                <span
+                                  className={`inline-flex w-fit items-center gap-0.5 rounded px-1 py-px text-[10px] font-medium ${
+                                    fc.kind === "growing"
+                                      ? "bg-emerald-50 text-emerald-700"
+                                      : fc.days <= 7
+                                        ? "bg-red-50 text-red-600"
+                                        : fc.days <= 30
+                                          ? "bg-amber-50 text-amber-700"
+                                          : "bg-emerald-50 text-emerald-700"
+                                  }`}
+                                  title={
+                                    fc.kind === "growing"
+                                      ? "近 14 天快照窗口内余额净增长/持平，无耗尽风险"
+                                      : `按近 ${fc.spanDays + 1} 天快照外推：净消耗 ${fmtNum(fc.dailyRate)}/天，预计可用 ${fc.days} 天（假设速率恒定，仅供参考）`
+                                  }
+                                >
+                                  <Hourglass className="size-2.5" aria-hidden />
+                                  {forecastText(fc)}
+                                </span>
+                              )}
                             </span>
                           ) : (
                             <span className="text-muted-foreground">—</span>
