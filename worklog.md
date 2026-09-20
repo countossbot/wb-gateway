@@ -2074,3 +2074,27 @@ Stage Summary:
 5. tool_choice "none"/"auto" 在无剩余工具时被省略而非降级为 "auto"（语义恒空；需求原文仅要求强制形态降级，此为更严格防御）——如客户端按字节断言请求形态需知悉
 6. 顺延项持续开放：标准适配器 getBalance 池形态（优先级低）；模型健康 60-90 天窗口；UsageDaily 模型维度历史天回填工具；Responses 端点可扩展 background=true 轮询语义（当前同步执行 + warn）
 7. tsc 基线对比方法论沉淀：禁用 git stash（HMR 中途换文件产生 stale 浮层假象）；mock-upstream 保持运行（严格校验 + lastChatRequest 裁判能力供后续巡检复用）
+
+---
+Task ID: 50
+Agent: 主会话（Z.ai Code，用户直派任务轮：/v1/responses 严格 Responses SSE 生命周期改造）
+Task: 按用户规格把 /v1/responses 流式链路改成严格 Responses SSE 生命周期实现：①任何结束路径必须先发协议终点事件（completed / incomplete / failed）再关流，永不裸 EOF（根治 Codex "stream closed before response.completed" 类问题）；②每事件单调 sequence_number + response.in_progress；③上游断流转译为 response.failed（截断不伪装完成）；④每流完整性日志（response_id/terminal/last_event/seq/events/bytes/upstream_error/client_aborted/finish_frame/duration_ms）供 Codex 报障时一键定位是网关没发终点/中间层吃掉/客户端自断；版本 4.6.0 → 4.6.1
+
+Work Log:
+- 【背景核实】本会话无 Go 代码（用户消息描述的 glm-panel/Go zai-api 为其参考架构；本沙箱实际为 Next.js 版 Universal-AI-Gateway，Task 49 已落地 /v1/responses 入站端点）→ 任务映射为改造 respond.ts + 共享 SSE 管道层；⚠️ 排障发现 mock-upstream 热重载后 pump 失效（连基础流只出 1 帧）→ kill + setsid 干净重启恢复（--hot 状态污染，后续改 mock 后应直接重启而非依赖热重载）
+- 【关键排障发现 1】dispatchExchange 的 openai SSE 路径返回 passthroughSseWithKeepAlive 产物：停滞熔断（180s 零字节）cancel 上游后补合成 [DONE] 干净收尾、上游读错误被 catch 吞掉后 writer.close() —— 转译层永远看到干净 EOF，无从区分「真完成」与「上游断流」（观测断层，正是此类问题最难定位的根因）
+- 【关键排障发现 2】实测 Bun.serve 的 ctrl.error() 会被 Bun 转为干净 chunked 终止（undici 读侧 clean EOF 不报错）→ mock 原计划的 ABORT_STREAM 无法复刻真断流；改用两层注入：ABORT_STREAM（优雅截断无 finish 帧，验证流尾兜底）+ raw TCP 3041（node:net 直写 chunked 帧后不写 0 终止块 destroy socket，undici 读侧 reject "terminated"，复刻真实连接重置）
+- 【改造 respond.ts】chatSseToResponsesStream 重写为严格生命周期状态机：终点三分（finalizeSuccess：finish_reason=length/content_filter → response.incomplete + incomplete_details.reason，否则 completed；finalizeFailed：response.failed + error.code/message，部分文本保留但半成品工具调用不输出）；流内 data 帧 error 对象检测 → failStream；finish_reason 帧跟踪（原实现完全忽略，流式截断永伪装 completed —— 顺带修复的真 bug）；createSseMeter 统一 sequence_number 分配（起点 0，注释行不占号）+ bytes/events/last_event 计量；首帧 created + in_progress；endStream 幂等收尾（停 ping → 拆上游读 → logIntegrity → 关下游）；cancel() 回调补齐（下游取消拆上游）；signal 预中断早退（修 ping 定时器泄漏）；choice.message 整帧采纳（部分兼容上游不产 delta 单帧回全量，原实现直接丢内容）
+- 【改造 stream.ts】passthroughSseWithKeepAlive 上游读错误标记：catch 捕获真实读错误（过滤 cancel reason "Upstream stalled"/"Client aborted"）→ finally 写 ": uag-upstream-error <msg>" 注释行（SSE 规范合法注释，chat 透传客户端零影响）→ 转译层识别后发 response.failed —— 打通「上游断流被透传层吸收成干净 EOF」的观测断层
+- 【改造 chatJsonToResponsesStream】同款补齐：sequence_number + in_progress + status=incomplete 时终点为 response.incomplete + try/catch 兜底 response.failed；非流式 chatCompletionToResponsesResponse 补 content_filter → incomplete parity（原只映射 length）
+- 【mock-upstream】新增注入器：ABORT_STREAM（优雅截断）/ INBAND_ERROR（流内 error 帧）/ USE_LENGTH_TRUNCATE / USE_CONTENT_FILTER（流式+非流式 finish 覆盖）/ raw TCP 3041（ABORT_RAW 真断流）
+- 【e2e】tests/responses-api-e2e.ts 扩展 E 组 22 项断言：E1 正常流（created→in_progress 起始 + sequence_number 严格单调 + completed 终点）；E2 length→incomplete（流式终点 + 非流式 parity + 无 completed 伪装）；E3 content_filter→incomplete；E4 真断流全链路（undici 读错 → passthrough 标记 → response.failed + 部分文本生命周期闭合 + 无 completed/incomplete 伪装）；E5 流内 error 帧→failed + code 透传；E6 优雅截断无 finish 帧→completed 兜底（永不裸 EOF）
+- 【验证矩阵】lint 零错误；tsc src/ 零错误（tests/examples 既有同类冲突维持 Task 44-49 口径）；e2e 74/74（52 原有 + 22 新增）；curl -N 原始 SSE 三类终点逐事件验证（正常 = 用户「正常」模板逐事件吻合 seq 0-8 单调；断流 = delta×2→done×3→failed；length = ...→incomplete）；dev.log 流完整性日志 10 条全字段验证（含 upstream_error=terminated 传导 / finish_frame=false 诚实标注合成兜底）；/v1/chat/completions 流式+非流式回归（passthrough 改动对 chat 流量零影响，marker 仅在真错误时出现）；agent-browser 登录 + 5 页签遍历零 console 错误（横幅 v4.6.1）；QA 资产自建自删（key/route×2/provider×2 + mock 复位），healthz 前后等价（2 提供商/6 模型）
+- 【文档】/admin 规范页 /v1/responses 描述更新为严格生命周期语义（三类终点 + sequence_number + 完整性日志说明）；configService VERSION 4.6.1
+
+Stage Summary:
+- /v1/responses 流式链路现满足严格 Responses SSE 生命周期契约：任何结束路径先发终点事件再关流（completed / incomplete / failed 三类终点，客户端断连除外——对端不可达），每事件 sequence_number 单调递增，序列以 created → in_progress 起始
+- 上游断流不再伪装成 completed：undici 读错误经 passthrough 层 uag-upstream-error 标记注释行（对 chat 客户端零影响）传导至转译层 → response.failed；流内 error 帧同样检测；截断的部分文本保留但其 message 项生命周期闭合，半成品工具调用不输出
+- 每流一条完整性日志（[Responses] stream end: response_id/terminal/last_event/seq/events/bytes/upstream_error/client_aborted/finish_frame/duration_ms），Codex 报 stream closed before response.completed 时可一键区分：terminal=none（客户端断）/ terminal=failed（上游断）/ terminal=completed 但客户端仍报错（中间层或 Codex 自身问题）
+- 停滞熔断语义维持（180s 零字节 → 合成 [DONE] → completed，与 chat 路径一致，finish_frame=false 诚实标注）
+- 遗留风险：①mock-upstream 热重载会污染 pump 状态（改 mock 后需 kill+setsid 重启）；②Bun.serve ctrl.error() 产生干净 chunked 终止（真断流只能靠 raw TCP 3041 复刻）；③GET /v1/responses/{id} 仍未实现（stateless 模式不需要）

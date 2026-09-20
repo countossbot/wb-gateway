@@ -17,6 +17,16 @@
 //     tool_choice 强制形态 + 无 tools 声明 → 400（复刻「无工具请求 + 强制 tool_choice」非法形态拒绝）
 //     lastChatRequest 回显：最近一次 chat 请求的 {model, messages, tools, tool_choice, stream}（字节级断言网关转译产物）
 //     用户文本含 USE_CUSTOM_TOOL → 返回 apply_patch 工具调用（custom 工具回译验证）
+//   v4.6.1 Responses 严格 SSE 生命周期验证支撑：
+//     用户文本含 ABORT_STREAM → 流式发 2 帧后 ctrl.error() 中断。⚠️ 实测 Bun 会把
+//       流错误转为干净的 chunked 终止（客户端看到 clean EOF）—— 用于验证网关「无 finish
+//       帧也保证 response.completed」的流尾兜底，而非真断流
+//     RAW TCP 3041（请求体含 ABORT_RAW）→ node:net 直写 HTTP chunked 帧，发 2 帧后
+//       不写终止块直接 destroy socket —— undici 读侧将 reject（"terminated"），复刻
+//       真实上游连接重置 → passthrough 层 uag-upstream-error 标记 → response.failed 全链
+//     用户文本含 INBAND_ERROR → 流内 data 帧携带 {"error":{...}}（部分兼容上游错误回传）
+//     用户文本含 USE_LENGTH_TRUNCATE → finish_reason=length（流式/非流式）
+//     用户文本含 USE_CONTENT_FILTER → finish_reason=content_filter（流式/非流式）
 const PORT = 3040;
 
 // v4.2.0：网关停滞熔断 cancel 计数（GET /__stats 查询，验证级联取消生效）
@@ -254,6 +264,10 @@ const server = Bun.serve({
           ];
           message.content = null;
           finish = "tool_calls";
+        } else {
+          // v4.6.1：非流式截断/拒答终点（Responses incomplete 回译验证）
+          if (userText.includes("USE_LENGTH_TRUNCATE")) finish = "length";
+          else if (userText.includes("USE_CONTENT_FILTER")) finish = "content_filter";
         }
         return Response.json({
           id: "chatcmpl-mock-" + Date.now(),
@@ -280,14 +294,26 @@ const server = Bun.serve({
       //（网关 passthrough 的 ping 定时器同款模式，实测可靠）；cancel() 清理挂起定时器。
       const stallMatch = /STALL:(\d{1,6})/.exec(userText);
       const stallMs = stallMsCap(Number(stallMatch ? stallMatch[1] : 0));
+      // v4.6.1：终点生命周期注入（ABORT_STREAM 断流 / INBAND_ERROR 流内错误帧 / length·content_filter 截断）
+      const abortMid = userText.includes("ABORT_STREAM");
+      const inbandError = userText.includes("INBAND_ERROR");
+      const finishOverride = userText.includes("USE_LENGTH_TRUNCATE")
+        ? "length"
+        : userText.includes("USE_CONTENT_FILTER")
+          ? "content_filter"
+          : "stop";
       const encoder = new TextEncoder();
       const chunks: Array<Record<string, unknown>> = [
         { choices: [{ delta: { reasoning_content: "Let me think about the request... " } }] },
         { choices: [{ delta: { reasoning_content: "mock thinking done." } }] },
         { choices: [{ delta: { content: `Hello from mock upstream stream! ${keyTag} You said: ${userText.slice(0, 60)}` } }] },
-        { choices: [{ delta: {}, finish_reason: "stop" }] },
+        { choices: [{ delta: {}, finish_reason: finishOverride }] },
         { choices: [{ delta: {} }], usage: { prompt_tokens: 42, completion_tokens: 13, prompt_tokens_details: { cached_tokens: 20 } } },
       ];
+      if (inbandError) {
+        // 流内错误帧：正常 finish 帧位置改为 data: {"error":{...}}（部分兼容上游的流内错误回传）
+        chunks.splice(3, 1, { error: { message: "mock in-band stream error", code: "mock_inband" } });
+      }
       let ctrl: ReadableStreamDefaultController<Uint8Array> | null = null;
       let frameTimer: ReturnType<typeof setTimeout> | null = null;
       let closed = false;
@@ -303,6 +329,18 @@ const server = Bun.serve({
       };
       const pump = (i: number) => {
         if (closed || !ctrl) return;
+        // v4.6.1：断流注入 —— 正文帧发出后以 ctrl.error() 中断（复刻上游连接重置/截断；
+        // 网关 passthrough 层捕获后注入 uag-upstream-error 标记，转译层发 response.failed）
+        if (abortMid && i === 3) {
+          closed = true;
+          if (frameTimer) clearTimeout(frameTimer);
+          try {
+            ctrl.error(new Error("mock upstream aborted mid-stream"));
+          } catch {
+            /* 已关闭 */
+          }
+          return;
+        }
         if (i >= chunks.length) {
           sendFrame("[DONE]");
           finishStream();
@@ -350,3 +388,50 @@ function extractUserText(messages: unknown): string {
 
 console.log(`[mock-upstream] listening on http://127.0.0.1:${PORT}`);
 export default server;
+
+// ---- v4.6.1 raw TCP 注入端点（3041）：真断流复刻 ----
+// Bun.serve 的 ctrl.error() 实测被转为干净 chunked 终止（客户端 clean EOF），无法产生
+// undici 读错误。本端点用 node:net 直写 HTTP/1.1 chunked 响应：请求体含 ABORT_RAW 时
+// 发 2 帧 SSE 后不写 0 终止块直接 destroy socket —— 复刻真实上游连接重置/截断。
+import net from "node:net";
+
+const RAW_PORT = 3041;
+const rawFrame = (payload: string): string => `${payload.length.toString(16)}\r\n${payload}\r\n`;
+
+net
+  .createServer((socket) => {
+    let buf = "";
+    let handled = false;
+    socket.on("data", (chunk: Buffer) => {
+      if (handled) return;
+      buf += chunk.toString("utf8");
+      const headerEnd = buf.indexOf("\r\n\r\n");
+      if (headerEnd < 0) return;
+      const lenMatch = /content-length:\s*(\d+)/i.exec(buf.slice(0, headerEnd));
+      const need = lenMatch ? parseInt(lenMatch[1], 10) : 0;
+      if (buf.length - headerEnd - 4 < need) return; // 等待请求体到齐
+      handled = true;
+      const isAbort = /ABORT_RAW/.test(buf.slice(headerEnd + 4));
+      const head =
+        "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: text/event-stream; charset=utf-8\r\n" +
+        "Cache-Control: no-cache\r\n" +
+        "Transfer-Encoding: chunked\r\n" +
+        "\r\n";
+      const f1 = `data: ${JSON.stringify({ choices: [{ delta: { content: "partial text before " } }] })}\n\n`;
+      const f2 = `data: ${JSON.stringify({ choices: [{ delta: { content: "the raw abort lands." } }] })}\n\n`;
+      socket.write(head + rawFrame(f1) + rawFrame(f2), () => {
+        if (isAbort) {
+          setTimeout(() => socket.destroy(), 10); // 无终止块断连：客户端读侧必 reject
+        } else {
+          socket.write(rawFrame("data: [DONE]\n\n") + "0\r\n\r\n", () => socket.end());
+        }
+      });
+    });
+    socket.on("error", () => {
+      /* 客户端提前断开（网关侧取消级联）：忽略 */
+    });
+  })
+  .listen(RAW_PORT, () => {
+    console.log(`[mock-upstream] raw TCP (abort injection) listening on http://127.0.0.1:${RAW_PORT}`);
+  });

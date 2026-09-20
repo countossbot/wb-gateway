@@ -2,11 +2,22 @@
 // 纯转译 + 流式重排版；请求侧转译见 ./translate.ts，路由编排见 app/v1/responses/route.ts。
 //
 // 非流式：chat.completion JSON → Responses response 对象（合法完整形态）。
-// 流式：chat SSE chunks → Responses SSE 事件流，序列完整：
-//   response.created → response.output_item.added → response.content_part.added →
-//   response.output_text.delta* → response.output_text.done → response.content_part.done →
-//   response.output_item.done → response.completed
-// 工具调用项在 finish 后以完整 item 形态输出（added → done 背靠背，合法事件序列）。
+//
+// 流式（v4.6.1 严格 Responses SSE 生命周期契约）：
+//   Responses 流绝不允许以「连接 EOF」作为成功结束 —— 任何结束路径必须先发协议终点事件
+//   再关闭 SSE（否则 OpenAI SDK / Codex 判定 "stream closed before response.completed"）：
+//     - 上游正常 EOF（含 [DONE] 与停滞熔断合成 [DONE]）→ response.completed
+//     - finish_reason=length / content_filter → response.incomplete（incomplete_details 回明原因）
+//     - 上游读取异常 / passthrough 层上游错误标记（": uag-upstream-error" 注释行）→ response.failed
+//     - SSE data 帧携带 error 对象（部分兼容上游的流内错误回传）→ response.failed
+//     - 客户端断连（request.signal abort / 下游 cancel）→ 不发终点（对端已不可达），仅记日志
+//   每个事件携带单调递增 sequence_number（起点 0，SSE 注释行不占号）；
+//   每条流结束时记录完整性日志：response_id / terminal / last_event / seq / events / bytes /
+//   upstream_error / client_aborted / finish_frame / duration_ms —— Codex 报流断开时可据此
+//   直接区分「网关没发终点」「发完被中间层吃掉」还是「客户端自身断开」。
+//   事件序列：response.created → response.in_progress → output_item.added → content_part.added →
+//   output_text.delta* → output_text.done → content_part.done → output_item.done →
+//   response.completed（工具调用项在流尾以完整 item 形态 added → done 背靠背输出）。
 
 import { sseHeaders } from "../http/headers";
 
@@ -207,9 +218,17 @@ function joinOutputText(output: Array<Record<string, unknown>>): string {
   return texts.join("");
 }
 
+/** finish_reason → Responses incomplete_details 原因（null = 正常完成） */
+function incompleteReasonFromFinish(finishReason: string | null): "max_output_tokens" | "content_filter" | null {
+  if (finishReason === "length") return "max_output_tokens";
+  if (finishReason === "content_filter") return "content_filter";
+  return null;
+}
+
 /**
  * 非流式：chat.completion JSON → Responses response 对象。
  * 解析失败（上游返回非 JSON）抛 Error（路由层 502 兜底）。
+ * finish_reason=length / content_filter → status incomplete（incomplete_details 回明原因）。
  */
 export function chatCompletionToResponsesResponse(
   chatJson: Record<string, unknown>,
@@ -223,10 +242,11 @@ export function chatCompletionToResponsesResponse(
   const output = messageToOutputItems(message, ctx);
   const usage = mapUsage(chatJson.usage as ChatUsage | undefined);
 
-  const status = finishReason === "length" ? "incomplete" : "completed";
+  const incompleteReason = incompleteReasonFromFinish(finishReason);
+  const status = incompleteReason ? "incomplete" : "completed";
   const response = responsesSkeleton(ctx, status);
-  if (finishReason === "length") {
-    response.incomplete_details = { reason: "max_output_tokens" };
+  if (incompleteReason) {
+    response.incomplete_details = { reason: incompleteReason };
   }
   response.output = output;
   response.usage = usage;
@@ -242,9 +262,51 @@ interface StreamToolCallAccumulator {
   arguments: string;
 }
 
-/** SSE 事件帧（event: 行 + data: 行 —— 最大化兼容：两种消费方式都能解析） */
-function sseFrame(eventType: string, payload: Record<string, unknown>): Uint8Array {
-  return encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify({ type: eventType, ...payload })}\n\n`);
+/** SSE 计量发射器：统一 sequence_number 分配 + 流完整性计量（events / bytes / last_event） */
+interface SseMeter {
+  event(eventType: string, payload: Record<string, unknown>): void;
+  comment(text: string): void;
+  readonly sequenceNumber: number;
+  readonly eventsEmitted: number;
+  readonly bytesWritten: number;
+  readonly lastEvent: string | null;
+}
+
+function createSseMeter(sink: (bytes: Uint8Array) => void): SseMeter {
+  let seq = 0;
+  let events = 0;
+  let bytes = 0;
+  let last: string | null = null;
+  return {
+    event(eventType, payload) {
+      const frame = encoder.encode(
+        `event: ${eventType}\ndata: ${JSON.stringify({ type: eventType, sequence_number: seq, ...payload })}\n\n`
+      );
+      seq++;
+      events++;
+      bytes += frame.byteLength;
+      last = eventType;
+      sink(frame);
+    },
+    comment(text) {
+      // SSE 注释行（keep-alive / ping）：合法注释，所有合规解析器忽略，不占事件序号
+      const frame = encoder.encode(`: ${text}\n\n`);
+      bytes += frame.byteLength;
+      sink(frame);
+    },
+    get sequenceNumber() {
+      return seq;
+    },
+    get eventsEmitted() {
+      return events;
+    },
+    get bytesWritten() {
+      return bytes;
+    },
+    get lastEvent() {
+      return last;
+    },
+  };
 }
 
 interface TranslateStreamOptions {
@@ -254,10 +316,12 @@ interface TranslateStreamOptions {
   pingIntervalMs?: number;
 }
 
+/** passthrough 层注入的上游错误标记注释行前缀（见 exchange/stream.ts） */
+const UPSTREAM_ERROR_MARKER = "uag-upstream-error";
+
 /**
  * 流式回译：消费 chat SSE（含网关注入的 ": keep-alive" 注释行），产出 Responses SSE 事件流。
- * 事件序列：created → output_item.added → content_part.added → output_text.delta* →
- * output_text.done → content_part.done → output_item.done → completed。
+ * 严格生命周期：任何结束路径先发终点事件（completed / incomplete / failed）再关流 —— 详见模块头注释。
  */
 export function chatSseToResponsesStream(
   body: ReadableStream<Uint8Array>,
@@ -265,289 +329,420 @@ export function chatSseToResponsesStream(
   options: TranslateStreamOptions
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
+  const startedAt = Date.now();
+
+  // ---- 共享流状态（start 读取循环 / cancel 回调 / abort 监听三路共用） ----
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  let ended = false; // 任一路径已收尾（幂等护栏）
+  let clientAborted = false;
+  let upstreamError: string | null = null;
+  let finishReason: string | null = null;
+  let sawFinishFrame = false;
+  let logged = false;
+
+  // 流内累积状态机
+  let messageItemOpen = false; // 正文 message 项已 added
+  let messageItemId = `msg_${randSuffix()}`;
+  let fullText = "";
+  let usage: Record<string, unknown> | null = null;
+  const toolAccumulators = new Map<number, StreamToolCallAccumulator>();
+  const toolOrder: number[] = [];
+  let textDoneEmitted = false;
+
+  const meter = createSseMeter((bytes) => {
+    try {
+      controllerRef?.enqueue(bytes);
+    } catch {
+      /* 下游已关闭：读循环 break / ended 兜底 */
+    }
+  });
+  const emitEvent = (eventType: string, payload: Record<string, unknown>): void => {
+    meter.event(eventType, payload);
+  };
+
+  // ---- 终点事件 ----
+  /** terminal 状态：null = 尚未发出任何终点（幂等护栏兼观测字段） */
+  let terminal: "response.completed" | "response.incomplete" | "response.failed" | null = null;
+
+  const openMessageItem = (): void => {
+    if (messageItemOpen) return;
+    messageItemOpen = true;
+    emitEvent("response.output_item.added", {
+      output_index: 0,
+      item: {
+        type: "message",
+        id: messageItemId,
+        status: "in_progress",
+        role: "assistant",
+        content: [],
+      },
+    });
+    emitEvent("response.content_part.added", {
+      item_id: messageItemId,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+    });
+  };
+
+  const closeMessageItem = (): void => {
+    if (!messageItemOpen || textDoneEmitted) return;
+    textDoneEmitted = true;
+    emitEvent("response.output_text.done", {
+      item_id: messageItemId,
+      output_index: 0,
+      content_index: 0,
+      text: fullText,
+    });
+    emitEvent("response.content_part.done", {
+      item_id: messageItemId,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: fullText, annotations: [] },
+    });
+    emitEvent("response.output_item.done", {
+      output_index: 0,
+      item: {
+        type: "message",
+        id: messageItemId,
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: fullText, annotations: [] }],
+      },
+    });
+  };
+
+  /** 成功终点：completed（length / content_filter → incomplete），含流尾工具项与完整 response 对象 */
+  const finalizeSuccess = (): void => {
+    if (ended || terminal !== null) return;
+    closeMessageItem();
+    // 工具调用项：以完整 item 形态在流尾输出（added → done 背靠背，合法事件序列）
+    let outputIndex = messageItemOpen ? 1 : 0;
+    for (const idx of toolOrder) {
+      const acc = toolAccumulators.get(idx)!;
+      const item = toolCallToResponsesItem(
+        { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: acc.arguments || "{}" } },
+        ctx
+      );
+      emitEvent("response.output_item.added", { output_index: outputIndex, item: { ...item, status: "in_progress" } });
+      emitEvent("response.output_item.done", { output_index: outputIndex, item });
+      outputIndex++;
+    }
+    const incompleteReason = incompleteReasonFromFinish(finishReason);
+    const output: Array<Record<string, unknown>> = [];
+    if (messageItemOpen) {
+      output.push({
+        type: "message",
+        id: messageItemId,
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: fullText, annotations: [] }],
+      });
+    }
+    for (const idx of toolOrder) {
+      const acc = toolAccumulators.get(idx)!;
+      output.push(
+        toolCallToResponsesItem(
+          { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: acc.arguments || "{}" } },
+          ctx
+        )
+      );
+    }
+    const response = responsesSkeleton(ctx, incompleteReason ? "incomplete" : "completed");
+    if (incompleteReason) response.incomplete_details = { reason: incompleteReason };
+    response.output = output;
+    response.usage = usage ?? mapUsage(undefined);
+    response.output_text = joinOutputText(output);
+    terminal = incompleteReason ? "response.incomplete" : "response.completed";
+    emitEvent(terminal, { response });
+  };
+
+  /** 失败终点：response.failed（部分文本安全保留；半成品工具调用不输出 —— arguments 可能残缺） */
+  const finalizeFailed = (message: string, code = "upstream_error"): void => {
+    if (ended || terminal !== null) return;
+    upstreamError = message;
+    closeMessageItem(); // 文本项生命周期闭合（已发出的 delta 序列有始有终）
+    const response = responsesSkeleton(ctx, "failed");
+    response.error = { code, message };
+    const output: Array<Record<string, unknown>> = [];
+    if (messageItemOpen) {
+      output.push({
+        type: "message",
+        id: messageItemId,
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: fullText, annotations: [] }],
+      });
+    }
+    response.output = output;
+    response.usage = usage ?? mapUsage(undefined);
+    terminal = "response.failed";
+    emitEvent("response.failed", { response });
+  };
+
+  /** 流完整性日志（每流一条；异常路径 warn，正常路径 info）—— Codex 报流断开时的第一诊断入口 */
+  const logIntegrity = (): void => {
+    if (logged) return;
+    logged = true;
+    const line =
+      `[Responses] stream end: response_id=${ctx.requestId} terminal=${terminal ?? "none"} ` +
+      `last_event=${meter.lastEvent ?? "none"} seq=${meter.sequenceNumber} events=${meter.eventsEmitted} ` +
+      `bytes=${meter.bytesWritten} upstream_error=${upstreamError ?? "nil"} client_aborted=${clientAborted} ` +
+      `finish_frame=${sawFinishFrame} duration_ms=${Date.now() - startedAt}`;
+    if (terminal === null || terminal === "response.failed") console.warn(line);
+    else console.log(line);
+  };
+
+  const stopPing = (): void => {
+    if (pingTimer !== null) {
+      clearInterval(pingTimer);
+      pingTimer = null;
+    }
+  };
+
+  /** 幂等收尾：停 ping → 拆上游读取 → 记日志 → 关下游（终点事件必须在此前已发出） */
+  const endStream = (): void => {
+    if (ended) return;
+    ended = true;
+    stopPing();
+    if (reader) {
+      try {
+        void reader.cancel(new Error("Responses stream ended")).catch(() => {});
+      } catch {
+        /* 已释放 */
+      }
+    }
+    logIntegrity();
+    try {
+      controllerRef?.close();
+    } catch {
+      /* 已关闭 */
+    }
+  };
+
+  /** 立即失败（流内 error 帧 / passthrough 错误标记）：发 response.failed 后收尾 */
+  const failStream = (message: string, code?: string): void => {
+    if (ended || terminal !== null) return;
+    finalizeFailed(message, code);
+    endStream();
+  };
+
+  /** 处理一条已解析的 chat SSE data JSON */
+  const handleDataJson = (payload: string): void => {
+    if (!payload || payload === "[DONE]") return;
+    let parsed: {
+      error?: { message?: string; code?: string; type?: string };
+      choices?: Array<{
+        delta?: {
+          content?: string | null;
+          reasoning_content?: string | null;
+          tool_calls?: Array<{
+            index?: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
+        finish_reason?: string | null;
+        message?: ChatChoiceMessage;
+      }>;
+      usage?: ChatUsage;
+    };
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return; // 非 JSON data 行忽略
+    }
+
+    // 流内错误帧（部分兼容上游以 data 帧回传 error 对象而非断流）→ response.failed
+    if (parsed.error && !parsed.choices) {
+      const err = parsed.error;
+      failStream(`upstream error frame: ${err.message || "unknown error"}`, err.code || err.type || "upstream_error");
+      return;
+    }
+
+    const choice = parsed.choices?.[0];
+    if (choice && typeof choice.finish_reason === "string" && choice.finish_reason) {
+      finishReason = choice.finish_reason;
+      sawFinishFrame = true;
+    }
+    if (choice?.delta) {
+      const delta = choice.delta;
+      if (typeof delta.content === "string" && delta.content.length > 0) {
+        openMessageItem();
+        fullText += delta.content;
+        emitEvent("response.output_text.delta", {
+          item_id: messageItemId,
+          output_index: 0,
+          content_index: 0,
+          delta: delta.content,
+        });
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const fragment of delta.tool_calls) {
+          const idx = typeof fragment.index === "number" ? fragment.index : toolAccumulators.size;
+          let acc = toolAccumulators.get(idx);
+          if (!acc) {
+            acc = {
+              chatId: fragment.id || `call_${randSuffix()}`,
+              name: "",
+              arguments: "",
+            };
+            toolAccumulators.set(idx, acc);
+            toolOrder.push(idx);
+          }
+          if (fragment.id && fragment.id !== acc.chatId) acc.chatId = fragment.id;
+          if (fragment.function?.name) acc.name += fragment.function.name;
+          if (fragment.function?.arguments) acc.arguments += fragment.function.arguments;
+        }
+      }
+      // delta.reasoning_content：流式思维链无 Responses 增量事件等价物 —— 忽略（completed 前不掺正文）
+    } else if (choice?.message) {
+      // 整段 message 帧（部分兼容上游不产 delta、单帧回完整消息）：仅在尚无增量时采纳，避免双计
+      const text = typeof choice.message.content === "string" ? choice.message.content : "";
+      if (text.length > 0 && fullText === "") {
+        openMessageItem();
+        fullText = text;
+        emitEvent("response.output_text.delta", {
+          item_id: messageItemId,
+          output_index: 0,
+          content_index: 0,
+          delta: text,
+        });
+      }
+      if (Array.isArray(choice.message.tool_calls) && toolOrder.length === 0) {
+        for (const tc of choice.message.tool_calls) {
+          const idx = toolAccumulators.size;
+          toolAccumulators.set(idx, {
+            chatId: tc.id || `call_${randSuffix()}`,
+            name: typeof tc.function?.name === "string" ? tc.function.name : "",
+            arguments: typeof tc.function?.arguments === "string" ? tc.function.arguments : "{}",
+          });
+          toolOrder.push(idx);
+        }
+      }
+    }
+    if (parsed.usage) {
+      usage = mapUsage(parsed.usage);
+    }
+  };
+
+  // ---- 逐行解析上游 SSE（跳过注释行与 event: 行；识别 passthrough 上游错误标记） ----
+  let buffer = "";
+  let dataLines: string[] = [];
+  let sawData = false;
+
+  const processLine = (line: string): void => {
+    if (line === "") {
+      // 空行 = 事件边界：聚合 data 行为一个事件
+      if (sawData) {
+        handleDataJson(dataLines.join("\n"));
+        dataLines = [];
+        sawData = false;
+      }
+      return;
+    }
+    if (line.startsWith(":")) {
+      // SSE 注释行：passthrough 层的上游错误标记（该流将被干净关闭 —— 转译为 response.failed
+      // 而非把截断内容伪装成 completed）；其余注释（keep-alive ping）忽略
+      const comment = line.slice(1).trim();
+      if (comment.startsWith(UPSTREAM_ERROR_MARKER)) {
+        const message = comment.slice(UPSTREAM_ERROR_MARKER.length).trim() || "aborted";
+        failStream(`upstream stream aborted: ${message}`);
+      }
+      return;
+    }
+    if (line.startsWith("event:")) return; // chat SSE 事件名行（data 载荷自含类型）
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trim());
+      sawData = true;
+    }
+  };
+
+  const pump = (): Promise<void> =>
+    reader!.read().then(({ done, value }) => {
+      if (ended) return;
+      if (done) {
+        // 上游流结束：刷新残行 → 终点事件（无 finish 帧也保证 completed —— 流尾兜底，
+        // 上游静默停滞由 passthrough 层熔断补 [DONE] 后同样走到这里）
+        if (buffer.length > 0) processLine(buffer);
+        processLine("");
+        if (!ended) {
+          finalizeSuccess();
+          endStream();
+        }
+        return;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        if (ended) return;
+        const line = buffer.slice(0, nl).replace(/\r$/, "");
+        buffer = buffer.slice(nl + 1);
+        processLine(line);
+      }
+      if (ended) return;
+      return pump();
+    });
+
+  const onPumpError = (err: unknown): void => {
+    // 上游读取异常：客户端断连不发终点（对端不可达）；真上游错误发 response.failed
+    if (ended) return;
+    if (clientAborted || options.signal?.aborted) {
+      clientAborted = true;
+      endStream();
+      return;
+    }
+    const message = (err instanceof Error ? err.message : String(err)) || "read failed";
+    finalizeFailed(`upstream stream aborted: ${message}`);
+    endStream();
+  };
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      const emit = (bytes: Uint8Array): void => {
-        try {
-          controller.enqueue(bytes);
-        } catch {
-          /* 下游已关闭：读循环 break 兜底 */
-        }
-      };
-      const emitEvent = (eventType: string, payload: Record<string, unknown>): void => {
-        emit(sseFrame(eventType, payload));
-      };
+      controllerRef = controller;
+      reader = body.getReader();
 
-      // ---- 流内状态机 ----
-      let messageItemOpen = false; // 正文 message 项已 added
-      let messageItemId = `msg_${randSuffix()}`;
-      let fullText = "";
-      let finished = false;
-      let usage: Record<string, unknown> | null = null;
-      const toolAccumulators = new Map<number, StreamToolCallAccumulator>();
-      const toolOrder: number[] = [];
-      let textDoneEmitted = false;
-      let streamClosed = false;
+      // 客户端在流启动前就已断开：直接收尾（不发任何事件，无 ping 定时器可泄漏）
+      if (options.signal?.aborted) {
+        clientAborted = true;
+        endStream();
+        return;
+      }
 
-      const openMessageItem = (): void => {
-        if (messageItemOpen) return;
-        messageItemOpen = true;
-        emitEvent("response.output_item.added", {
-          output_index: 0,
-          item: {
-            type: "message",
-            id: messageItemId,
-            status: "in_progress",
-            role: "assistant",
-            content: [],
-          },
-        });
-        emitEvent("response.content_part.added", {
-          item_id: messageItemId,
-          output_index: 0,
-          content_index: 0,
-          part: { type: "output_text", text: "", annotations: [] },
-        });
-      };
-
-      const closeMessageItem = (): void => {
-        if (!messageItemOpen || textDoneEmitted) return;
-        textDoneEmitted = true;
-        emitEvent("response.output_text.done", {
-          item_id: messageItemId,
-          output_index: 0,
-          content_index: 0,
-          text: fullText,
-        });
-        emitEvent("response.content_part.done", {
-          item_id: messageItemId,
-          output_index: 0,
-          content_index: 0,
-          part: { type: "output_text", text: fullText, annotations: [] },
-        });
-        emitEvent("response.output_item.done", {
-          output_index: 0,
-          item: {
-            type: "message",
-            id: messageItemId,
-            status: "completed",
-            role: "assistant",
-            content: [{ type: "output_text", text: fullText, annotations: [] }],
-          },
-        });
-      };
-
-      /** 处理一条已解析的 chat SSE data JSON */
-      const handleDataJson = (payload: string): void => {
-        if (!payload || payload === "[DONE]") return;
-        let parsed: {
-          choices?: Array<{
-            delta?: {
-              content?: string | null;
-              reasoning_content?: string | null;
-              tool_calls?: Array<{
-                index?: number;
-                id?: string;
-                function?: { name?: string; arguments?: string };
-              }>;
-            };
-            finish_reason?: string | null;
-            message?: ChatChoiceMessage;
-          }>;
-          usage?: ChatUsage;
-        };
-        try {
-          parsed = JSON.parse(payload);
-        } catch {
-          return; // 非 JSON data 行忽略
-        }
-
-        const choice = parsed.choices?.[0];
-        if (choice?.delta) {
-          const delta = choice.delta;
-          if (typeof delta.content === "string" && delta.content.length > 0) {
-            openMessageItem();
-            fullText += delta.content;
-            emitEvent("response.output_text.delta", {
-              item_id: messageItemId,
-              output_index: 0,
-              content_index: 0,
-              delta: delta.content,
-            });
-          }
-          if (Array.isArray(delta.tool_calls)) {
-            for (const fragment of delta.tool_calls) {
-              const idx = typeof fragment.index === "number" ? fragment.index : toolAccumulators.size;
-              let acc = toolAccumulators.get(idx);
-              if (!acc) {
-                acc = {
-                  chatId: fragment.id || `call_${randSuffix()}`,
-                  name: fragment.function?.name || "",
-                  arguments: "",
-                };
-                toolAccumulators.set(idx, acc);
-                toolOrder.push(idx);
-              }
-              if (fragment.id && fragment.id !== acc.chatId) acc.chatId = fragment.id;
-              if (fragment.function?.name) acc.name += fragment.function.name;
-              if (fragment.function?.arguments) acc.arguments += fragment.function.arguments;
-            }
-          }
-          // delta.reasoning_content：流式思维链无 Responses 增量事件等价物 —— 忽略（completed 前不掺正文）
-        }
-        if (parsed.usage) {
-          usage = mapUsage(parsed.usage);
-        }
-      };
-
-      const finalize = (): void => {
-        if (finished) return;
-        finished = true;
-        closeMessageItem();
-        // 工具调用项：以完整 item 形态在流尾输出（added → done 背靠背，合法事件序列）
-        let outputIndex = messageItemOpen ? 1 : 0;
-        for (const idx of toolOrder) {
-          const acc = toolAccumulators.get(idx)!;
-          const item = toolCallToResponsesItem(
-            { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: acc.arguments || "{}" } },
-            ctx
-          );
-          emitEvent("response.output_item.added", { output_index: outputIndex, item: { ...item, status: "in_progress" } });
-          emitEvent("response.output_item.done", { output_index: outputIndex, item });
-          outputIndex++;
-        }
-        // completed：完整 response 对象（output + usage）
-        const output: Array<Record<string, unknown>> = [];
-        if (messageItemOpen) {
-          output.push({
-            type: "message",
-            id: messageItemId,
-            status: "completed",
-            role: "assistant",
-            content: [{ type: "output_text", text: fullText, annotations: [] }],
-          });
-        }
-        for (const idx of toolOrder) {
-          const acc = toolAccumulators.get(idx)!;
-          output.push(
-            toolCallToResponsesItem(
-              { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: acc.arguments || "{}" } },
-              ctx
-            )
-          );
-        }
-        const response = responsesSkeleton(ctx, "completed");
-        response.output = output;
-        response.usage = usage ?? mapUsage(undefined);
-        response.output_text = joinOutputText(output);
-        emitEvent("response.completed", { response });
-      };
+      // ---- 首帧：response.created + response.in_progress（流开始即发，客户端立刻获得 response id） ----
+      const initialResponse = responsesSkeleton(ctx, "in_progress");
+      emitEvent("response.created", { response: initialResponse });
+      emitEvent("response.in_progress", { response: initialResponse });
 
       // ---- 客户端空闲保活（SSE 注释行，客户端零感知）----
       const pingIntervalMs = options.pingIntervalMs ?? 0;
-      let pingTimer: ReturnType<typeof setInterval> | null = null;
       if (pingIntervalMs > 0) {
         pingTimer = setInterval(() => {
-          if (streamClosed) return;
-          emit(encoder.encode(": ping\n\n"));
+          if (ended) return;
+          meter.comment("ping");
         }, pingIntervalMs);
       }
-      const cleanup = (): void => {
-        if (pingTimer !== null) {
-          clearInterval(pingTimer);
-          pingTimer = null;
-        }
-      };
 
-      // ---- 首帧：response.created（流开始即发，客户端立刻获得 response id）----
-      emitEvent("response.created", { response: responsesSkeleton(ctx, "in_progress") });
-
-      // ---- 逐行解析上游 SSE（跳过网关注入的 ": keep-alive" 注释行与 event: 行）----
-      const reader = body.getReader();
-      let buffer = "";
-      let dataLines: string[] = [];
-      let sawData = false;
-
-      const processLine = (line: string): void => {
-        if (line === "") {
-          // 空行 = 事件边界：聚合 data 行为一个事件
-          if (sawData) {
-            handleDataJson(dataLines.join("\n"));
-            dataLines = [];
-            sawData = false;
-          }
-          return;
-        }
-        if (line.startsWith(":")) return; // SSE 注释（keep-alive ping）
-        if (line.startsWith("event:")) return; // chat SSE 事件名行（data 载荷自含类型）
-        if (line.startsWith("data:")) {
-          dataLines.push(line.slice(5).trim());
-          sawData = true;
-        }
-      };
-
-      const pump = (): Promise<void> =>
-        reader.read().then(({ done, value }) => {
-          if (streamClosed) return;
-          if (done) {
-            // 上游流结束：刷新残行 + 兜底收尾（无 finish 帧也保证 completed 事件发出）
-            buffer += "";
-            if (buffer.length > 0) processLine(buffer);
-            processLine("");
-            finalize();
-            streamClosed = true;
-            cleanup();
-            try {
-              controller.close();
-            } catch {
-              /* 已关闭 */
-            }
-            return;
-          }
-          buffer += decoder.decode(value, { stream: true });
-          let nl: number;
-          while ((nl = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, nl).replace(/\r$/, "");
-            buffer = buffer.slice(nl + 1);
-            processLine(line);
-          }
-          return pump();
-        });
-
-      // 客户端断连：取消上游读取，流自然收尾
+      // ---- 客户端断连：不发终点（对端不可达），拆除上游读取并记录 ----
       if (options.signal) {
         options.signal.addEventListener(
           "abort",
           () => {
-            if (streamClosed) return;
-            streamClosed = true;
-            cleanup();
-            void reader.cancel(new Error("Client aborted")).catch(() => {});
-            try {
-              controller.close();
-            } catch {
-              /* 已关闭 */
-            }
+            clientAborted = true;
+            endStream();
           },
           { once: true }
         );
       }
 
-      pump().catch((err: unknown) => {
-        // 上游读取异常：尽力发出 completed（含已积累内容），再关闭
-        if (!streamClosed) {
-          finalize();
-          streamClosed = true;
-        }
-        cleanup();
-        try {
-          controller.close();
-        } catch {
-          /* 已关闭 */
-        }
-        if (err) console.warn(`[Responses] upstream stream read error: ${(err as Error).message}`);
-      });
+      pump().catch(onPumpError);
+    },
+    cancel() {
+      // 下游取消（运行时侧客户端断连信号）：与 signal abort 同语义
+      clientAborted = true;
+      endStream();
     },
   });
 }
@@ -559,7 +754,8 @@ export function responsesSseHeaders(extra: Record<string, string> = {}): Record<
 
 /**
  * 流式兜底：客户端请求 stream 但上游返回 JSON（provider 忽略 stream 或聚合路径）——
- * 把完整 JSON 合成为最小完整事件序列（created → item.added → delta(整段) → done → completed）。
+ * 把完整 JSON 合成为最小完整事件序列（created → in_progress → item.added → delta(整段) →
+ * done → completed；status=incomplete 时终点为 response.incomplete）。
  */
 export function chatJsonToResponsesStream(chatJson: Record<string, unknown>, ctx: ResponseEchoContext): ReadableStream<Uint8Array> {
   const full = chatCompletionToResponsesResponse(chatJson, ctx);
@@ -568,56 +764,80 @@ export function chatJsonToResponsesStream(chatJson: Record<string, unknown>, ctx
     | { id?: string; content?: Array<{ type?: string; text?: string }> }
     | undefined;
   const text = joinOutputText(output);
+  const terminalEvent = full.status === "incomplete" ? "response.incomplete" : "response.completed";
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      const push = (eventType: string, payload: Record<string, unknown>): void => {
-        controller.enqueue(sseFrame(eventType, payload));
-      };
-      const itemId = (messageItem?.id as string) || `msg_${randSuffix()}`;
-      push("response.created", { response: { ...full, status: "in_progress", output: [] } });
-      if (text.length > 0 || !messageItem) {
-        push("response.output_item.added", {
-          output_index: 0,
-          item: { type: "message", id: itemId, status: "in_progress", role: "assistant", content: [] },
-        });
-        push("response.content_part.added", {
-          item_id: itemId,
-          output_index: 0,
-          content_index: 0,
-          part: { type: "output_text", text: "", annotations: [] },
-        });
-        if (text.length > 0) {
-          push("response.output_text.delta", { item_id: itemId, output_index: 0, content_index: 0, delta: text });
+      const meter = createSseMeter((bytes) => {
+        try {
+          controller.enqueue(bytes);
+        } catch {
+          /* 下游已关闭 */
         }
-        push("response.output_text.done", { item_id: itemId, output_index: 0, content_index: 0, text });
-        push("response.content_part.done", {
-          item_id: itemId,
-          output_index: 0,
-          content_index: 0,
-          part: { type: "output_text", text, annotations: [] },
-        });
-        push("response.output_item.done", {
-          output_index: 0,
-          item: {
-            type: "message",
-            id: itemId,
-            status: "completed",
-            role: "assistant",
-            content: [{ type: "output_text", text, annotations: [] }],
-          },
-        });
+      });
+      try {
+        const itemId = (messageItem?.id as string) || `msg_${randSuffix()}`;
+        meter.event("response.created", { response: { ...full, status: "in_progress", output: [] } });
+        meter.event("response.in_progress", { response: { ...full, status: "in_progress", output: [] } });
+        if (text.length > 0 || !messageItem) {
+          meter.event("response.output_item.added", {
+            output_index: 0,
+            item: { type: "message", id: itemId, status: "in_progress", role: "assistant", content: [] },
+          });
+          meter.event("response.content_part.added", {
+            item_id: itemId,
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text", text: "", annotations: [] },
+          });
+          if (text.length > 0) {
+            meter.event("response.output_text.delta", { item_id: itemId, output_index: 0, content_index: 0, delta: text });
+          }
+          meter.event("response.output_text.done", { item_id: itemId, output_index: 0, content_index: 0, text });
+          meter.event("response.content_part.done", {
+            item_id: itemId,
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text", text, annotations: [] },
+          });
+          meter.event("response.output_item.done", {
+            output_index: 0,
+            item: {
+              type: "message",
+              id: itemId,
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text, annotations: [] }],
+            },
+          });
+        }
+        // 工具调用项
+        let idx = text.length > 0 || !messageItem ? 1 : 0;
+        for (const item of output) {
+          if (item.type === "message") continue;
+          meter.event("response.output_item.added", { output_index: idx, item: { ...item, status: "in_progress" } });
+          meter.event("response.output_item.done", { output_index: idx, item });
+          idx++;
+        }
+        meter.event(terminalEvent, { response: full });
+      } catch (err) {
+        // 防御：合成流本身异常也必须给终点（response.failed）再关流
+        try {
+          meter.event("response.failed", {
+            response: {
+              ...responsesSkeleton(ctx, "failed"),
+              error: { code: "gateway_error", message: (err instanceof Error ? err.message : String(err)) || "synthesis failed" },
+            },
+          });
+        } catch {
+          /* 尽力而为 */
+        }
       }
-      // 工具调用项
-      let idx = text.length > 0 || !messageItem ? 1 : 0;
-      for (const item of output) {
-        if (item.type === "message") continue;
-        push("response.output_item.added", { output_index: idx, item: { ...item, status: "in_progress" } });
-        push("response.output_item.done", { output_index: idx, item });
-        idx++;
+      try {
+        controller.close();
+      } catch {
+        /* 已关闭 */
       }
-      push("response.completed", { response: full });
-      controller.close();
     },
   });
 }
