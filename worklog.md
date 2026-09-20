@@ -1712,3 +1712,38 @@ Stage Summary:
 3. Task 33 R3（客户端经中间层断开误判）与 R4（OOM 完全无收尾）属环境/部署侧，代码层无进一步动作空间；R5 的「代理池热更新瞬间活动流」场景仍理论上存在（close 优雅化已缓解）
 4. 顺延功能项：标准适配器多账号轮换；「预计可用天数」外推；Top 提供商排行卡；模型健康 sparkline；新增中转对话框 formError 固定 footer 上方显示
 5. mock-upstream 服务保持运行（3040 端口）供后续巡检复用；其 STALL 注入与 __stats 能力已在本轮验证
+---
+Task ID: 40
+Agent: 巡检轮 2（Z.ai Code，webDevReview 定时任务，trace: 1a0bc1e5e26e0a89-web-cron-review-202609200830）
+Task: 巡检 QA → 实施 Task 32 顺延项三项总览新功能（Top 提供商排行卡 / 模型健康 sparkline / 预计可用天数外推）+ 中转表单错误可见性修复；版本 4.2.0 → 4.2.1
+
+Work Log:
+- 【巡检】dev server 存活（v4.2.0，2 提供商/6 模型与 Task 39 基线一致）；mock-upstream 3040 存活；agent-browser 全 8 页签遍历零 console 错误；dev.log 干净；审计无并发用户操作 → 项目稳定，进入功能开发
+- 【后端：overview API】①top_providers_7d —— 复用已拉取的 14 天 UsageDaily 行（trend7Rows）按 providerId 聚合近 7 天，零额外 DB 查询；Top 5 按请求数；share=该提供商/7天全部请求（未命中行计入分母），providerId="" 不参与排行；providerName 从 providers 表 join。②model_health —— RequestLog 近 7 天（含今日 0 点窗口）按「对外模型 × 本地日」聚合，每模型 7 个日点 requests/okRequests，按 7 天请求数 Top 6；脚注注明滚动窗口口径
+- 【类型】types.ts 新增 TopProviderRow / ModelHealthPoint / ModelHealthModel / ModelHealthData；OverviewData 加 top_providers_7d? / model_health?
+- 【前端：TopProvidersCard】orange 主题（与 Top 密钥 emerald / Top 模型 teal 三色区分）；排名徽标（1=orange-100/2=stone-200/3=orange-50）+ 提供商名（title 含 id）+ 占比条 + 右侧请求数/成功率/token/份额%；头部「另 X% 未命中」徽标（份额合计 <99 时显示，tooltip 解释容灾/路由缺失）；空态引导文案
+- 【前端：ModelHealthCard】rose 主题 HeartPulse 图标；每模型一行：mono 模型名 + 7 根日柱 sparkline（高=当日请求量相对本模型峰值，色=当日成功率三档 emerald≥90/amber≥60/red<60，无流量日=stone 平点；逐柱 title 日期+次数+成功率）+ 右侧 7 天总数与总成功率；行可点击 → 该模型今日日志（复用第八跳转通道）；脚注注明滚动窗口 5000 条口径与色阈值
+- 【前端：forecastBalance 外推】纯前端复用 /balances/history?days=14（零后端改动）：carry-forward 填充后取首末已知点，净消耗速率 slope=(last-first)/跨度天数；slope<-0.01 → 预计可用天数=last/-slope；slope≥-0.01 → 净增长/持平「长期可用」；已知点<2 或跨度<1 → null 不出数不误导。UI 两处：①聚合余额 StatCard footer 增 Hourglass 行（≤7天红/≤30天黄/其余绿 + 净耗速率 + tooltip 说明外推口径）；②账号状态表余额列行内徽标（同色阶 + tooltip）。「999+ 天」封顶显示
+- 【前端：formError 修复】providers.tsx 新增/编辑中转对话框的表单校验错误此前渲染在 ScrollArea 内表单末尾（长表单下不可见，被误以为「点保存没反应」）→ 移出滚动区固定 footer 上方：role="alert" + CircleAlert 图标 + red-50 边框横幅，滚动位置无关恒可见
+- 【QA 脚本】tests/bal-forecast-seed.ts（seed/clean 双模式）：为全部账号合成昨日/前日快照（+70/+140 净消耗轨迹）验证外推渲染；seed 前核对目标日无真实数据（有则拒绝）；clean 按 day 精确删除；只触碰 BalanceSnapshot 派生统计表（getBalance 例行重写），不触碰任何业务配置，今日真实快照不动
+- 【验证：API】浏览器会话 fetch 实测：top_providers_7d 返回 5 提供商（workbuddy-intl 402 次/82.2% 份额/mock-openai 52/workbuddy 12/qa-mock 10/opencode 6，名称 join 正确）；model_health 返回 7 天轴 + 6 模型（deepseek-v4.1-flash 406 次 7 点阵正确、smoke-test 5/5+48/44 等）
+- 【验证：外推端到端】seed 14 条合成快照 → 聚合卡「预计可用≈11 天 · 净耗 490/天」（数学核对：7 账号×70/天=490，5228.31/490≈10.7→11 ✓）；7 账号徽标全渲染（如 3666.02/70≈52 天 ✓）；clean 后聚合行/徽标全部消失、真实余额 4,256.31→4,256.57 聚合不变（数据不足优雅降级 ✓）
+- 【验证：外推 tooltip bug 修复】首轮发现「当前水位 {fmtNum(balTrendAgg.last)}」字面量未插值（模板字符串漏 $）→ 修复后「当前水位 5,228.31」正确
+- 【验证：VLM 视觉 QA】滚动截图 ×2 经 glm-5v 检查：三张排行卡（徽标/名称/占比条/百分比）正常、模型健康卡（模型名+7 日柱+右侧统计）正常、账号表余额列彩色徽标完整可见、无重叠/错位/溢出
+- 【验证：formError】空表单点「创建中转」→ role=alert 横幅显示「提供商 ID 必须为 1-64 位字母数字或 -_」，inViewport=true（无需滚动可见）、insideScrollArea=false（固定 footer 上方 ✓）
+- 【验证：回归】8 页签全遍历零 console 错误；healthz v4.2.1（2 提供商/6 模型基线一致）；lint 零错误；tsc src/ 零错误（examples/skills/tests 预存错误不变）；dev.log 无运行时错误
+- 【git】独立 commit（45cf084）；QA 截图按 Task 36 惯例清理不留存
+
+Stage Summary:
+- 三项 Task 32 顺延功能全部落地并端到端验证（含合成数据注入-验证-清理可逆规程）；一项 UX 可见性修复；版本 4.2.1
+- Top 提供商排行零额外查询（复用 trend7Rows）；模型健康受滚动窗口限制（脚注已注明，UsageDaily 加 model 维度仍是根本解，持续顺延）
+- 外推算法刻意保守：数据不足/净增长不出数，避免误导；「999+ 天」封顶；tooltip 全口径说明
+- 破坏性 QA 禁令遵守：仅 BalanceSnapshot 统计表临时注入 14 行并精确清理（14 in/14 out 核对），业务配置零触碰；今日真实快照未动
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮 healthz 前后等价（2/6）
+2. dev server 曾在 dev.log 出现一次 /api/console/proxy/test 200（来源不明，疑用户 Preview Panel 或页面加载触发；只读诊断端点无数据变更，未观察到 21.0.0.1 审计条目）——如再现可留意
+3. 外推精度受快照频率影响：getBalance 不刷新的日期沿用 carry-forward 值，长期不刷新余额的账号外推会失真（快照仅在打开总览/余额查询时落库）；如需更准可在 scheduler 定时刷新余额
+4. UsageDaily 模型维度持久化（模型健康跨滚动窗口的根本解）持续顺延；标准适配器多账号轮换持续顺延
+5. dev server HMR 多次重载后 balTrend 仅在组件挂载时拉取（刷新按钮不重拉余额趋势）——当前语义可接受（快照日内变化小），如需实时可在 load() 中一并重拉
+6. mock-upstream（3040）保持运行供后续巡检复用
