@@ -1,0 +1,7 @@
+{
+  "name": "mock-upstream",
+  "private": true,
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  }
+}

@@ -1,0 +1,574 @@
+// 控制台前端共享类型 —— 与后端 /api/console/* 的响应 data 形状一一对应。
+
+// ---- 认证 ----
+export interface SessionInfo {
+  initialized: boolean;
+  authenticated: boolean;
+  username: string | null;
+  /** 当前生效认证通道（v3.0.2：控制台顶栏徽标） */
+  authVia?: "cookie" | "bearer" | null;
+}
+
+export interface SetupResult {
+  message: string;
+  master_key: string;
+  cron_secret: string;
+  client_key: string;
+  createdProvider: string | null;
+}
+
+// ---- 总览 ----
+export interface BalanceAccountDetail {
+  id: string;
+  name?: string;
+  balance: number;
+  total: number;
+  success: boolean;
+  [key: string]: unknown;
+}
+
+export interface BalanceSummary {
+  balance: number | string | null;
+  total: number | string | null;
+  unit?: string;
+  accounts?: BalanceAccountDetail[];
+  error?: string;
+  success?: boolean;
+  [key: string]: unknown;
+}
+
+export interface CacheStats {
+  responses: number;
+  cachedResponses: number;
+  cachedTokens: number;
+  hitRate: number;
+}
+
+export interface AccountState {
+  id: string;
+  providerId: string;
+  name: string;
+  enabled: boolean;
+  balance: Record<string, unknown> | null;
+  cooldownUntil: string | null;
+  cooldownStreak: number;
+  /** v3.2.2：最近一次进入冷却的原因摘要（tooltip 展示） */
+  cooldownReason?: string | null;
+  lastCheckinAt: string | null;
+  lastCheckinOk: boolean | null;
+  lastRefreshAt: string | null;
+}
+
+export interface OverviewData {
+  version: string;
+  balance: BalanceSummary;
+  accounts_total: number;
+  accounts_enabled: number;
+  providers_count: number;
+  providers_total: number;
+  routes_count: number;
+  routes_total?: number;
+  cache: CacheStats;
+  /** v3.0.3：今日消耗聚合（服务器本地时区 0 点起） */
+  today_stats?: TodayStats;
+  /** v3.1.1：今日 Top 密钥排行（Top 5 按请求数降序；无调用时空数组） */
+  today_top_keys?: TopKeyRow[];
+  /** v3.2.0：Top 密钥数据归属日期（YYYY-MM-DD）—— 今日零调用时兕底展示昨日，前端据此标注 */
+  top_keys_date?: string;
+  /** v3.9.0：今日 Top 模型排行（Top 5 按请求数降序；RequestLog 聚合，无调用时空数组） */
+  today_top_models?: TopModelRow[];
+  /** v3.9.0：Top 模型数据归属日期（YYYY-MM-DD）—— 今日零调用时兕底展示昨日 */
+  top_models_date?: string;
+  /** v3.0.4：近 24h 逐小时趋势（24 桶） */
+  trend24h?: TrendBucket[];
+  /** v3.0.6：近 7 天日趋势（UsageDaily 聚合，含今日） */
+  trend7d?: Trend7Day[];
+  /** v3.5.0：上一个 7 天汇总（环比对比用；与 trend7d 等长窗口不重叠） */
+  trend7d_prev?: Trend7DayPrev;
+  last_checkin: {
+    time: string;
+    provider: string;
+    details: Array<{ accountId: string; accountName: string; success: boolean }>;
+  } | null;
+  last_refresh: string | null;
+  available_models: string[];
+  accounts: AccountState[];
+}
+
+export interface TodayStats {
+  requests: number;
+  successRate: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+}
+
+/** v3.0.4：近 24h 逐小时趋势桶（总览趋势 mini 图数据源） */
+export interface TrendBucket {
+  hour: string; // 桶起始整点 ISO
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/** v3.0.6：近 7 天日趋势桶（UsageDaily 按日聚合；不受滚动日志窗口截断） */
+export interface Trend7Day {
+  day: string; // YYYY-MM-DD（服务器本地时区）
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/** v3.5.0：上一个 7 天汇总（环比对比；与 trend7d 窗口不重叠） */
+export interface Trend7DayPrev {
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/** v3.6.0：余额按日快照 —— 单账号时间序列（GET /api/console/balances/history） */
+export interface BalanceHistoryAccount {
+  providerId: string;
+  providerName: string;
+  accountId: string;
+  accountName: string;
+  /** 与 days 轴对齐的余额点（null=当日无快照） */
+  points: Array<number | null>;
+  /** 窗口内首次非空快照值 */
+  first: number | null;
+  /** 窗口内最后非空快照值 */
+  last: number | null;
+  /** last - first（保留 2 位；first/last 任一缺失时为 null） */
+  delta: number | null;
+}
+
+/** v3.6.0：余额历史响应（days 为完整日期轴，最旧 → 今日） */
+export interface BalanceHistoryData {
+  days: string[];
+  accounts: BalanceHistoryAccount[];
+  fetchedAt: string;
+}
+
+/** v3.1.1：今日 Top 密钥排行行（UsageDaily 按密钥名聚合；剔除未知调用方） */
+export interface TopKeyRow {
+  apiKeyName: string;
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+}
+
+/** v3.9.0：今日 Top 模型排行行（RequestLog 按对外模型聚合；本地今日 0 点窗口） */
+export interface TopModelRow {
+  model: string;
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+}
+
+// ---- 账号管理 ----
+export interface ConsoleAccount {
+  id: string;
+  providerId: string;
+  name: string;
+  enabled: boolean;
+  credentials: Record<string, unknown>; // 掩码值
+  balance: Record<string, unknown> | null;
+  cooldownUntil: string | null;
+  cooldownStreak?: number;
+  /** v3.2.2：最近一次进入冷却的原因摘要（tooltip 展示） */
+  cooldownReason?: string | null;
+  lastCheckinAt: string | null;
+  lastCheckinOk: boolean | null;
+  lastRefreshAt: string | null;
+  /** v3.0.4：近 24h 调用统计（无调用时 null）；v3.1.0 增 failures 精确失败次数 */
+  stats24h?: { requests: number; successRate: number; failures?: number } | null;
+  /** v3.8.0：最后调用时间（RequestLog 滚动窗口 MAX(createdAt)，按 providerId+accountId 复合维度） */
+  lastUsedAt?: string | null;
+  /** v3.0.6：今日 token 聚合（UsageDaily 按密钥名维度；账号行无密钥维度时不适用，保持 null） */
+  todayStats?: { requests: number; inputTokens: number; outputTokens: number } | null;
+}
+
+export interface AccountsData {
+  grouped: Array<{
+    provider: { id: string; name: string; type: string };
+    accounts: ConsoleAccount[];
+  }>;
+  total: number;
+  enabled: number;
+}
+
+export interface ImportLineResult {
+  index: number;
+  status: "success" | "skipped" | "failed";
+  providerId?: string;
+  accountId?: string;
+  reason?: string;
+}
+
+export interface ImportResult {
+  success: number;
+  skipped: number;
+  failed: number;
+  details: ImportLineResult[];
+  /** v3.0.9：识别到的导入源格式（如 wb-switch-accounts） */
+  format?: string;
+  /** 格式说明与注意事项（识别到特殊格式时返回） */
+  formatNote?: string;
+}
+
+// ---- API 中转（提供商） ----
+export type ProviderType = "workbuddy" | "openai" | "anthropic" | "opencode" | "qwenweb";
+
+export interface ProviderAccount {
+  id: string;
+  name: string;
+  enabled: boolean;
+  credentials: Record<string, unknown>; // 掩码值
+  balance?: Record<string, unknown> | null;
+  cooldownUntil?: string | null;
+  lastCheckinAt?: string | null;
+  lastCheckinOk?: boolean | null;
+  lastRefreshAt?: string | null;
+}
+
+export interface ConsoleProvider {
+  id: string;
+  name: string;
+  type: ProviderType;
+  enabled: boolean;
+  sortOrder?: number;
+  proxyOverride: string | null;
+  config: Record<string, unknown>; // 敏感字段掩码
+  accounts: ProviderAccount[];
+  accountCount: number;
+  accountEnabledCount: number;
+  /** v3.0.3：近 24h 调用统计（无调用时 null） */
+  stats24h?: ProviderStats24h | null;
+}
+
+export interface ProviderStats24h {
+  requests: number;
+  successRate: number;
+  avgDurationMs: number | null;
+}
+
+export interface NativeProviderPreset {
+  id: string;
+  type: string;
+  label: string;
+  region?: "cn" | "intl";
+  baseUrl?: string;
+}
+
+export interface ProvidersData {
+  providers: ConsoleProvider[];
+  supportedTypes: ProviderType[];
+  /** 原生项目预设提供商清单（提供商 ID 下拉框数据源；排序/展示与原生一致） */
+  nativePresets?: NativeProviderPreset[];
+  /** v3.8.0：模型健康一览（对外模型 × 路由候选 × 24h 调用健康） */
+  modelHealth?: ModelHealthRow[];
+}
+
+/** v3.8.0：模型健康一览行（API 中转页） */
+export interface ModelHealthRow {
+  /** 对外模型名（ModelRoute.model） */
+  model: string;
+  enabled: boolean;
+  /** 路由候选（failover 顺序） */
+  candidates: Array<{ providerId: string; model: string; enabled: boolean; sortOrder: number }>;
+  /** 近 24h 调用次数（无调用时 null，区别于真实 0） */
+  calls24h: number | null;
+  successRate24h: number | null;
+  avgDurationMs: number | null;
+  /** 滚动窗口内最后调用时间（全窗口 MAX(createdAt)） */
+  lastUsedAt: string | null;
+}
+
+export interface ProviderTestResult {
+  success: boolean;
+  elapsedMs: number;
+  message: string;
+  balance?: number;
+  modelsCount?: number;
+  models?: string[];
+  freeModels?: string[];
+  region?: string;
+  hasCredentials?: boolean;
+  [key: string]: unknown;
+}
+
+// ---- 虚拟密钥 ----
+export interface VirtualKeyRow {
+  id: string;
+  name: string;
+  keyMasked: string;
+  keyPrefix: string;
+  enabled: boolean;
+  models: string[];
+  role: string;
+  remark: string | null;
+  createdAt: string;
+  updatedAt?: string;
+  /** v3.0.4：近 24h 调用统计（无调用时 null）；v3.1.0 增 failures 精确失败次数 */
+  stats24h?: { requests: number; successRate: number; failures?: number } | null;
+  /** v3.0.6：今日 token 聚合（UsageDaily 按日聚合，不受滚动日志窗口截断；无调用时 null） */
+  todayStats?: {
+    requests: number;
+    okRequests: number;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
+  } | null;
+  /** v3.7.0：最后使用时间（RequestLog 滚动窗口 MAX(createdAt)；窗口中无记录时 null） */
+  lastUsedAt?: string | null;
+}
+
+export interface KeysData {
+  keys: VirtualKeyRow[];
+}
+
+export interface CreatedKey {
+  id: string;
+  keyValue: string;
+}
+
+// ---- 模型路由 ----
+export interface RouteCandidateRow {
+  id: number;
+  providerId: string;
+  model: string;
+  enabled: boolean;
+  sortOrder: number;
+}
+
+export interface RouteRow {
+  id: number;
+  model: string;
+  enabled: boolean;
+  candidates: RouteCandidateRow[];
+}
+
+export interface RoutesData {
+  routes: RouteRow[];
+  providers: Array<{ id: string; name: string; type: string; enabled: boolean }>;
+  /** 原生模型目录（按适配器类型归组；模型 ID 原样透传，候选项「模型」下拉框数据源） */
+  providerModels?: Record<string, string[]>;
+}
+
+// ---- 定时任务 ----
+export interface JobsConfig {
+  checkinEnabled: boolean;
+  checkinCron: string;
+  checkinTz: string;
+  /** v4.1.0：签到提供商白名单（空数组 = 全部支持签到的提供商） */
+  checkinProviders: string[];
+  keepaliveEnabled: boolean;
+  keepaliveCron: string;
+  keepaliveTz: string;
+}
+
+/** v4.1.0：可签到提供商候选（GET /api/console/jobs 下发，下拉选项数据源） */
+export interface CheckinCandidate {
+  id: string;
+  name: string;
+  type: string;
+}
+
+export interface JobRunRow {
+  job: string;
+  triggered: string;
+  success: boolean;
+  detail: string;
+  startedAt: string;
+}
+
+export interface CheckinDetailRow {
+  providerId: string;
+  accountId: string;
+  accountName: string;
+  success: boolean;
+  manual: boolean;
+  result: string;
+  createdAt: string;
+  /** v3.1.0：幂等成功（上游 10001「今天已签到」等业务态，非真失败）——UI 显示灰色「已签到」徽标而非红色失败 */
+  idempotentOk?: boolean;
+  /** v3.1.1：失败原因分类（Task 16 遗留 #3）：idempotent=已签到 / activity_inactive=活动未开启 / credentials=凭据失效 / network=网络异常 / failure=真失败；成功行为 null */
+  category?: string | null;
+}
+
+export interface JobsData {
+  config: JobsConfig;
+  /** v4.1.0：可签到提供商候选（下拉选项） */
+  checkinCandidates?: CheckinCandidate[];
+  recentRuns: JobRunRow[];
+  lastCheckinDetail: CheckinDetailRow[];
+}
+
+export interface JobRunResult {
+  job: string;
+  detail: string;
+}
+
+// ---- 运行日志 ----
+export interface LogRow {
+  id: number;
+  createdAt: string;
+  model: string;
+  protocol: string;
+  providerId: string | null;
+  accountId: string | null;
+  durationMs: number | null;
+  status: number | null;
+  stream: boolean;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  apiKeyName: string | null;
+  error: string | null;
+  /** v3.0.3：true=上游精确 usage；false=网关字符估算；null=未知/未记录 */
+  usageExact?: boolean | null;
+}
+
+export interface LogsData {
+  items: LogRow[];
+  total: number;
+  /** v3.0.4：日志中出现过的提供商去重清单（按调用次数降序；筛选下拉数据源） */
+  providers?: string[];
+  /** v3.0.5：日志中出现过的密钥主体去重清单（按调用次数降序；筛选下拉数据源） */
+  keys?: string[];
+  /** v3.0.6：日志中出现过的（提供商 × 账号）组合去重清单（按调用次数降序；筛选下拉数据源） */
+  accounts?: Array<{ providerId: string; accountId: string; label: string; requests: number }>;
+  /** v3.9.0：日志中出现过的对外模型去重清单（按调用次数降序；模型筛选 datalist 数据源） */
+  models?: string[];
+}
+
+// ---- 设置 ----
+export interface ProxyLastTest {
+  ok: boolean;
+  exitIp?: string;
+  elapsedMs?: number;
+  error?: string;
+  at: string;
+}
+
+export interface ProxySettings {
+  enabled: boolean;
+  list: string | string[];
+  bypass: string[];
+  lastTest?: ProxyLastTest | null;
+  poolSize?: number;
+}
+
+export interface SettingsData {
+  proxy: ProxySettings | null;
+  corsAllowedOrigins: string[];
+  listenLan: boolean;
+  logLevel: string;
+  checkinEnabled: boolean;
+  checkinCron: string;
+  checkinTz: string;
+  keepaliveEnabled: boolean;
+  keepaliveCron: string;
+  keepaliveTz: string;
+  maxContextTurns: number;
+  usageProviderId: string | null;
+  /** v3.2.2：操作审计保留天数（0 = 永久保留） */
+  auditRetentionDays?: number;
+  /** v3.7.0：余额快照保留天数（0 = 永久保留） */
+  balanceRetentionDays?: number;
+  hasMasterKey: boolean;
+  hasCronSecret: boolean;
+  configVersion: number;
+}
+
+export interface ProxyTestResult {
+  ok: boolean;
+  exitIp?: string;
+  elapsedMs: number;
+  error?: string;
+  scope?: string | { providerId: string; override: string | null };
+  poolPreview?: string[];
+  diagnostics?: { poolSize: number; currentIndex: number; cachedDispatchers: string[] };
+  /** v3.6.0：测试模式（draft=按草稿逐地址实测 / direct=直连出口 / global=按生效配置） */
+  mode?: "draft" | "direct" | "global";
+  /** v3.6.0：draft 模式逐地址实测明细（地址已掩码，不回显凭据） */
+  pool?: Array<{ masked: string; ok: boolean; elapsedMs: number; exitIp?: string; error?: string }>;
+  /** v3.6.0：POST 响应附带更新后的测试历史（cap 20） */
+  history?: ProxyTestRecord[];
+}
+
+/** v3.6.0：代理测试历史条目（设置页「测试历史」面板；SystemSetting proxyTestHistory 键） */
+export interface ProxyTestRecord {
+  ok: boolean;
+  exitIp?: string;
+  elapsedMs: number;
+  error?: string;
+  mode: "draft" | "direct" | "global";
+  pool?: Array<{ masked: string; ok: boolean; elapsedMs: number; exitIp?: string; error?: string }>;
+  at: string;
+}
+
+export interface MigrateReport {
+  summary: {
+    createdProviders: number;
+    createdAccounts: number;
+    skippedProviders: number;
+    createdRoutes: number;
+    createdKeys: number;
+    skippedKeys: number;
+    warnings: string[];
+  };
+  report: Array<{ section: string; action: string; detail: string }>;
+  message: string;
+}
+
+// ---- 备份导入（v4.1.0：POST /api/console/backup，uag-backup-v1 整包恢复）----
+export interface ImportCounts {
+  providers: number;
+  accounts: number;
+  routes: number;
+  candidates: number;
+  keys: number;
+  settings: number;
+  checkinLogs: number;
+  requestLogs: number;
+}
+
+export interface ImportReport {
+  mode: "merge" | "overwrite";
+  counts: ImportCounts;
+  warnings: string[];
+  report: Array<{ section: string; action: string; detail: string }>;
+  message: string;
+}
+
+/** 备份文件客户端解析预览（选择文件/粘贴后立即展示分区条数，不做任何写入） */
+export interface BackupPreview {
+  format: string;
+  version: string;
+  exportedAt: string;
+  containsSecrets: boolean;
+  sections: {
+    providers: number;
+    accounts: number;
+    routes: number;
+    candidates: number;
+    virtualKeys: number;
+    settings: number;
+    checkinLogs: number;
+    requestLogs: number;
+  };
+}
+
+export interface SettingsSaveResult {
+  updated: string[];
+  regenerated?: string[];
+  message?: string;
+}

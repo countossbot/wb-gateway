@@ -1,0 +1,85 @@
+# Universal AI Gateway —— 生产容器编排（v4.0.0 容器首启自动建表 + 默认管理员播种）
+#
+# 使用前提：
+#   1. 镜像已发布到 GHCR（本文件只用 image: 引用，绝不 build——构建期峰值 1.5~2GB
+#      会在小内存 VPS 上 OOM，镜像构建请在 CI 或大内存机器完成）。
+#      默认镜像名占位为 ghcr.io/ericsunsk/universal-ai-gateway:latest，
+#      请按实际发布仓库名替换（GHCR 镜像名一律小写）。
+#   2. 全新空卷首启：容器自动检测空库并执行内置 /app/prisma/init.sql 建表，
+#      并播种默认管理员（admin / gateway-admin-2026），无需任何人工介入即可登录控制台。
+#   3. 重复重启不重复建表、不重复播种（两者均幂等，已存在即跳过）。
+#
+# 快速开始：
+#   docker compose up -d
+#   docker compose logs -f          # 看到 [SchemaInit] schema ready / default admin seeded 即就绪
+#   浏览器访问 http://<主机>:18787 用默认账号登录（登录后立即修改密码）
+
+services:
+  uag:
+    # ---- 镜像 ----
+    # 只引用远端镜像，本机不构建（小内存 VPS 防爆）。按实际 GHCR 仓库替换 tag。
+    image: ghcr.io/ericsunsk/universal-ai-gateway:latest
+    container_name: uag
+
+    # ---- 网络 ----
+    ports:
+      # 双栈监听（IPv4 + IPv6）："::" 前缀让 docker-proxy 同时绑定 v4/v6。
+      # 若仅需本机访问改回 "127.0.0.1:18787:18787"。
+      - "[::]:18787:18787"
+
+    environment:
+      # 监听端口（镜像内 Next.js standalone server 读取）
+      - PORT=18787
+      # 必须是 "::"（带引号！）：绑定全部 IPv6+IPv4（v4-mapped）。
+      # 裸写 :: 会被 YAML 解析成嵌套映射导致容器起不来；
+      # 用 0.0.0.0 只绑 IPv4，容器内 [::1] 回环连不上（部分探针/自调用失败）。
+      - "HOSTNAME=::"
+      # SQLite 落盘位置：具名卷内的绝对路径（schemaInit 空库检测 + init.sql 建表都按此路径）
+      - DATABASE_URL=file:/app/db/custom.db
+      # 默认管理员（仅当库内不存在任何管理员时播种；重复重启不覆盖不报错）。
+      # 生产环境务必改强口令（仅首次启动生效——已有管理员后这两个变量不再起作用），
+      # 并在登录控制台后立即修改密码：
+      # - UAG_DEFAULT_ADMIN_USERNAME=admin
+      # - UAG_DEFAULT_ADMIN_PASSWORD=gateway-admin-2026
+
+    volumes:
+      # 具名卷持久化 SQLite 数据（首启由容器自动建表）。
+      # 改用宿主目录绑定时（如 ./data:/app/db）必须保证目录属主与容器进程 UID 一致且可写，
+      # 否则 SQLite 会报 readonly database（容器内默认以非 root 运行，宿主目录默认 root 属主）。
+      - uag-data:/app/db
+
+    restart: unless-stopped
+
+    # ---- 资源与安全 ----
+    mem_limit: 320m # 小内存 VPS 保护；SQLite + standalone 常态 <150MB，峰值留缓冲
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges
+
+    # ---- 健康检查 ----
+    # 用 bun 执行 fetch 探测 /healthz。接受 200（ok）与 503（degraded：零 provider /
+    # 零路由的合法空跑状态，空库刚建表完成时即如此）——只有连不上或其它状态码才算不健康。
+    healthcheck:
+      # 注意：整段 JS 必须带单引号 —— 表达式里的 ": "（如三元运算符 "? 0 : 1"）若裸写
+      # 会被 YAML 切成嵌套映射，探针直接失效（与 HOSTNAME=:: 同类陷阱）。
+      test:
+        - CMD
+        - bun
+        - -e
+        - 'const r = await fetch("http://127.0.0.1:" + (process.env.PORT || 18787) + "/healthz"); process.exit(r.status === 200 || r.status === 503 ? 0 : 1);'
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    # ---- 日志 ----
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # 具名卷：数据与容器/镜像生命周期解绑（删除容器重建数据仍在；
+  # `docker compose down -v` 才会删卷——删卷重建后为全新数据，默认账号重新可用）。
+  uag-data:
