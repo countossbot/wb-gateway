@@ -166,7 +166,7 @@ export interface TopKeyRow {
   cachedTokens: number;
 }
 
-/** v3.9.0：今日 Top 模型排行行（RequestLog 按对外模型聚合；本地今日 0 点窗口） */
+/** v3.9.0（v4.2.3 改源）：今日 Top 模型排行行（UsageDaily 模型维度聚合；与 Top 密钥同源） */
 export interface TopModelRow {
   model: string;
   requests: number;
@@ -189,7 +189,7 @@ export interface TopProviderRow {
   share: number;
 }
 
-/** v4.2.1：模型健康单日点（requestLog 按模型 × 本地日聚合） */
+/** v4.2.1（v4.2.3 改源）：模型健康单日点（UsageDaily 模型 × 日聚合，跨滚动窗口持久） */
 export interface ModelHealthPoint {
   day: string; // YYYY-MM-DD
   requests: number;
@@ -204,7 +204,7 @@ export interface ModelHealthModel {
   okRequests7d: number;
 }
 
-/** v4.2.1：模型健康 sparkline 数据（GET /api/console/overview 附带） */
+/** v4.2.1（v4.2.3 改源）：模型健康 sparkline 数据（GET /api/console/overview 附带；UsageDaily 模型维度） */
 export interface ModelHealthData {
   days: string[]; // 7 天日期轴（最旧 → 今日）
   models: ModelHealthModel[]; // 按请求数 Top 6

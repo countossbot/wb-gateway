@@ -184,15 +184,19 @@ model JobRun {
   @@index([startedAt])
 }
 
-// ---- 用量按日聚合（v3.0.6）----
+// ---- 用量按日聚合（v3.0.6；v4.2.3 增模型维度）----
 // RequestLog 滚动窗口仅保留 5000 条，超大流量下「今日/近 N 天」统计会被截断；
-// 本表按「日 × 提供商 × 密钥」维度永久累积（维度键空串=未命中/未知，规避 SQLite
-// 复合唯一约束中 NULL 不判等的问题），统计查询不再受滚动窗口影响。
+// 本表按「日 × 提供商 × 密钥 × 模型」维度永久累积（维度键空串=未命中/未知/历史未细分，
+// 规避 SQLite 复合唯一约束中 NULL 不判等的问题），统计查询不再受滚动窗口影响。
+// v4.2.3：新增 model 维度 —— 模型健康 sparkline / Top 模型排行改读本表（根本解），
+// 跨滚动窗口持久；v4.2.3 之前的存量行 model=""（启动迁移 splitUsageDailyModelDimension
+// 在 RequestLog 完整覆盖该天时安全重切，否则保留空串不参与模型维度统计）。
 model UsageDaily {
   id           Int      @id @default(autoincrement())
   day          String // YYYY-MM-DD（服务器本地时区）
   providerId   String   @default("") // 维度键（空串=请求未命中提供商/未知）
   apiKeyName   String   @default("") // 维度键（空串=未识别调用方）
+  model        String   @default("") // 维度键（空串=v4.2.3 前历史行/未知模型）
   requests     Int      @default(0)
   okRequests   Int      @default(0) // status ∈ [200, 400)
   inputTokens  Int      @default(0)
@@ -200,7 +204,7 @@ model UsageDaily {
   cachedTokens Int      @default(0)
   updatedAt    DateTime @updatedAt
 
-  @@unique([day, providerId, apiKeyName])
+  @@unique([day, providerId, apiKeyName, model])
   @@index([day])
 }
 

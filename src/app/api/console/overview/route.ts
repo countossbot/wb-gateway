@@ -69,6 +69,7 @@ export async function GET(request: NextRequest) {
   });
 
   // v3.0.6：今日消耗改读 UsageDaily 按日聚合（不再受 RequestLog 5000 条滚动窗口截断）
+  // v4.2.3：今日行含 model 维度（今日 Top 模型排行同源复用，零额外查询）
   const todayKey = localDayKey();
   const todayRows = await db.usageDaily.findMany({ where: { day: todayKey } });
   const todayTotal = todayRows.reduce(
@@ -135,58 +136,37 @@ export async function GET(request: NextRequest) {
     if (topKeys.length > 0) topKeysDate = yKey;
   }
 
-  // v3.9.0：今日 Top 模型排行（RequestLog 按对外模型聚合本地今日 0 点窗口；UsageDaily 无模型维度，
-  // 与 24h 趋势同口径；Top 5 按请求数降序；今日零调用时昨日兑底，口径与 Top 密钥一致）
-  const todayMidnight = new Date();
-  todayMidnight.setHours(0, 0, 0, 0);
-  const yesterdayMidnight = new Date(todayMidnight);
-  yesterdayMidnight.setDate(yesterdayMidnight.getDate() - 1);
-  const [mTodayTotal, mTodayOk, mYesterdayTotal, mYesterdayOk] = await Promise.all([
-    db.requestLog.groupBy({
-      by: ["model"],
-      where: { createdAt: { gte: todayMidnight } },
-      _count: { _all: true },
-      _sum: { inputTokens: true, outputTokens: true, cachedTokens: true },
-    }),
-    db.requestLog.groupBy({
-      by: ["model"],
-      where: { createdAt: { gte: todayMidnight }, status: { gte: 200, lt: 400 } },
-      _count: { _all: true },
-    }),
-    db.requestLog.groupBy({
-      by: ["model"],
-      where: { createdAt: { gte: yesterdayMidnight, lt: todayMidnight } },
-      _count: { _all: true },
-      _sum: { inputTokens: true, outputTokens: true, cachedTokens: true },
-    }),
-    db.requestLog.groupBy({
-      by: ["model"],
-      where: { createdAt: { gte: yesterdayMidnight, lt: todayMidnight }, status: { gte: 200, lt: 400 } },
-      _count: { _all: true },
-    }),
-  ]);
-  const toTopModels = (
-    totals: typeof mTodayTotal,
-    okRows: Array<{ model: string; _count: { _all: number } }>
+  // v4.2.3：今日 Top 模型排行改读 UsageDaily 模型维度（与 Top 密钥同源同口径；
+  // 复用已拉取的 todayRows 零额外查询；不再受滚动窗口截断；模型维度空串=历史未细分
+  // 行不参与排行；今日零调用时昨日兑底，口径与 Top 密钥一致）
+  const modelAggFromRows = (
+    rows: Array<{ model: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number }>
   ): TopModelRowShape[] => {
-    const okMap = new Map(okRows.map((r) => [r.model, r._count._all]));
-    return totals
-      .map((r) => ({
-        model: r.model,
-        requests: r._count._all,
-        okRequests: okMap.get(r.model) ?? 0,
-        inputTokens: r._sum.inputTokens ?? 0,
-        outputTokens: r._sum.outputTokens ?? 0,
-        cachedTokens: r._sum.cachedTokens ?? 0,
-      }))
-      .sort((a, b) => b.requests - a.requests)
-      .slice(0, 5);
+    const map = new Map<string, TopModelRowShape>();
+    for (const r of rows) {
+      if (!r.model) continue; // v4.2.3 前历史行（model=""）不参与模型维度排行
+      const b = map.get(r.model) || { model: r.model, requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+      b.requests += r.requests;
+      b.okRequests += r.okRequests;
+      b.inputTokens += r.inputTokens;
+      b.outputTokens += r.outputTokens;
+      b.cachedTokens += r.cachedTokens;
+      map.set(r.model, b);
+    }
+    return Array.from(map.values()).sort((a, b) => b.requests - a.requests).slice(0, 5);
   };
   let topModelsDate = todayKey;
-  let topModels = toTopModels(mTodayTotal, mTodayOk);
+  let topModels = modelAggFromRows(todayRows);
   if (topModels.length === 0) {
-    topModels = toTopModels(mYesterdayTotal, mYesterdayOk);
-    if (topModels.length > 0) topModelsDate = localDayKey(yesterdayMidnight);
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yMKey = localDayKey(yesterday);
+    const yMRows = await db.usageDaily.findMany({
+      where: { day: yMKey, model: { not: "" } },
+      select: { model: true, requests: true, okRequests: true, inputTokens: true, outputTokens: true, cachedTokens: true },
+    });
+    topModels = modelAggFromRows(yMRows);
+    if (topModels.length > 0) topModelsDate = yMKey;
   }
 
   // v3.0.6：近 7 天日趋势（UsageDaily groupBy day；含今日；跨滚动窗口持久准确）
@@ -251,32 +231,30 @@ export async function GET(request: NextRequest) {
     .sort((a, b) => b.requests - a.requests)
     .slice(0, 5);
 
-  // v4.2.1：模型健康 —— 近 7 天（含今日）RequestLog 按「对外模型 × 本地日」聚合，
-  // 每模型 7 个日点（requests/okRequests）供 sparkline 渲染；按 7 天请求数取 Top 6。
-  // 注意：受请求日志滚动窗口（5000 条）限制，超高流量下远端日可能被截断（卡片脚注已注明）。
+  // v4.2.3：模型健康改读 UsageDaily 模型维度（跨滚动窗口根本解，Task 40 起顺延项清偿）——
+  // 近 7 天（含今日）按「对外模型 × 本地日」聚合，每模型 7 个日点
+  // （requests/okRequests）供 sparkline 渲染；按 7 天请求数取 Top 6。
+  // v4.2.3 前历史行（model=""）不参与；新增流量自然细分；超高流量下不再受滚动窗口截断。
   const healthDays: string[] = Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
     return localDayKey(d);
   });
-  const since7d = new Date();
-  since7d.setDate(since7d.getDate() - 6);
-  since7d.setHours(0, 0, 0, 0);
-  const healthRows = await db.requestLog.findMany({
-    where: { createdAt: { gte: since7d } },
-    select: { model: true, createdAt: true, status: true },
+  const healthRows = await db.usageDaily.findMany({
+    where: { day: { in: healthDays }, model: { not: "" } },
+    select: { day: true, model: true, requests: true, okRequests: true },
   });
   const healthMap = new Map<string, Array<{ requests: number; okRequests: number }>>();
   for (const row of healthRows) {
-    const idx = healthDays.indexOf(localDayKey(row.createdAt));
+    const idx = healthDays.indexOf(row.day);
     if (idx < 0) continue;
     let arr = healthMap.get(row.model);
     if (!arr) {
       arr = healthDays.map(() => ({ requests: 0, okRequests: 0 }));
       healthMap.set(row.model, arr);
     }
-    arr[idx].requests += 1;
-    if ((row.status ?? 0) >= 200 && (row.status ?? 0) < 400) arr[idx].okRequests += 1;
+    arr[idx].requests += row.requests;
+    arr[idx].okRequests += row.okRequests;
   }
   const modelHealth: { days: string[]; models: ModelHealthModelShape[] } = {
     days: healthDays,
@@ -383,7 +361,7 @@ export async function GET(request: NextRequest) {
     trend7d_prev: trend7dPrev,
     /** v4.2.1：近 7 天 Top 提供商排行（UsageDaily 聚合，Top 5 按请求数） */
     top_providers_7d: topProviders,
-    /** v4.2.1：模型健康 sparkline（近 7 天模型 × 日成功/失败点阵，Top 6 按请求数） */
+    /** v4.2.3：模型健康 sparkline（UsageDaily 模型维度聚合，跨滚动窗口持久；Top 6 按请求数） */
     model_health: modelHealth,
     last_checkin: lastCheckinLog
       ? {

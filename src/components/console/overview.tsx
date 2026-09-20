@@ -544,7 +544,7 @@ function TopModelsCard({
       <div className="rounded-xl border border-stone-200 bg-white p-4">
         <p className="text-sm font-medium text-stone-700">今日 Top 模型</p>
         <p className="mt-2 text-xs text-muted-foreground">
-          今日暂无调用，且昨日亦无数据。调用发生后将按请求数排行（数据来自请求日志滚动窗口，按对外模型聚合）。
+          今日暂无调用，且昨日亦无数据。调用发生后将按请求数排行（数据来自按日聚合表的模型维度，不受滚动日志窗口截断）。
         </p>
       </div>
     );
@@ -719,7 +719,7 @@ function healthBarClass(rate: number | null): string {
  * - 近 7 天每个模型一行：模型名 + 7 根日柱（高度=当日请求量相对峰值；颜色=当日成功率三档）
  *   + 右侧 7 天总请求数与总成功率
  * - 点击行 → 运行日志按「该模型 + 今日全天」过滤（复用第八跳转通道语义）
- * - 脚注注明滚动窗口口径（超高流量下远端日可能被截断；UsageDaily 无模型维度，此为本窗口内精确）
+ * - 脚注注明持久聚合口径（v4.2.3 改读 UsageDaily 模型维度：跨滚动窗口持久，不再受 5000 条截断）
  */
 function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onModelClick?: (model: string) => void }) {
   const models = data?.models || [];
@@ -728,7 +728,7 @@ function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onMod
       <div className="rounded-xl border border-stone-200 bg-white p-4">
         <p className="text-sm font-medium text-stone-700">模型健康 · 近 7 天</p>
         <p className="mt-2 text-xs text-muted-foreground">
-          近 7 天暂无网关调用。调用发生后将按模型展示每日请求量与成功率走势（数据来自请求日志滚动窗口）。
+          近 7 天暂无网关调用。调用发生后将按模型展示每日请求量与成功率走势（数据来自按日聚合表的模型维度）。
         </p>
       </div>
     );
@@ -800,7 +800,7 @@ function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onMod
         })}
       </ul>
       <p className="mt-2.5 border-t border-stone-100 pt-2 text-[10px] leading-relaxed text-muted-foreground">
-        数据来自请求日志滚动窗口（保留最近约 5000 条），超高流量下远端日可能被截断；柱色阈值：绿 ≥90% · 黄 ≥60% · 红 &lt;60%。
+        数据来自按日聚合表的模型维度（v4.2.3 起持久累积，不受滚动日志窗口截断；当日统计有约 30 秒批量落库延迟）；柱色阈值：绿 ≥90% · 黄 ≥60% · 红 &lt;60%。
       </p>
     </div>
   );

@@ -462,19 +462,21 @@ export async function POST(request: NextRequest) {
   // 总览页「24h 请求趋势」（读 RequestLog）与「近 7 天消耗趋势」（读 UsageDaily）互相矛盾。
   // 重建策略：从导入后的 RequestLog 全量聚合，仅覆盖导入日志涉及的日期（delete+recreate），
   // 未涉及的日期不受影响；聚合失败不阻断导入主流程（仅降级为告警）。
+  // v4.2.3：聚合维度含 model（日 × 提供商 × 密钥 × 模型，与实时链路同口径）。
   if (mode === "overwrite" && counts.requestLogs > 0) {
     try {
       const logs = await db.requestLog.findMany({
-        select: { createdAt: true, providerId: true, apiKeyName: true, status: true, inputTokens: true, outputTokens: true, cachedTokens: true },
+        select: { createdAt: true, providerId: true, apiKeyName: true, model: true, status: true, inputTokens: true, outputTokens: true, cachedTokens: true },
       });
-      const cells = new Map<string, { day: string; providerId: string; apiKeyName: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number }>();
+      const cells = new Map<string, { day: string; providerId: string; apiKeyName: string; model: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number }>();
       for (const l of logs) {
         const day = localDayKey(l.createdAt);
         const providerKey = l.providerId ?? "";
         const keyKey = l.apiKeyName ?? "";
-        const k = `${day}\u0000${providerKey}\u0000${keyKey}`;
+        const modelKey = l.model ?? "";
+        const k = `${day}\u0000${providerKey}\u0000${keyKey}\u0000${modelKey}`;
         const ok = (l.status ?? 0) >= 200 && (l.status ?? 0) < 400;
-        const c = cells.get(k) || { day, providerId: providerKey, apiKeyName: keyKey, requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+        const c = cells.get(k) || { day, providerId: providerKey, apiKeyName: keyKey, model: modelKey, requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
         c.requests += 1;
         if (ok) c.okRequests += 1;
         c.inputTokens += l.inputTokens ?? 0;
@@ -489,11 +491,11 @@ export async function POST(request: NextRequest) {
           db.usageDaily.deleteMany({ where: { day: { in: days } } }),
           ...[...cells.values()].map((c) =>
             db.usageDaily.create({
-              data: { day: c.day, providerId: c.providerId, apiKeyName: c.apiKeyName, requests: c.requests, okRequests: c.okRequests, inputTokens: c.inputTokens, outputTokens: c.outputTokens, cachedTokens: c.cachedTokens },
+              data: { day: c.day, providerId: c.providerId, apiKeyName: c.apiKeyName, model: c.model, requests: c.requests, okRequests: c.okRequests, inputTokens: c.inputTokens, outputTokens: c.outputTokens, cachedTokens: c.cachedTokens },
             })
           ),
         ]);
-        report.push({ section: "usage-daily", action: "rebuild", detail: `已从 ${counts.requestLogs} 条导入日志重建 ${days.length} 天的按日聚合（${cells.size} 个维度格）` });
+        report.push({ section: "usage-daily", action: "rebuild", detail: `已从 ${counts.requestLogs} 条导入日志重建 ${days.length} 天的按日聚合（${cells.size} 个维度格，含模型维度）` });
       }
     } catch (e) {
       warnings.push(`UsageDaily 聚合重建失败（统计面板可能出现断档，不影响业务数据）：${(e as Error).message}`);
