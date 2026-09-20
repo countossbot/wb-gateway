@@ -716,19 +716,59 @@ function healthBarClass(rate: number | null): string {
 
 /**
  * v4.2.1：模型健康 sparkline 卡（Task 32 顺延项落地）。
- * - 近 7 天每个模型一行：模型名 + 7 根日柱（高度=当日请求量相对峰值；颜色=当日成功率三档）
- *   + 右侧 7 天总请求数与总成功率
+ * - 窗口内每个模型一行：模型名 + N 根日柱（高度=当日请求量相对峰值；颜色=当日成功率三档）
+ *   + 右侧窗口内请求数与总成功率
  * - 点击行 → 运行日志按「该模型 + 今日全天」过滤（复用第八跳转通道语义）
+ * - v4.2.3b：窗口长度可选 7/14/30 天（数据源为持久聚合，长窗口零额外成本）；
+ *   柱宽自适应（flex-1 均分，长窗口自动变窄不溢出）
  * - 脚注注明持久聚合口径（v4.2.3 改读 UsageDaily 模型维度：跨滚动窗口持久，不再受 5000 条截断）
  */
-function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onModelClick?: (model: string) => void }) {
+const MH_WINDOW_OPTIONS: Array<{ days: 7 | 14 | 30; label: string }> = [
+  { days: 7, label: "7 天" },
+  { days: 14, label: "14 天" },
+  { days: 30, label: "30 天" },
+];
+
+function ModelHealthCard({
+  data,
+  windowDays = 7,
+  onWindowChange,
+  onModelClick,
+}: {
+  data?: ModelHealthData;
+  windowDays?: 7 | 14 | 30;
+  onWindowChange?: (days: 7 | 14 | 30) => void;
+  onModelClick?: (model: string) => void;
+}) {
   const models = data?.models || [];
+  const nDays = data?.windowDays || windowDays;
   if (models.length === 0) {
     return (
       <div className="rounded-xl border border-stone-200 bg-white p-4">
-        <p className="text-sm font-medium text-stone-700">模型健康 · 近 7 天</p>
+        <div className="flex items-baseline gap-1.5">
+          <p className="text-sm font-medium text-stone-700">模型健康 · 近 {nDays} 天</p>
+          {onWindowChange ? (
+            <span className="ml-auto" role="group" aria-label="切换模型健康窗口长度">
+              {MH_WINDOW_OPTIONS.map((o) => (
+                <button
+                  key={o.days}
+                  type="button"
+                  onClick={() => onWindowChange(o.days)}
+                  aria-pressed={windowDays === o.days}
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                    windowDays === o.days
+                      ? "bg-rose-100 text-rose-700"
+                      : "text-stone-400 hover:bg-stone-100 hover:text-stone-600"
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </span>
+          ) : null}
+        </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          近 7 天暂无网关调用。调用发生后将按模型展示每日请求量与成功率走势（数据来自按日聚合表的模型维度）。
+          近 {nDays} 天暂无网关调用。调用发生后将按模型展示每日请求量与成功率走势（数据来自按日聚合表的模型维度）。
         </p>
       </div>
     );
@@ -737,22 +777,43 @@ function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onMod
     <div className="rounded-xl border border-stone-200 bg-white p-4">
       <div className="flex items-baseline gap-1.5">
         <HeartPulse className="size-4 shrink-0 self-center text-rose-500" aria-hidden />
-        <p className="shrink-0 text-sm font-medium text-stone-700">模型健康 · 近 7 天</p>
-        <span className="truncate text-[11px] text-muted-foreground">日柱高=请求量 · 色=成功率 · Top {models.length}</span>
+        <p className="shrink-0 text-sm font-medium text-stone-700">模型健康 · 近 {nDays} 天</p>
+        {onWindowChange ? (
+          <span className="ml-auto shrink-0" role="group" aria-label="切换模型健康窗口长度">
+            {MH_WINDOW_OPTIONS.map((o) => (
+              <button
+                key={o.days}
+                type="button"
+                onClick={() => onWindowChange(o.days)}
+                aria-pressed={windowDays === o.days}
+                title={`按 ${o.days} 天窗口查看模型健康`}
+                className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                  windowDays === o.days
+                    ? "bg-rose-100 text-rose-700"
+                    : "text-stone-400 hover:bg-stone-100 hover:text-stone-600"
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </span>
+        ) : (
+          <span className="truncate text-[11px] text-muted-foreground">日柱高=请求量 · 色=成功率</span>
+        )}
       </div>
       <ul className="mt-3 space-y-1.5">
         {models.map((m) => {
           const maxDay = Math.max(1, ...m.points.map((p) => p.requests));
-          const rate7d = m.requests7d > 0 ? Math.round((m.okRequests7d / m.requests7d) * 100) : 100;
-          const rate7dColor =
-            rate7d >= 90 ? "text-emerald-600" : rate7d >= 60 ? "text-amber-600" : "text-red-600";
+          const rateN = m.requests7d > 0 ? Math.round((m.okRequests7d / m.requests7d) * 100) : 100;
+          const rateNColor =
+            rateN >= 90 ? "text-emerald-600" : rateN >= 60 ? "text-amber-600" : "text-red-600";
           return (
             <li key={m.model}>
               <button
                 type="button"
                 onClick={onModelClick ? () => onModelClick(m.model) : undefined}
                 disabled={!onModelClick}
-                aria-label={`查看模型 ${m.model} 今日请求日志（近 7 天 ${m.requests7d} 次，成功率 ${rate7d}%）`}
+                aria-label={`查看模型 ${m.model} 今日请求日志（近 ${nDays} 天 ${m.requests7d} 次，成功率 ${rateN}%）`}
                 className={`group flex w-full items-center gap-3 rounded-lg px-2 py-1 text-left transition-colors ${
                   onModelClick ? "cursor-pointer hover:bg-rose-50/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-300" : "cursor-default"
                 }`}
@@ -760,21 +821,22 @@ function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onMod
                 <span className="w-32 shrink-0 truncate font-mono text-xs font-medium text-stone-800 sm:w-40" title={m.model}>
                   {m.model}
                 </span>
-                {/* 7 天 sparkline：高=当日请求量（相对本模型峰值），色=当日成功率三档；无流量日渲染平点 */}
-                <span className="flex h-7 min-w-0 flex-1 items-end justify-end gap-[3px]" role="img" aria-label={`${m.model} 近 7 天每日请求与成功率`}>
+                {/* 窗口内 sparkline：高=当日请求量（相对本模型峰值），色=当日成功率三档；无流量日渲染平点；
+                    柱宽 flex-1 自适应（30 天窗口自动变窄不溢出） */}
+                <span className="flex h-7 min-w-0 flex-1 items-end justify-end gap-[2px] sm:gap-[3px]" role="img" aria-label={`${m.model} 近 ${nDays} 天每日请求与成功率`}>
                   {m.points.map((p, i) => {
                     const rate = p.requests > 0 ? Math.round((p.okRequests / p.requests) * 100) : null;
                     const h = p.requests > 0 ? Math.max(15, Math.round((p.requests / maxDay) * 100)) : 0;
-                    const dateLabel = `${Number(p.day.split("-")[1])}/${Number(p.day.split("-")[2])}`;
+                    // 30 天窗口跨月，tooltip 用完整日期（YYYY-MM-DD）避免歧义
                     const tip =
                       p.requests > 0
-                        ? `${dateLabel} · ${p.requests} 次 · 成功率 ${rate}%`
-                        : `${dateLabel} · 无流量`;
+                        ? `${p.day} · ${p.requests} 次 · 成功率 ${rate}%`
+                        : `${p.day} · 无流量`;
                     return (
                       <span
                         key={i}
                         title={tip}
-                        className={`group/bar flex h-full w-2.5 shrink-0 flex-col justify-end ${rate === null ? "items-center" : ""}`}
+                        className={`group/bar flex h-full min-w-0 flex-1 flex-col justify-end ${rate === null ? "items-center" : ""}`}
                       >
                         {p.requests > 0 ? (
                           <span
@@ -790,8 +852,8 @@ function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onMod
                 </span>
                 <span className="shrink-0 text-right tabular-nums">
                   <span className="block text-xs font-semibold text-stone-800">{m.requests7d} 次</span>
-                  <span className={`block text-[10px] ${rate7dColor}`} title={`近 7 天成功率（成功 ${m.okRequests7d} / 共 ${m.requests7d}）`}>
-                    7 天 {rate7d}%
+                  <span className={`block text-[10px] ${rateNColor}`} title={`近 ${nDays} 天成功率（成功 ${m.okRequests7d} / 共 ${m.requests7d}）`}>
+                    {nDays} 天 {rateN}%
                   </span>
                 </span>
               </button>
@@ -800,7 +862,7 @@ function ModelHealthCard({ data, onModelClick }: { data?: ModelHealthData; onMod
         })}
       </ul>
       <p className="mt-2.5 border-t border-stone-100 pt-2 text-[10px] leading-relaxed text-muted-foreground">
-        数据来自按日聚合表的模型维度（v4.2.3 起持久累积，不受滚动日志窗口截断；当日统计有约 30 秒批量落库延迟）；柱色阈值：绿 ≥90% · 黄 ≥60% · 红 &lt;60%。
+        数据来自按日聚合表的模型维度（v4.2.3 起持久累积，不受滚动日志窗口截断；当日统计有约 30 秒批量落库延迟；v4.2.3 之前的历史行无模型细分）；柱色阈值：绿 ≥90% · 黄 ≥60% · 红 &lt;60%。
       </p>
     </div>
   );
@@ -1020,6 +1082,8 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [copiedModel, setCopiedModel] = React.useState("");
+  // v4.2.3b：模型健康窗口长度（7/14/30 天；数据已持久化，长窗口零额外成本）
+  const [mhWindow, setMhWindow] = React.useState<7 | 14 | 30>(7);
   // v3.4.0：一键清冷却操作反馈（内联轻提示，非报错；3s 自动消失）
   const [cdNotice, setCdNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
   // v3.6.0：余额历史快照（14 天窗口；静默拉取，失败不影响主视图）
@@ -1034,31 +1098,30 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
     setLoading(true);
     setError("");
     try {
-      const d = await apiGet<OverviewData>("/api/console/overview");
+      const d = await apiGet<OverviewData>(`/api/console/overview?mh_days=${mhWindow}`);
       setData(d);
     } catch (e) {
       setError(errMessage(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [mhWindow]);
 
   React.useEffect(() => {
     void load();
   }, [load]);
 
   // v3.6.0：余额趋势独立拉取（quiet；接口/数据缺失时优雅降级为无 footer）
-  React.useEffect(() => {
-    let alive = true;
+  // v4.2.3b：抽出为可重拉回调 —— 刷新按钮同步重拉（旧实现仅组件挂载时拉取一次，
+  // 刷新后余额快照/外推不更新，见 Task 40 遗留项「balTrend 刷新不重拉」）
+  const loadBalTrend = React.useCallback(() => {
     apiGet<BalanceHistoryData>("/api/console/balances/history?days=14", { quiet: true })
-      .then((d) => {
-        if (alive) setBalTrend(d);
-      })
+      .then(setBalTrend)
       .catch(() => {});
-    return () => {
-      alive = false;
-    };
   }, []);
+  React.useEffect(() => {
+    loadBalTrend();
+  }, [loadBalTrend]);
 
   // v3.6.0：聚合余额逐日序列 —— 各账号 carry-forward 后按日求和
   //（存量指标语义：账号当日无快照沿用最近已知值，避免「没测=归零」的错误断崖）
@@ -1155,7 +1218,7 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
         title="总览"
         description="聚合余额、账号与路由状态、上游缓存命中率"
         actions={
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => { void load(); loadBalTrend(); }} disabled={loading}>
             <RefreshCw className={loading ? "animate-spin" : undefined} />
             刷新
           </Button>
@@ -1394,9 +1457,14 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
         <div className="xl:col-span-3">
           <TopProvidersCard rows={data.top_providers_7d || []} />
         </div>
-        {/* v4.2.1：模型健康 sparkline（近 7 天模型 × 日成功/失败点阵；点击行 → 该模型今日日志） */}
+        {/* v4.2.1：模型健康 sparkline（v4.2.3b：窗口可选 7/14/30 天；点击行 → 该模型今日日志） */}
         <div className="xl:col-span-3">
-          <ModelHealthCard data={data.model_health} onModelClick={onModelClick} />
+          <ModelHealthCard
+            data={data.model_health}
+            windowDays={mhWindow}
+            onWindowChange={setMhWindow}
+            onModelClick={onModelClick}
+          />
         </div>
       </div>
 

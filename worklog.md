@@ -1781,3 +1781,35 @@ Stage Summary:
 4. 顺延项持续开放：UsageDaily 模型维度持久化（模型健康跨滚动窗口根本解）；balTrend 刷新按钮不重拉；/checkin 与 /admin/api/checkin 机器接口未接签到白名单
 5. mock-upstream（3040）保持运行（bearer/x-api-key 感知 + anthropic 端点已沉淀为可复用 QA 资产）；如被 reaper 清理可用 `( setsid bun run dev < /dev/null >> /tmp/mock-upstream.log 2>&1 & )` 在 mini-services/mock-upstream 下重启
 6. SSE 修复（Task 39 R1/R2/R6）已闭环；R3/R5 为环境侧无代码动作空间（既有结论维持）
+---
+Task ID: 42
+Agent: 主会话（Z.ai Code，持续迭代轮，trace: 1a0bc1e5e26e0a89-web-cron-review-202609200900）
+Task: 巡检 QA → 清偿 Task 40 起顺延的「UsageDaily 模型维度持久化」（模型健康跨滚动窗口的根本解）+ admin status providers 去重修复；版本 4.2.2 → 4.2.3
+
+Work Log:
+- 【巡检】dev server 存活（v4.2.2，2 提供商/6 模型基线一致）；mock-upstream 3040 存活；agent-browser 8 页签遍历零 console 错误；dev.log 干净 → 项目稳定，进入功能开发
+- 【问题确认】model_health 数据源为 RequestLog 滚动窗口（5000 条/7 天），发现已删除路由的历史 QA 测试模型（qa-pool-model/qa-bad-model 等）仍在模型健康卡显示且受截断风险 —— 正是 worklog 中持续顺延的「UsageDaily 模型维度持久化」根本解场景
+- 【Schema】UsageDaily 增 model String @default("")（空串=v4.2.3 前历史行/未知，与其它维度键空串占位思路一致）+ 复合唯一 [day, providerId, apiKeyName, model]；init.sql 重新生成（db:dump-schema）；db:push 前后数据等价核对：21 行/741 请求/ok 723/全部 token 求和/按日分布完全一致（SQLite 表重建数据保全）
+- 【写入路径】requestLog.ts：UsageDailyCell/usageCellKey/bumpUsageDailyBuffered/flushUsageDaily（复合唯一键名 day_providerId_apiKeyName_model）/backfillUsageDaily 全链路四维度化；新增 splitUsageDailyModelDimension() 启动安全迁移——硬校验「该天 UsageDaily requests 总和 == 该天 RequestLog 行数」才 delete+rebuild 原子重切（日志不完整的天保留 model="" 零风险，下次启动重试）；instrumentation 启动时在 backfill 之后调用并输出拆分明细日志
+- 【实测迁移】重启 dev server 后自动迁移：4/4 天重切（21→29 行），拆分后总量 741/723/token 全等价；旧 RequestLog 口径 model_health（deepseek 406 点阵 [0,0,0,0,2,404,0]）与新 UsageDaily 口径输出逐字一致（交叉验证）
+- 【读取路径】overview route：model_health 与 today_top_models 均改读 UsageDaily（model != "" 过滤 + Top N 截断保持）；today_top_models 移除 4 次 RequestLog groupBy 改复用已拉取 todayRows（净减 4 查询，与 Top 密钥同源同口径含昨日兑底）；usage/daily route：rows 增 model 字段 + pivot 增 byModel（空串排除）；admin/api/status：providers 改 Set 去重计数（修复按行计数在模型维度拆分后膨胀的预存问题；_providerSet 内部字段不泄漏到响应）；backup route：overwrite 导入重建含模型维度（与实时链路同口径）
+- 【兼容性审计】全部 8 处 UsageDaily 消费方逐个核查：overview todayRows/todayKeyRows/yRows/trend7Rows/providerAgg、usage/daily totals+三 pivot、keys route todayMap、admin status byDay —— 全部为按行求和聚合，加维度后总量语义不变，零破坏
+- 【UI】模型健康卡脚注/空态、Top 模型卡空态文案更新（滚动窗口→「按日聚合表的模型维度（v4.2.3 起持久累积，当日约 30 秒批量落库延迟）」）；types.ts 注释同步；/admin 规范页 usage-daily 描述更新（rows day × provider × key × model + byModel pivot）
+- 【e2e】tests/model-dim-e2e.ts 12/12 通过：A 实时写入（3 次调用→35s flush→四维度格落库 requests=3）；B 幂等累加（同格 increment 到 5，复合唯一无重复行）；C overview API 与 DB 动态对账（today_top_models Top 5 / model_health Top 6 逐项一致）；D usage/daily byModel 含新模型；E 总账核对（全表 requests 总和==基线+5 无双计）；自建自删（qa-msplit/qa-ms-model）+ healthz 等价；重跑安全（相对增量断言）
+- 【排障记录】首轮 e2e 4 个「失败」全为测试断言设计错误（Top 5 截断是正确行为/单日窗口 totals 对比错用了全表基线/今日 vs 7 天口径混淆），代码零 bug；修正断言为 DB 动态对账后 12/12
+- 【验证矩阵】agent-browser：总览页模型健康卡渲染（6 行 × 7 日柱 sparkline + 成功率色阶 + 新脚注）+ 8 页签回归零 console 错误；VLM 截图检查：卡片结构/日柱颜色/排版无异常；lint 零错误；tsc src/ 零错误；healthz v4.2.3 基线 2/6 一致
+- 【git】独立 commit（13 文件 +355/-105：schema/init.sql/requestLog/overview/usage-daily/admin-status/backup/instrumentation/types/UI/e2e）
+
+Stage Summary:
+- Task 40 起顺延的最大遗留「UsageDaily 模型维度」完整落地：模型健康 sparkline 与今日 Top 模型排行现在读持久聚合表（日 × 提供商 × 密钥 × 模型四维度），彻底脱离 5000 条滚动窗口截断；版本 4.2.3
+- 迁移设计要点：硬校验计数相等才重切（防日志不完整天丢数）；存量 21 行全量安全拆分且总量严格等价；v4.2.3 前历史行 model="" 优雅降级（不参与模型维度统计，不影响其它维度聚合）
+- 附带修复：admin/api/status providers 按行计数 → 去重提供商数（模型维度拆分后旧口径必然膨胀）；今日 Top 模型排行查询数 -4（复用 todayRows）
+- 测试方法论沉淀：动态对账断言（API 输出 vs DB 同口径实时计算）优于硬编码期望值——首轮流出的 4 个断言设计错误全部由动态对账范式消除
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（qa-msplit/qa-ms-model 自建自删 ×3 轮；UsageDaily 统计表变更全部经过等价核对：schema push 前后 + 拆分迁移前后 + e2e 总账）
+2. 统计表新增 qa-ms-model:15 今日测试格（e2e 副产物，与既有 qa-* 历史格同类；7 天窗口自然老化，不影响业务配置）
+3. model_health / today_top_models 现有 30 秒批量 flush 延迟（与今日统计/Top 密钥一致的可接受口径，脚注已注明）；如需实时可调 USAGE_FLUSH_INTERVAL_MS
+4. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；/checkin 与 /admin/api/checkin 机器接口未接签到白名单；balTrend 刷新按钮不重拉；模型健康卡窗口长度固定 7 天（数据已持久，可扩展 14/30 天选择器）
+5. 模型维度「空串=历史未细分」的天永远无法细分（日志已滚出）；如用户需要完整历史可导出备份后 overwrite 重导入（重建路径已支持模型维度）
+6. mock-upstream（3040）保持运行供后续巡检复用

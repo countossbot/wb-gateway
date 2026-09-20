@@ -206,8 +206,9 @@ export interface ModelHealthModel {
 
 /** v4.2.1（v4.2.3 改源）：模型健康 sparkline 数据（GET /api/console/overview 附带；UsageDaily 模型维度） */
 export interface ModelHealthData {
-  days: string[]; // 7 天日期轴（最旧 → 今日）
-  models: ModelHealthModel[]; // 按请求数 Top 6
+  days: string[]; // 日期轴（最旧 → 今日；长度 = 窗口天数 7/14/30）
+  models: ModelHealthModel[]; // 按窗口内请求数 Top 6
+  windowDays?: number; // v4.2.3b：窗口长度（7/14/30；缺省 7 向后兼容）
 }
 
 // ---- 账号管理 ----
