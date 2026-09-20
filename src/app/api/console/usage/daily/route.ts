@@ -1,19 +1,21 @@
 // GET /api/console/usage/daily?days=7[&day=YYYY-MM-DD] —— UsageDaily 维度查询（透视表）。
 // v3.1.1：清偿 Task 13/14 遗留 ——「UsageDaily 维度查询接口（按提供商 × 密钥透视表）」。
-// 数据源 UsageDaily（day × providerId × apiKeyName 聚合表），不受 RequestLog 5000 条滚动窗口截断；
-// 已含今日（实时链路写入），历史天由回填任务保证。
+// 数据源 UsageDaily（day × providerId × apiKeyName × model 聚合表，v4.2.3 增模型维度），
+// 不受 RequestLog 5000 条滚动窗口截断；已含今日（实时链路写入，30s 批量 flush），
+// 历史天由回填任务保证。
 //
 // 响应形态：
 // {
 //   days: 7,                          // 实际覆盖天数
 //   range: { from, to },              // 日期范围（含端点）
-//   rows: [                           // 原始明细行（day × provider × key）
-//     { day, providerId, apiKeyName, requests, okRequests, successRate,
+//   rows: [                           // 原始明细行（day × provider × key × model）
+//     { day, providerId, apiKeyName, model, requests, okRequests, successRate,
 //       inputTokens, outputTokens, cachedTokens }
 //   ],
-//   pivot: {                          // 透视汇总
+//   pivot: {                          // 透视汇总（各维度对 model 维度行求和）
 //     byProvider: [ { providerId, requests, okRequests, tokens... } ],  // 降序
 //     byKey:      [ { apiKeyName,  requests, okRequests, tokens... } ],  // 降序
+//     byModel:    [ { model,       requests, okRequests, tokens... } ],  // 降序（v4.2.3；model="" 排除）
 //     byDay:      [ { day, requests, okRequests, tokens... } ],          // 升序
 //     totals:     { requests, okRequests, inputTokens, outputTokens, cachedTokens }
 //   }
@@ -72,6 +74,7 @@ export async function GET(request: NextRequest) {
   const totals = { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   const byProvider = new Map<string, AggBucket>();
   const byKey = new Map<string, AggBucket>();
+  const byModel = new Map<string, AggBucket>();
   const byDay = new Map<string, AggBucket>();
 
   const bump = (m: Map<string, AggBucket>, k: string, r: (typeof rows)[number]) => {
@@ -92,6 +95,7 @@ export async function GET(request: NextRequest) {
     totals.cachedTokens += r.cachedTokens;
     bump(byProvider, r.providerId || "(unknown)", r);
     bump(byKey, r.apiKeyName || "(unknown)", r);
+    if (r.model) bump(byModel, r.model, r); // v4.2.3：模型维度透视（空串=历史未细分，不单列）
     bump(byDay, r.day, r);
   }
 
@@ -106,6 +110,9 @@ export async function GET(request: NextRequest) {
   const byKeyRows = Array.from(byKey.entries())
     .map(([name, v]) => ({ apiKeyName: name, ...withRate(v) }))
     .sort((a, b) => b.requests - a.requests);
+  const byModelRows = Array.from(byModel.entries())
+    .map(([name, v]) => ({ model: name, ...withRate(v) }))
+    .sort((a, b) => b.requests - a.requests);
   const byDayRows = Array.from(byDay.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([name, v]) => ({ day: name, ...withRate(v) }));
@@ -117,6 +124,7 @@ export async function GET(request: NextRequest) {
       day: r.day,
       providerId: r.providerId,
       apiKeyName: r.apiKeyName,
+      model: r.model,
       requests: r.requests,
       okRequests: r.okRequests,
       successRate: r.requests > 0 ? Math.round((r.okRequests / r.requests) * 100) : null,
@@ -127,6 +135,7 @@ export async function GET(request: NextRequest) {
     pivot: {
       byProvider: byProviderRows,
       byKey: byKeyRows,
+      byModel: byModelRows,
       byDay: byDayRows,
       totals: withRate({ ...totals }),
     },

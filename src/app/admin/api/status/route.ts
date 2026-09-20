@@ -51,6 +51,7 @@ export async function GET(request: NextRequest) {
   const bal = await fleet.getBalance();
 
   // v3.0.7：近 7 天按日用量汇总（UsageDaily 全维度聚合；含今日；Agent-Native 可直接消费）
+  // v4.2.3：providers 改为「去重提供商数」（旧实现按聚合行计数，模型/密钥维度拆分后会膨胀）
   let usageDaily: unknown = null;
   try {
     const dayKeys = Array.from({ length: 7 }, (_, i) => {
@@ -59,18 +60,21 @@ export async function GET(request: NextRequest) {
       return localDayKey(d);
     });
     const rows = await db.usageDaily.findMany({ where: { day: { in: dayKeys } } });
-    const byDay = new Map<string, { requests: number; ok_requests: number; input_tokens: number; output_tokens: number; cached_tokens: number; providers: number }>();
+    const byDay = new Map<string, { requests: number; ok_requests: number; input_tokens: number; output_tokens: number; cached_tokens: number; providers: number; _providerSet: Set<string> }>();
     for (const r of rows) {
-      const b = byDay.get(r.day) || { requests: 0, ok_requests: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, providers: 0 };
+      const b = byDay.get(r.day) || { requests: 0, ok_requests: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, providers: 0, _providerSet: new Set<string>() };
       b.requests += r.requests;
       b.ok_requests += r.okRequests;
       b.input_tokens += r.inputTokens;
       b.output_tokens += r.outputTokens;
       b.cached_tokens += r.cachedTokens;
-      if (r.providerId !== "") b.providers += 1;
+      if (r.providerId !== "") b._providerSet.add(r.providerId);
       byDay.set(r.day, b);
     }
-    usageDaily = dayKeys.map((day) => ({ day, ...(byDay.get(day) || { requests: 0, ok_requests: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, providers: 0 }) }));
+    usageDaily = dayKeys.map((day) => {
+      const b = byDay.get(day);
+      return { day, ...(b ? { requests: b.requests, ok_requests: b.ok_requests, input_tokens: b.input_tokens, output_tokens: b.output_tokens, cached_tokens: b.cached_tokens, providers: b._providerSet.size } : { requests: 0, ok_requests: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, providers: 0 }) };
+    });
   } catch {
     /* noop：聚合失败不影响主状态 */
   }

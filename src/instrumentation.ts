@@ -22,7 +22,7 @@ export async function register() {
   const { startScheduler } = await import("@/lib/gateway/jobs/scheduler");
   const { refreshRuntimeSettings } = await import("@/lib/gateway/config/runtimeSettings");
   const { ensureSystemSecrets } = await import("@/lib/gateway/config/configService");
-  const { backfillUsageDaily } = await import("@/lib/gateway/config/requestLog");
+  const { backfillUsageDaily, splitUsageDailyModelDimension } = await import("@/lib/gateway/config/requestLog");
   try {
     await refreshRuntimeSettings();
     await ensureSystemSecrets(); // master_key / cron_secret 缺失时生成强随机值（拒绝硬编码兜底）
@@ -36,6 +36,19 @@ export async function register() {
       }
     } catch (e) {
       console.error("[UsageDaily] Backfill failed:", e);
+    }
+    // v4.2.3：模型维度拆分迁移（幂等；把 v4.2.3 前 model="" 的历史聚合行
+    // 在 RequestLog 完整覆盖该天时安全重切为模型细分行）
+    try {
+      const s = await splitUsageDailyModelDimension();
+      if (s.daysChecked > 0) {
+        console.log(
+          `[UsageDaily] Model-dimension split: ${s.daysSplit}/${s.daysChecked} day(s) re-split (${s.rowsBefore}→${s.rowsAfter} rows)` +
+            (s.skipped.length > 0 ? `, skipped: ${s.skipped.map((d) => `${d.day}(${d.usageRequests}≠${d.logCount})`).join(",")}` : "")
+        );
+      }
+    } catch (e) {
+      console.error("[UsageDaily] Model-dimension split failed:", e);
     }
   } catch (e) {
     console.error("[Instrumentation] startup failed:", e);

@@ -1,6 +1,7 @@
 // 请求日志 —— 每次网关交换落库（模型/命中提供商与账号/耗时/状态码/Token 用量）。
 // 异步写、失败不阻断请求路径；控制台「运行日志」模块与 /admin/api 状态查询消费。
 // v3.0.6：同步写 UsageDaily 按日聚合（日 × 提供商 × 密钥维度），统计不再受滚动窗口截断。
+// v4.2.3：聚合维度增加 model（模型健康/Top 模型排行的跨滚动窗口根本解）。
 import { db } from "@/lib/db";
 import type { Prisma } from "@prisma/client";
 
@@ -60,13 +61,15 @@ export async function recordRequestLog(entry: RequestLogEntry): Promise<void> {
 
 // ---- v3.9.3：UsageDaily 内存聚合 + 定时批量 flush（替代逐请求 upsert） ----
 // 旧实现每个请求一次 db.usageDaily.upsert（与 RequestLog.create 构成两次独立写入/两次 WAL 追加）。
-// 新实现参考 cacheStats 的内存累积模式：按 day × providerId × apiKeyName 三维度在内存累加，
+// 新实现参考 cacheStats 的内存累积模式：按 day × providerId × apiKeyName × model 四维度在内存累加，
 // 每 30 秒批量 flush 一次（$transaction 包裹保证一致性；失败整批退回缓冲不丢数）。
 // flushTimer + scheduleFlush 幂等调度；进程退出路径由 instrumentation 的 SIGTERM 钩子兜底 flush。
+// v4.2.3：第四维度 model（对外模型名；空串=未知，与其它维度键空串占位思路一致）。
 interface UsageDailyCell {
   day: string;
   providerId: string;
   apiKeyName: string;
+  model: string;
   requests: number;
   okRequests: number;
   inputTokens: number;
@@ -80,8 +83,8 @@ let usageFlushing = false;
 const USAGE_FLUSH_INTERVAL_MS = 30 * 1000;
 const USAGE_FLUSH_TX_BATCH = 200; // 单事务 upsert 上限（分片提交，避免长事务占写锁）
 
-function usageCellKey(day: string, providerId: string, apiKeyName: string): string {
-  return `${day}\u0000${providerId}\u0000${apiKeyName}`;
+function usageCellKey(day: string, providerId: string, apiKeyName: string, model: string): string {
+  return `${day}\u0000${providerId}\u0000${apiKeyName}\u0000${model}`;
 }
 
 /** 内存累加一次请求（同步、零 IO；替代原逐请求 upsert） */
@@ -89,7 +92,8 @@ function bumpUsageDailyBuffered(entry: RequestLogEntry): void {
   const day = localDayKey();
   const providerKey = entry.providerId ?? "";
   const keyKey = entry.apiKeyName ?? "";
-  const key = usageCellKey(day, providerKey, keyKey);
+  const modelKey = entry.model ?? "";
+  const key = usageCellKey(day, providerKey, keyKey, modelKey);
   const ok = (entry.status ?? 0) >= 200 && (entry.status ?? 0) < 400;
   const cell = usageDailyBuffer.get(key);
   if (cell) {
@@ -103,6 +107,7 @@ function bumpUsageDailyBuffered(entry: RequestLogEntry): void {
       day,
       providerId: providerKey,
       apiKeyName: keyKey,
+      model: modelKey,
       requests: 1,
       okRequests: ok ? 1 : 0,
       inputTokens: entry.inputTokens ?? 0,
@@ -150,16 +155,18 @@ export async function flushUsageDaily(): Promise<number> {
           slice.map((cell) =>
             db.usageDaily.upsert({
               where: {
-                day_providerId_apiKeyName: {
+                day_providerId_apiKeyName_model: {
                   day: cell.day,
                   providerId: cell.providerId,
                   apiKeyName: cell.apiKeyName,
+                  model: cell.model,
                 },
               },
               create: {
                 day: cell.day,
                 providerId: cell.providerId,
                 apiKeyName: cell.apiKeyName,
+                model: cell.model,
                 requests: cell.requests,
                 okRequests: cell.okRequests,
                 inputTokens: cell.inputTokens,
@@ -182,7 +189,7 @@ export async function flushUsageDaily(): Promise<number> {
       // 失败退回：把这批聚合并回缓冲（同键合并），30s 后自动重试
       console.error("[UsageDaily] batch flush failed, rebuffering:", e);
       for (const cell of batch) {
-        const key = usageCellKey(cell.day, cell.providerId, cell.apiKeyName);
+        const key = usageCellKey(cell.day, cell.providerId, cell.apiKeyName, cell.model);
         const cur = usageDailyBuffer.get(key);
         if (cur) {
           cur.requests += cell.requests;
@@ -232,8 +239,9 @@ export async function purgeRequestLogsByIdThreshold(retain = 5000, batch = 500):
   }
 }
 
-/** v3.0.7：UsageDaily 历史回填——从 RequestLog 现存滚动窗口（≤5000 条）按（日 × 提供商 × 密钥）聚合补齐
- *  UsageDaily 无任何行的历史天（幂等：已存在行的天整体跳过，防止部分行双计；今日由实时链路负责不回填）。
+/** v3.0.7（v4.2.3 增模型维度）：UsageDaily 历史回填——从 RequestLog 现存滚动窗口（≤5000 条）
+ *  按（日 × 提供商 × 密钥 × 模型）聚合补齐 UsageDaily 无任何行的历史天
+ *  （幂等：已存在行的天整体跳过，防止部分行双计；今日由实时链路负责不回填）。
  *  启动时自动执行一次，也可经 /admin/api/usage-backfill 手动触发。 */
 export async function backfillUsageDaily(): Promise<{ days: number; rows: number; skippedDays: string[] }> {
   const today = localDayKey();
@@ -243,22 +251,23 @@ export async function backfillUsageDaily(): Promise<{ days: number; rows: number
 
   // 2. 拉取滚动窗口内全部请求日志，按天 × 维度聚合
   const logs = await db.requestLog.findMany({
-    select: { createdAt: true, providerId: true, apiKeyName: true, status: true, inputTokens: true, outputTokens: true, cachedTokens: true },
+    select: { createdAt: true, providerId: true, apiKeyName: true, model: true, status: true, inputTokens: true, outputTokens: true, cachedTokens: true },
   });
-  const agg = new Map<string, Map<string, { requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number; providerId: string; apiKeyName: string }>>();
+  const agg = new Map<string, Map<string, { requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number; providerId: string; apiKeyName: string; model: string }>>();
   for (const l of logs) {
     const day = localDayKey(l.createdAt);
     if (day >= today) continue; // 今日行由实时链路负责，不回填
     if (existingDays.has(day)) continue; // 该天已有聚合行（部分或全部）——整体跳过防双计
     const providerId = l.providerId ?? "";
     const apiKeyName = l.apiKeyName ?? "";
-    const dimKey = `${providerId}\u0000${apiKeyName}`;
+    const model = l.model ?? "";
+    const dimKey = `${providerId}\u0000${apiKeyName}\u0000${model}`;
     let dayMap = agg.get(day);
     if (!dayMap) {
       dayMap = new Map();
       agg.set(day, dayMap);
     }
-    const b = dayMap.get(dimKey) || { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, providerId, apiKeyName };
+    const b = dayMap.get(dimKey) || { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, providerId, apiKeyName, model };
     b.requests += 1;
     if ((l.status ?? 0) >= 200 && (l.status ?? 0) < 400) b.okRequests += 1;
     b.inputTokens += l.inputTokens ?? 0;
@@ -267,10 +276,10 @@ export async function backfillUsageDaily(): Promise<{ days: number; rows: number
     dayMap.set(dimKey, b);
   }
 
-  const toCreate: Array<{ day: string; providerId: string; apiKeyName: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number }> = [];
+  const toCreate: Array<{ day: string; providerId: string; apiKeyName: string; model: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number }> = [];
   for (const [day, dayMap] of agg) {
     for (const b of dayMap.values()) {
-      toCreate.push({ day, providerId: b.providerId, apiKeyName: b.apiKeyName, requests: b.requests, okRequests: b.okRequests, inputTokens: b.inputTokens, outputTokens: b.outputTokens, cachedTokens: b.cachedTokens });
+      toCreate.push({ day, providerId: b.providerId, apiKeyName: b.apiKeyName, model: b.model, requests: b.requests, okRequests: b.okRequests, inputTokens: b.inputTokens, outputTokens: b.outputTokens, cachedTokens: b.cachedTokens });
     }
   }
   if (toCreate.length > 0) {
@@ -282,6 +291,82 @@ export async function backfillUsageDaily(): Promise<{ days: number; rows: number
   // 跳过原因透明化：已有行的历史天清单（调用方可展示，供人工判断是否需要重置后重建）
   const skippedDays = [...existingDays].filter((d) => d < today).sort();
   return { days: days.size, rows: toCreate.length, skippedDays };
+}
+
+/**
+ * v4.2.3：模型维度拆分迁移 —— 把 v4.2.3 之前写入的 model="" 历史聚合行，
+ * 在「RequestLog 完整覆盖该天」时安全重切为按模型细分行（delete + rebuild 原子事务）。
+ *
+ * 安全前提（防数据丢失的硬校验）：该天 UsageDaily 的 requests 总和 == 该天 RequestLog 行数。
+ * 只有计数精确相等才说明滚动窗口日志完整覆盖该天全部请求，重切结果与原聚合完全等价；
+ * 日志已被滚出窗口/部分缺失（计数不等）的天保留 model="" 原样不重切（零风险路径），
+ * 下次启动仍会重试（若届时日志恢复完整）。
+ *
+ * 幂等性：无 model="" 行时零操作直接返回；由 instrumentation 在启动时（backfill 之后）调用。
+ */
+export async function splitUsageDailyModelDimension(): Promise<{
+  daysChecked: number;
+  daysSplit: number;
+  rowsBefore: number;
+  rowsAfter: number;
+  skipped: Array<{ day: string; usageRequests: number; logCount: number }>;
+}> {
+  // 1. 找出含 model="" 行的天
+  const legacyRows = await db.usageDaily.findMany({ where: { model: "" }, select: { day: true, requests: true } });
+  if (legacyRows.length === 0) {
+    return { daysChecked: 0, daysSplit: 0, rowsBefore: 0, rowsAfter: await db.usageDaily.count(), skipped: [] };
+  }
+  const legacyDays = new Map<string, number>(); // day -> requests 总和
+  for (const r of legacyRows) legacyDays.set(r.day, (legacyDays.get(r.day) || 0) + r.requests);
+
+  const rowsBefore = await db.usageDaily.count();
+  const skipped: Array<{ day: string; usageRequests: number; logCount: number }> = [];
+  const splitDays: string[] = [];
+
+  // 2. 逐天安全校验 + 重切
+  for (const [day, usageRequests] of legacyDays) {
+    const dayStart = new Date(`${day}T00:00:00`);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const logs = await db.requestLog.findMany({
+      where: { createdAt: { gte: dayStart, lt: dayEnd } },
+      select: { providerId: true, apiKeyName: true, model: true, status: true, inputTokens: true, outputTokens: true, cachedTokens: true },
+    });
+    // 硬校验：聚合行请求数 == 日志行数（否则该天日志不完整，保留原行不冒险重切）
+    if (logs.length !== usageRequests) {
+      skipped.push({ day, usageRequests, logCount: logs.length });
+      continue;
+    }
+    // 从日志重聚合（四维度）
+    const cells = new Map<string, { day: string; providerId: string; apiKeyName: string; model: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number }>();
+    for (const l of logs) {
+      const providerId = l.providerId ?? "";
+      const apiKeyName = l.apiKeyName ?? "";
+      const model = l.model ?? "";
+      const k = `${providerId}\u0000${apiKeyName}\u0000${model}`;
+      const ok = (l.status ?? 0) >= 200 && (l.status ?? 0) < 400;
+      const c = cells.get(k) || { day, providerId, apiKeyName, model, requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+      c.requests += 1;
+      if (ok) c.okRequests += 1;
+      c.inputTokens += l.inputTokens ?? 0;
+      c.outputTokens += l.outputTokens ?? 0;
+      c.cachedTokens += l.cachedTokens ?? 0;
+      cells.set(k, c);
+    }
+    // 重切原子事务：先删该天全部行（含 model=""），再建四维度细分行
+    // （计数已硬校验相等，重切结果请求数与原聚合严格等价）
+    await db.$transaction([
+      db.usageDaily.deleteMany({ where: { day } }),
+      ...[...cells.values()].map((c) =>
+        db.usageDaily.create({
+          data: { day: c.day, providerId: c.providerId, apiKeyName: c.apiKeyName, model: c.model, requests: c.requests, okRequests: c.okRequests, inputTokens: c.inputTokens, outputTokens: c.outputTokens, cachedTokens: c.cachedTokens },
+        })
+      ),
+    ]);
+    splitDays.push(day);
+  }
+  const rowsAfter = await db.usageDaily.count();
+  return { daysChecked: legacyDays.size, daysSplit: splitDays.length, rowsBefore, rowsAfter, skipped };
 }
 
 export interface RequestLogQuery {

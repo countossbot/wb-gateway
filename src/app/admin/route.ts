@@ -70,7 +70,7 @@ export async function GET(request: NextRequest) {
           {
             path: "/api/console/usage/daily",
             methods: ["GET"],
-            description: "UsageDaily dimension query / pivot table (console session or Master Key). Query params: days=N (1-90, default 7) or day=YYYY-MM-DD. Returns rows (day x provider x key) plus pivot rollups byProvider / byKey / byDay / totals with successRate. Immune to rolling-log truncation.",
+            description: "UsageDaily dimension query / pivot table (console session or Master Key). Query params: days=N (1-90, default 7) or day=YYYY-MM-DD. Returns rows (day x provider x key x model, v4.2.3 model dimension; empty model = pre-v4.2.3 legacy rows) plus pivot rollups byProvider / byKey / byModel / byDay / totals with successRate. Immune to rolling-log truncation.",
             requires_auth: true,
           },
           {

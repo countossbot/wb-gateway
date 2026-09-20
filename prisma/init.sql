@@ -154,6 +154,7 @@ CREATE TABLE "UsageDaily" (
     "day" TEXT NOT NULL,
     "providerId" TEXT NOT NULL DEFAULT '',
     "apiKeyName" TEXT NOT NULL DEFAULT '',
+    "model" TEXT NOT NULL DEFAULT '',
     "requests" INTEGER NOT NULL DEFAULT 0,
     "okRequests" INTEGER NOT NULL DEFAULT 0,
     "inputTokens" INTEGER NOT NULL DEFAULT 0,
@@ -240,7 +241,7 @@ CREATE INDEX "JobRun_startedAt_idx" ON "JobRun"("startedAt");
 CREATE INDEX "UsageDaily_day_idx" ON "UsageDaily"("day");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "UsageDaily_day_providerId_apiKeyName_key" ON "UsageDaily"("day", "providerId", "apiKeyName");
+CREATE UNIQUE INDEX "UsageDaily_day_providerId_apiKeyName_model_key" ON "UsageDaily"("day", "providerId", "apiKeyName", "model");
 
 -- CreateIndex
 CREATE INDEX "BalanceSnapshot_day_idx" ON "BalanceSnapshot"("day");
