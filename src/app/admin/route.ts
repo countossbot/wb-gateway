@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
           type: "Bearer Token, x-api-key, or Console Session Cookie",
           required_key: "MASTER_KEY",
           header: "Authorization: Bearer <MASTER_KEY>",
-          note: "Web console sessions (uag_session cookie) are also accepted on /admin/api/*",
+          note: "Web console sessions (uag_session cookie) are also accepted on /admin/api/*. Virtual keys (client role) may carry optional daily quotas (dailyRequestLimit / dailyTokenLimit in virtual_keys entries since v4.3.0): when a key exhausts its local-day quota, gateway entrypoints /v1/messages and /v1/chat/completions return 429 with rate_limit_error and standard X-RateLimit-Limit / X-RateLimit-Remaining / X-RateLimit-Reset / Retry-After headers (quota resets at local midnight; rejected requests are not counted).",
         },
         endpoints: [
           {

@@ -12,6 +12,7 @@ import {
   tooLargeResponse,
 } from "@/lib/gateway/http/bodyGuard";
 import { authorizeModelForPrincipal } from "@/lib/gateway/auth/auth";
+import { enforceVirtualKeyQuota } from "@/lib/gateway/auth/quota";
 import { corsPreflightResponse } from "@/lib/gateway/http/headers";
 
 export const dynamic = "force-dynamic";
@@ -47,6 +48,10 @@ export async function POST(request: NextRequest) {
   // ---- 模型白名单补检（虚拟密钥主体；master/cron 不受限，与原语义一致） ----
   const modelCheck = authorizeModelForPrincipal(request, auth.auth, requestModel);
   if (!modelCheck.ok) return modelCheck.response as Response;
+
+  // ---- v4.3.0：密钥级日配额预检（虚拟密钥主体；超限 429，零上游成本零日志写入） ----
+  const quotaCheck = await enforceVirtualKeyQuota(request, auth.auth);
+  if (!quotaCheck.ok) return quotaCheck.response;
 
   try {
     const fleet = getProviderFleet(auth.config);
