@@ -1998,3 +1998,40 @@ Stage Summary:
 4. UsageDaily model="" 历史行（v4.2.3 前）天然无法计价，归未计价口径（与模型维度统计同语义，一致）
 5. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康 60/90 天窗口（当前仅 4 天历史数据，暂无意义）；UsageDaily 模型维度历史天回填工具；成本估算可扩展「月度账单视图」（按密钥分组 + CSV 导出，等真实需求）
 6. supervisor 与 mock-upstream（3040）保持运行；本机 4GB 内存 OOM 风险常在（supervisor 是生命线）
+Task ID: 48
+Agent: 主会话（Z.ai Code，持续迭代轮，trace: 1a0bc1e5e26e0a89-web-cron-review-202609201145）
+Task: 巡检 QA（全绿）→ 新功能开发「月度账单与预算」闭环（Task 47 顺延项「月度账单视图」清偿 + 新护栏「虚拟密钥月度成本预算」）；版本 4.4.0 → 4.5.0
+
+Work Log:
+- 【巡检】dev server 存活（v4.4.0，基线 2 提供商/6 模型一致）；mock-upstream 3040 存活；git 工作树干净（Task 47 已入库）；agent-browser 8 页签遍历零 console/页面错误；dev.log 干净 → 项目稳定，进入功能开发
+- 【决策】自主选定 v4.5.0 主题「月度账单与预算」：①Task 47 明确顺延项「月度账单视图（按密钥分组 + CSV 导出）」——成本估算的自然延伸；②新护栏「月预算」与 v4.3.0 日配额同范式互补（日配额管次数/token，月预算管成本 $）——账单看得见 + 预算管得住的完整闭环
+- 【新功能 1：虚拟密钥月度成本预算（v4.5.0 核心）】
+  - Schema：VirtualKey 增 monthlyCostLimit Float @default(0)（0=不限；增量迁移零数据风险；db push + dev server 重启加载新 Prisma Client——Task 44 教训遵守）
+  - 账本口径：新 peekUsageDailyTodayByModel（requestLog.ts，与既有 peek 同范式但保留 model 维度——单价按模型配置，聚合 token 直接乘单价会算错）；sumMonthCost = 当月 UsageDaily 行按模型分组 × 单价表 + 今日缓冲按模型分组 × 单价表，estimateRowCost 单点复用（与总览成本卡/透视完全同源）；未配置单价的模型不计成本（保守口径，单价表空 → 预算永不触发）
+  - 执行层：enforceVirtualKeyQuota 扩展（日配额 → 月预算共用一次入口预检；未设预算零额外查询）；已累计 ≥ 预算即拒 429 + rate_limit_error + X-Budget-Limit/Remaining/Reset（4 位小数）+ X-RateLimit-Limit="budget" + Retry-After（下月 1 日 0 点重置秒数）；被拒请求零上游成本零记账（无越拒越超死锁）
+  - 配置链路：VirtualKeyEntry 增字段 + configService 下发（>0 才携带）+ saveConfig upsert（清洗 0~1 亿浮点）+ keys API（GET 回显 monthlyCostLimit + monthCost 本月已消耗；POST/PUT sanitizeBudget；PUT 缺省保留现值）+ 备份导入 BackupKey 往返（旧备份缺省 0 兼容）+ /admin 规范页 auth.note 增月预算语义文档
+  - UI：密钥编辑对话框「月度成本预算（可选，$）」输入（Wallet lime 图标 + 双提示文案：估算口径/未计价不生效 + 429/重置语义）；列表新「本月预算」列（BudgetCell：lime 三档进度条 <80/≥80 amber/≥100 红 +「已超预算」红字 +「估算口径 · 本地月重置」脚注 + progressbar aria 完整；未设预算 — 淡态）；Gauge「限额」徽标 tooltip 扩展月预算语义；页脚口径说明更新
+- 【新功能 2：月度账单卡（Task 47 顺延项清偿）】
+  - API：GET /api/console/usage/billing?month=YYYY-MM —— UsageDaily 当月行按密钥分组（含 byModel 模型明细，模型维度逐行计价后归桶）；totals + prevTotals 上月合计（环比）；months 有数据月份清单（≤12 + 当前月恒在）；unpricedModels 当月未计价模型提示；月份校验（YYYY-MM 正则 + 不晚于当前月 + ≥2020-01，非法回落当前月）；VirtualKey join 给行附带 monthlyCostLimit（打通预算展示）；无数据月空 rows
+  - UI：MonthlyBillingCard 折叠卡（ReceiptText lime 图标与成本卡「钱」维度同色系；默认收起不抢首屏，展开懒加载 30s/60s 按月缓存）——摘要条（月成本大数字 + 环比上月 ↑↓ 徽标（上期 0 不出环比）+ 请求/成功率/tokens/缓存 + 计价覆盖率三档徽标）+ 月份 Select + CSV 按钮 + amber 空单价提示框（未计价模型 chips 一键识别）+ 密钥分组表（行可展开 byModel 缩进明细行 mono 字体；密钥名旁月预算 lime 进度条（≥100% 红档「超预算」）；成本列 lime + 未计价 +N amber 尾注；占比条相对月总成本）+ 完整口径脚注；CSV 导出（按密钥汇总 + 密钥×模型明细 + 合计/上期合计，BOM + RFC 4180 同口径）
+- 【e2e】tests/monthly-budget-e2e.ts 33/33 通过：A 月预算执行（2×200 → 429 头组全对（X-Budget-Limit=0.0001/Remaining=0.0000/Reset=Retry-After ≤31 天/X-RateLimit-Limit="budget"）+ 消息含密钥名与估算口径说明 + 持续拒绝）；B 未计价模型 3 连 200（成本恒 0 预算不触发）；C 热更新双向（PUT 提高恢复 200 / 降回恢复 429）；D 账本口径（flush 后 requests=3、tokens=165、成本 0.000165 = 3×55tk×1$/1M；keys API 回显 monthlyCostLimit + monthCost 同口径）；E billing 数学（rows 成功/byModel/预算 join/priced-unpriced 守恒/unpricedModels/totals/月份回落/401）；F 清理（单价表精确恢复原状 0 行 + healthz 等价）
+- 【e2e 数学锚点】mock 每请求 input 42 + output 13（cached 20 单价 0）× 单价 1$/1M = 0.000055/次；预算 0.0001 → 第 3 次起拒绝（0.00011 ≥ 0.0001）；UsageDaily.model 记录的是路由模型名（qa-budget-model-*），单价须配在路由模型名上（非上游 mock-chat）——与 v4.2.3 模型维度语义一致
+- 【UI 验证】agent-browser 全流程：月度账单卡展开（VLM 六项：标题图标/摘要条 835 次 95% 37.9M tk 覆盖 0%/月份选择器+CSV/amber 提示+chips/表格 — 淡态/无布局缺陷）→ 密钥行展开 byModel 明细（deepseek-v4.1-flash 402 缩进行）→ CSV 点击零错误 → 密钥页预算列（$0/$0.500 progressbar + 限额徽标）→ 编辑对话框回填 0.5（VLM 五项全过）→ 修改 1.25 保存 → API 确认持久化 → 删除清理
+- 【agent-browser 怪癖沉淀（第四例）】type 命令会追加而非替换输入值（"0.5"+"1.25"="0.51.25"）——改值必须用 eval + React 原生 setter（Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set + dispatchEvent input）；eval 比 execute 更可靠（execute 偶发无输出）
+- 【验证矩阵】lint 零错误；tsc src/ 零错误；8 页签回归零 console/页面错误；dev.log 无运行时错误；healthz v4.5.0 基线 2/6 前后等价；qa-budget-*/qa-ui-budget-* 测试资产全清理（单价表精确恢复 0 行）
+- 【git】独立 commit（13 文件 +1151/-17：schema+push、quota 扩展、billing API、keys API/UI、备份兼容、e2e、VERSION 4.5.0）
+
+Stage Summary:
+- 「月度账单与预算」闭环从 schema 到 6 处视图全链路落地并 33/33 e2e 验证；版本 4.5.0
+- 架构要点：月成本账本 = UsageDaily 当月行按模型 × 单价 + peek 缓冲按模型（与日配额同源范式，peek 新增 model 维度变体）；预算执行与账单/密钥页展示完全同口径（estimateRowCost 单点）；billing API 的 VirtualKey join 打通「账单行内看预算进度」
+- 成本护栏体系完整：日配额（次数/token，v4.3.0）+ 月预算（成本 $，v4.5.0）；均 429 + 头组 + 自然重置 + 被拒不计数
+- Task 47 顺延项「月度账单视图」正式清偿；顺延池更新：剩 getBalance 池形态（优先级低）/模型健康 60-90 天窗口（数据不足暂无意义）/UsageDaily 历史天回填工具
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（qa-budget-*/qa-ui-budget-* 全部自建自删；单价表先快照后精确恢复 0 行；12 次调用全经 mock-upstream 零真实计费；qa-budget-* 的 UsageDaily/RequestLog 统计行为诚实记账，7 天窗口自然老化）
+2. 月预算口径依赖管理员单价表真实性：单价表为空或模型未配置单价时预算不生效（文案与 /admin 文档均已注明）；单价修改会追溯影响当月已累计成本（与所有成本视图同语义，一致）
+3. 控制台展示的 monthCost 读取 DB 已落库行（含 30s flush 盲区），网关执行侧含 peek 缓冲更精确——约 30s 内自然同步，与 todayStats 同语义；dev 跨路由模块实例盲区与日配额同（生产单实例精确）
+4. 月预算按密钥名累积：同名重建密钥继承当月成本（与日配额/统计页同口径，一致语义）
+5. billing months 清单查询全表 day 字段（UsageDaily 规模 = 天数×密钥×模型组合，当前量级无压力；如未来数据量大可改 groupBy）
+6. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康 60-90 天窗口；UsageDaily 模型维度历史天回填工具；月度账单可扩展「月度预算告警通知」（预算达 80% 时控制台横幅/审计事件，等真实需求）
+7. supervisor 与 mock-upstream（3040）保持运行；本机 4GB 内存 OOM 风险常在（supervisor 是生命线）
