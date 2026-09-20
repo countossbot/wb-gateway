@@ -3,6 +3,7 @@
 // 防两处口径漂移。数据源均为 UsageDaily 持久聚合表（跨滚动窗口、重启不丢）。
 import { db } from "@/lib/db";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
+import { loadPricingMap, estimateRowCost, type CostAgg } from "./pricing";
 
 /** 模型健康行（与 types.ts ModelHealthModel 同形；此处局部定义避免 lib 层反向依赖 console 类型层） */
 export interface ModelHealthModelRow {
@@ -28,6 +29,10 @@ export interface TopProviderRowResult {
   outputTokens: number;
   cachedTokens: number;
   share: number;
+  /** v4.4.0：窗口内估算成本（$；需按模型维度逐行计价后归入桶） */
+  cost: number;
+  /** v4.4.0：桶内已计价请求数（未计价 = requests - pricedRequests） */
+  pricedRequests: number;
 }
 
 // 窗口天数白名单（与前端 7/14/30 按钮组一致）
@@ -96,25 +101,33 @@ export async function computeTopProviders(days: number): Promise<TopProviderRowR
   const dayKeys = windowDayKeys(days);
   const rows = await db.usageDaily.findMany({
     where: { day: { in: dayKeys } },
-    select: { providerId: true, requests: true, okRequests: true, inputTokens: true, outputTokens: true, cachedTokens: true },
+    select: { providerId: true, model: true, requests: true, okRequests: true, inputTokens: true, outputTokens: true, cachedTokens: true },
   });
   // 提供商名称 join（overview route 同款：id 兜底显示）
   const providers = await db.provider.findMany({ select: { id: true, name: true } });
+  // v4.4.0：单价表一次加载（模型维度逐行计价；未配置单价归未计价口径）
+  const pricing = await loadPricingMap();
   const agg = new Map<
     string,
-    { requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number }
+    { requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number; cost: CostAgg }
   >();
   let totalRequests = 0;
   for (const r of rows) {
     totalRequests += r.requests;
     const key = r.providerId || "";
     if (!key) continue; // 未命中提供商的行不参与排行，但计入分母
-    const b = agg.get(key) || { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+    const b = agg.get(key) || { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: { cost: 0, pricedRequests: 0, unpricedRequests: 0 } };
     b.requests += r.requests;
     b.okRequests += r.okRequests;
     b.inputTokens += r.inputTokens;
     b.outputTokens += r.outputTokens;
     b.cachedTokens += r.cachedTokens;
+    const c = estimateRowCost(pricing, r.model, r.inputTokens, r.outputTokens, r.cachedTokens);
+    if (c === null) b.cost.unpricedRequests += r.requests;
+    else {
+      b.cost.cost += c;
+      b.cost.pricedRequests += r.requests;
+    }
     agg.set(key, b);
   }
   return Array.from(agg.entries())
@@ -122,6 +135,8 @@ export async function computeTopProviders(days: number): Promise<TopProviderRowR
       providerId,
       providerName: providers.find((p) => p.id === providerId)?.name || providerId,
       ...b,
+      cost: Math.round(b.cost.cost * 1e6) / 1e6,
+      pricedRequests: b.cost.pricedRequests,
       share: totalRequests > 0 ? Math.round((b.requests / totalRequests) * 1000) / 10 : 0,
     }))
     .sort((a, b) => b.requests - a.requests)

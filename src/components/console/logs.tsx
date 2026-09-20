@@ -36,7 +36,7 @@ import {
   TokenBar,
 } from "@/components/console/ui";
 import { apiGet, authHeaders, errMessage } from "@/lib/console/api";
-import { absoluteTime, statusColor, tokenUsage } from "@/lib/console/format";
+import { absoluteTime, fmtNum, fmtUsd, statusColor, tokenUsage } from "@/lib/console/format";
 import { buildDeepLink, parseLogsFilters, syncLogsFiltersToUrl } from "@/lib/console/urlState";
 import type { LogsData } from "@/lib/console/types";
 
@@ -1037,6 +1037,15 @@ export function LogsModule({
                             </span>
                             {/* v3.6.0：输入/输出/缓存三段占比条（悬停看精确百分比） */}
                             <TokenBar input={l.inputTokens} output={l.outputTokens} cached={l.cachedTokens} />
+                            {/* v4.4.0：行级估算成本徽标（模型单价表口径；未配置单价 → 淡态不出数字） */}
+                            {l.cost != null && l.cost > 0 ? (
+                              <span
+                                className="text-[10px] tabular-nums text-lime-700"
+                                title={`估算成本 ${fmtUsd(l.cost)} = 输入 ${fmtNum(l.inputTokens ?? 0)} + 输出 ${fmtNum(l.outputTokens ?? 0)}${(l.cachedTokens ?? 0) > 0 ? ` + 缓存命中 ${fmtNum(l.cachedTokens ?? 0)}` : ""} tokens × 对应单价（$/1M）；基于设置页模型单价表估算，非计费`}
+                              >
+                                ≈ {fmtUsd(l.cost)}
+                              </span>
+                            ) : null}
                           </div>
                         </TableCell>
                         <TableCell className="hidden max-w-52 md:table-cell">

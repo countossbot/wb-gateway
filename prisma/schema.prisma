@@ -213,6 +213,21 @@ model UsageDaily {
   @@index([day])
 }
 
+// ---- 模型单价表（v4.4.0 用量成本估算）----
+// 计价口径：成本 = inputTokens × inputPerMTok + outputTokens × outputPerMTok
+//           + cachedTokens × cachedPerMTok（未配置 cached 单价时缓存命中按 0 计）。
+// 单位统一「$/百万 tokens」，由管理员按其上游实际结算价填写（网关仅做估算展示，
+// 不做真实计费/扣款）。model 唯一 —— 与路由对外模型名一一对应。
+model ModelPricing {
+  id              Int      @id @default(autoincrement())
+  model           String   @unique // 对外模型名（与路由 / UsageDaily.model 维度同口径）
+  inputPerMTok    Float    @default(0) // $ / 1M 输入 tokens
+  outputPerMTok   Float    @default(0) // $ / 1M 输出 tokens
+  cachedPerMTok   Float    @default(0) // $ / 1M 缓存命中 tokens（0=缓存命中不计价）
+  updatedAt       DateTime @updatedAt
+  updatedBy       String   @default("admin")
+}
+
 // ---- 余额按日快照（v3.6.0）----
 // 维度：日 × 提供商 × 账号（与 UsageDaily 同款复合唯一 + 空串占位思路）。
 // 采集：fleet.getBalance 实测余额时顺带 upsert 当日快照（零额外上游调用）；

@@ -91,6 +91,8 @@ export interface OverviewData {
   model_health?: ModelHealthData;
   /** v4.3.2：服务质量 SLO（近 24h 种子；切窗口走独立 insights API） */
   slo?: SloData;
+  /** v4.4.0：用量成本估算（今日 + 近 7 天窗口 + 逐日趋势 + Top 成本模型 + 覆盖率） */
+  cost?: CostData;
   last_checkin: {
     time: string;
     provider: string;
@@ -189,6 +191,10 @@ export interface TopProviderRow {
   cachedTokens: number;
   /** 占近 7 天总请求数份额（%，1 位小数） */
   share: number;
+  /** v4.4.0：窗口内估算成本（$；未计价 = requests - pricedRequests） */
+  cost: number;
+  /** v4.4.0：已计价请求数 */
+  pricedRequests: number;
 }
 
 /** v4.2.1（v4.2.3 改源）：模型健康单日点（UsageDaily 模型 × 日聚合，跨滚动窗口持久） */
@@ -221,6 +227,51 @@ export interface SloHistogramBucket {
 }
 
 /** v4.3.2：服务质量 SLO（GET /api/console/overview 附带 24h 种子；insights?...&slo_hours= 切窗口） */
+/** v4.4.0：成本聚合口径（与后端 CostAgg 同形；未计价请求单独回显，不估值） */
+export interface CostAggShape {
+  cost: number;
+  pricedRequests: number;
+  unpricedRequests: number;
+}
+
+/** v4.4.0：总览成本估算数据（GET /api/console/overview 附带；估算非计费） */
+export interface CostData {
+  today: { cost: number; pricedRequests: number; unpricedRequests: number };
+  window7d: { cost: number; pricedRequests: number; unpricedRequests: number };
+  window7dPrev: { cost: number };
+  trend7d: Array<{ day: string; cost: number; unpricedRequests: number }>;
+  topModels: Array<{ model: string; cost: number; requests: number }>;
+  /** 已配置单价的模型数（0 = 空态引导去设置页） */
+  pricingRows: number;
+}
+
+/** v4.4.0：模型单价行（GET/PUT /api/console/pricing；$/1M tokens） */
+export interface PricingRow {
+  model: string;
+  inputPerMTok: number;
+  outputPerMTok: number;
+  cachedPerMTok: number;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+/** v4.4.0：近 30 天未配置单价的模型（设置页一键补录 chips） */
+export interface UnpricedModel {
+  model: string;
+  requests: number;
+}
+
+export interface PricingData {
+  rows: PricingRow[];
+  unpricedModels: UnpricedModel[];
+}
+
+export interface PricingSaveResult {
+  rows: PricingRow[];
+  saved: number;
+  deleted: number;
+}
+
 export interface SloData {
   windowHours: number; // 1/6/24
   /** 窗口内日志总条数（含错误请求） */
@@ -565,6 +616,8 @@ export interface LogRow {
   error: string | null;
   /** v3.0.3：true=上游精确 usage；false=网关字符估算；null=未知/未记录 */
   usageExact?: boolean | null;
+  /** v4.4.0：行级成本估算（$；模型未配置单价 → null；前端淡态显示） */
+  cost?: number | null;
 }
 
 export interface LogsData {

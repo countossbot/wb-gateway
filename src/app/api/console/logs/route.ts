@@ -7,6 +7,7 @@
 import { NextRequest } from "next/server";
 import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
 import { distinctLogAccounts, distinctLogKeys, distinctLogModels, distinctLogProviders, listRequestLogs } from "@/lib/gateway/config/requestLog";
+import { loadPricingMap, estimateRowCost } from "@/lib/console/pricing";
 
 export const dynamic = "force-dynamic";
 
@@ -51,5 +52,12 @@ export async function GET(request: NextRequest) {
     distinctLogAccounts(),
     distinctLogModels(),
   ]);
-  return ok({ ...result, providers, keys, accounts, models });
+  // v4.4.0：行级成本估算（ModelPricing × 每行 tokens；模型未配置单价 → null）。
+  // 单价表一次加载后内存计算，页大小 ≤500 行零压力；估算口径与透视/总览完全同源。
+  const pricing = await loadPricingMap();
+  const items = result.items.map((r) => ({
+    ...r,
+    cost: estimateRowCost(pricing, r.model, r.inputTokens ?? 0, r.outputTokens ?? 0, r.cachedTokens ?? 0),
+  }));
+  return ok({ ...result, items, providers, keys, accounts, models });
 }

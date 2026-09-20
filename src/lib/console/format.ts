@@ -48,6 +48,23 @@ export function fmtNum(n: number | string | null | undefined): string {
   return v.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 }
 
+/** v4.4.0：成本估算金额格式化（$ + 智能小数位）——
+ * < $0.01 保留 4 位（微成本场景 0.0071）；< $1 保留 3 位；≥ $1 保留 2 位；
+ * ≥ $1000 千分位。null/undefined → "—"（未计价口径由调用方渲染淡态说明）。 */
+export function fmtUsd(n: number | string | null | undefined): string {
+  if (n === null || n === undefined || n === "") return "—";
+  const v = typeof n === "string" ? parseFloat(n) : n;
+  if (Number.isNaN(v)) return String(n);
+  const abs = Math.abs(v);
+  if (abs === 0) return "$0";
+  let decimals: number;
+  if (abs < 0.01) decimals = 4;
+  else if (abs < 1) decimals = 3;
+  else if (abs < 1000) decimals = 2;
+  else decimals = 0;
+  return `$${v.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
+}
+
 /** v3.9.2：token 数紧凑格式化（单位自动转换 K/M/B）——防止大数字撑爆统计卡 / 排行行。
  * 规则：< 1 万全量千分位（9,876）；≥ 1 万按 3 位有效数字缩写（12.3K / 456K / 1.23M / 2.5B）。
  * 展示位建议搭配 title={fmtNum(原值)} 保留精确值（悬停可查全量）。 */

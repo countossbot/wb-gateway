@@ -46,11 +46,11 @@ import {
   TagInput,
 } from "@/components/console/ui";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
-import { absoluteTime } from "@/lib/console/format";
+import { absoluteTime, fmtUsd } from "@/lib/console/format";
 import type { CreatedKey, KeysData, VirtualKeyRow } from "@/lib/console/types";
 
-/** v3.5.0：密钥名 → 近 7 天逐日用量（sparkline 数据源） */
-type Usage7dMap = Map<string, Array<{ day: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number }>>;
+/** v3.5.0：密钥名 → 近 7 天逐日用量（sparkline 数据源）；v4.4.0：附带当日估算成本（$，未计价行不计） */
+type Usage7dMap = Map<string, Array<{ day: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cost: number }>>;
 
 /** v4.3.0：配额用量占比条颜色档（与模型健康日柱同套三档语义：<80 安全 / ≥80 临近 / ≥100 已限额） */
 function quotaBarClass(pct: number): string {
@@ -148,7 +148,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
     let alive = true;
     apiGet<{
       range: { from: string; to: string };
-      rows: Array<{ day: string; providerId: string | null; apiKeyName: string | null; requests: number; okRequests: number; inputTokens: number; outputTokens: number }>;
+      rows: Array<{ day: string; providerId: string | null; apiKeyName: string | null; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cost?: number | null }>;
     }>("/api/console/usage/daily?days=7", { quiet: true })
       .then((d) => {
         if (!alive) return;
@@ -162,7 +162,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
           days.push(`${dt.getFullYear()}-${mm}-${dd}`);
         }
         setUsage7dDays(days);
-        const m = new Map<string, Array<{ day: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number }>>();
+        const m: Usage7dMap = new Map<string, Array<{ day: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cost: number }>>();
         for (const r of d.rows) {
           const name = r.apiKeyName || "(unknown)";
           const arr = m.get(name) || [];
@@ -172,8 +172,9 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
             found.okRequests += r.okRequests;
             found.inputTokens += r.inputTokens;
             found.outputTokens += r.outputTokens;
+            found.cost += r.cost ?? 0;
           } else {
-            arr.push({ day: r.day, requests: r.requests, okRequests: r.okRequests, inputTokens: r.inputTokens, outputTokens: r.outputTokens });
+            arr.push({ day: r.day, requests: r.requests, okRequests: r.okRequests, inputTokens: r.inputTokens, outputTokens: r.outputTokens, cost: r.cost ?? 0 });
           }
           m.set(name, arr);
         }
@@ -388,7 +389,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                   <TableHead className="hidden xl:table-cell">健康面板</TableHead>
                   {/* v3.7.0：最后使用时间（RequestLog 滚动窗口 MAX(createdAt)） */}
                   <TableHead className="hidden lg:table-cell">最后使用</TableHead>
-                  {/* v3.5.0：近 7 天用量 sparkline */}
+                  {/* v3.5.0：近 7 天用量 sparkline；v4.4.0：附带估算成本（≈$） */}
                   <TableHead className="hidden lg:table-cell">近 7 天用量</TableHead>
                   <TableHead className="hidden lg:table-cell">备注</TableHead>
                   <TableHead>启用</TableHead>
@@ -491,17 +492,31 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                         const days = usage7d?.get(k.name);
                         if (!usage7d || !days) return <MiniBars values={[0, 0, 0, 0, 0, 0, 0]} ariaLabel={`密钥 ${k.name} 近 7 天用量`} />;
                         const per = usage7dDays.map((day) => days.find((x) => x.day === day)?.requests ?? 0);
+                        const totalCost = days.reduce((s, x) => s + (x.cost || 0), 0);
                         const details = usage7dDays.map((day, i) => {
                           const rec = days.find((x) => x.day === day);
                           const tk = rec ? rec.inputTokens + rec.outputTokens : 0;
+                          const dayCost = rec?.cost ?? 0;
                           return (
                             <span key={i} className="block tabular-nums">
                               {day.slice(5).replace("-", "/")}：{per[i]} 次
                               {tk > 0 ? ` · ${tk.toLocaleString()} tk` : ""}
+                              {dayCost > 0 ? ` · ${fmtUsd(dayCost)}` : ""}
                             </span>
                           );
                         });
-                        return <MiniBars values={per} details={details} ariaLabel={`密钥 ${k.name} 近 7 天用量，共 ${per.reduce((s, v) => s + v, 0)} 次`} />;
+                        return (
+                          <div className="space-y-0.5">
+                            <MiniBars values={per} details={details} ariaLabel={`密钥 ${k.name} 近 7 天用量，共 ${per.reduce((s, v) => s + v, 0)} 次`} />
+                            {/* v4.4.0：近 7 天估算成本（单价表口径；未配置单价时淡态 —） */}
+                            <span
+                              className={`block text-[10px] tabular-nums ${totalCost > 0 ? "text-lime-700" : "text-stone-300"}`}
+                              title={`近 7 天估算成本：${totalCost > 0 ? fmtUsd(totalCost) : "$0（模型未配置单价或全未计价）"}（基于设置页模型单价表估算，非计费）`}
+                            >
+                              {totalCost > 0 ? `≈ ${fmtUsd(totalCost)}` : "—"}
+                            </span>
+                          </div>
+                        );
                       })()}
                     </TableCell>
                     <TableCell className="hidden max-w-44 truncate text-xs text-muted-foreground lg:table-cell" title={k.remark || undefined}>
@@ -534,7 +549,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
         「健康面板」按请求日志聚合该密钥 24h 调用量与成功率（进度条为成功率三色档），今日 token 数来自按日聚合表（不受滚动日志窗口截断）；
         「今日配额」为密钥级日用量护栏（v4.3.0：设置限额后超限请求在入口被 429 拒绝，不触上游；被拒请求不计入用量；本地时区日零点重置，统计与网关执行同源，约 30 秒内同步）；
         「最后使用」取自请求日志滚动窗口内的最近一次调用（v3.7.0；窗口仅保留近期 5000 条，长期闲置的密钥可能显示为「从未使用」，语义为近期未调用）；
-        「近 7 天用量」为该密钥逐日请求数迷你图（UsageDaily 聚合，悬停 ⓘ 查看每日明细），仅供全量/估算 token 的场景参考。
+        「近 7 天用量」为该密钥逐日请求数迷你图（UsageDaily 聚合，悬停 ⓘ 查看每日明细，v4.4.0：明细与图下徽标附带按模型单价表估算的 $ 成本，非计费口径），仅供全量/估算 token 的场景参考。
         {onViewLogs ? "，点击徽标可跳转该密钥的请求日志" : ""}。
       </p>
 
