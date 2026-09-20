@@ -2035,3 +2035,42 @@ Stage Summary:
 5. billing months 清单查询全表 day 字段（UsageDaily 规模 = 天数×密钥×模型组合，当前量级无压力；如未来数据量大可改 groupBy）
 6. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康 60-90 天窗口；UsageDaily 模型维度历史天回填工具；月度账单可扩展「月度预算告警通知」（预算达 80% 时控制台横幅/审计事件，等真实需求）
 7. supervisor 与 mock-upstream（3040）保持运行；本机 4GB 内存 OOM 风险常在（supervisor 是生命线）
+---
+Task ID: 49
+Agent: 主会话（Z.ai Code，用户直派任务轮：/v1/responses 入站端点两份 bugfix 规格落地）
+Task: 实现 OpenAI Responses API 入站端点 /v1/responses（转译为 Chat Completions 上游），并按用户两份修复规格完整落地：①服务端工具（web_search/web_search_preview/code_interpreter/computer_use_preview/local_shell）剥离降级 + X-Gateway-Dropped-Tools 头（流式/非流式）+ 每次剥离 warn 日志 + 无剩余工具时强制 tool_choice 降级 auto；②转译 switch 补齐 custom_tool_call/local_shell_call_output + repairToolCallSequence 统一修复通道（相邻 assistant tool_call 合并/孤儿 tool 结果丢弃/悬空调用合成结果补齐，显式 changed 标志写回）；版本 4.5.0 → 4.6.0
+
+Work Log:
+- 【背景核实】用户问题描述「网关已实现 /v1/responses 入站端点」——经全仓检索（src/app/v1 下仅 chat/messages/models/usage；原项目 tarball 同样无该端点）确认本代码库从未有过该入站端点 → 本轮任务等价于「按两份 bugfix 规格从零实现端点，修复语义内建」；顺延池中无此项冲突
+- 【新模块】src/lib/gateway/responses/translate.ts（请求侧纯转译）：
+  - translateResponsesTools：function 工具全量保留转 chat 嵌套形态；custom(freeform) 全量保留合成 {"input": string} function schema；五类服务端工具 + 未知类型剥离 + 逐次 console.warn + dropped 清单（保持出现顺序）
+  - translateResponsesToolChoice：无剩余工具时 "required"/函数对象强制形态降级 "auto"（warn）；"auto"/"none" 无工具时省略字段（避免严格上游形态挑剔）；tool_choice 引用已剥离/未知工具名 → "auto"
+  - translateResponsesInput：switch 全覆盖 —— message（含 input_text/output_text/input_image→image_url 多模态、developer→system）、function_call、function_call_output、custom_tool_call（参数 {"input":<文本>} JSON 形态）、custom_tool_call_output、local_shell_call（合成 shell 函数 tool_call）、local_shell_call_output、reasoning（跳过，每次请求聚合计数 warn 一条）、item_reference（HttpError 400，客户端可修复）
+  - repairToolCallSequence 三通道：Pass A 相邻 assistant tool_call 消息合并（文本拼接 + tool_calls 连接，规范形态 assistant([A,B]) → tool(A) → tool(B)）；Pass B 孤儿 tool 结果丢弃 + 重复应答去重（declaredIds/answeredIds 双集合）；Pass C 悬空 tool_call 紧随其 assistant 消息补合成结果（content="tool call was interrupted before execution; no result recorded"）；写回用显式 changed 标志（孤儿丢弃+合成补齐数量可能抵消，禁长度比较）
+  - translateResponsesRequest 编排：instructions→system、input 字符串/数组、max_output_tokens→max_tokens、reasoning.effort→reasoning_effort、text.format→response_format、stream 时附加 stream_options.include_usage
+- 【新模块】src/lib/gateway/responses/respond.ts（响应侧回译）：
+  - chatCompletionToResponsesResponse：合法 Responses response 对象（resp_ id/object/status/output/usage input_tokens 语义映射/instructions·tools·tool_choice 等 echo 字段仅回显显式提供项/finish_reason=length → status incomplete + incomplete_details/output_text 便捷拼接）；assistant.reasoning_content → reasoning summary 项；tool_calls → function_call 项，命中 customToolNames → custom_tool_call 项（input 从 {"input"} 解包），name==="shell" 且未声明同名 function → local_shell_call 项（command 解包）
+  - chatSseToResponsesStream：chat SSE → Responses SSE，序列 response.created → output_item.added → content_part.added → output_text.delta* → output_text.done → content_part.done → output_item.done → response.completed（工具项在流尾 added→done 背靠背完整输出）；逐行解析器跳过网关注入 ": keep-alive" 注释行/event: 行；10s 客户端空闲 ping（SSE 注释行）；客户端 abort（request.signal）取消上游读取；流尾兜底 finalize（无 finish 帧也发 completed）
+  - chatJsonToResponsesStream：客户端要流但上游回 JSON 的合成兜底（最小完整事件序列）
+- 【新路由】src/app/v1/responses/route.ts：入口三段防护（413/鉴权前置/带限 body 读取）与 /v1/chat/completions 同款；模型白名单 + 日配额/月预算预检复用；previous_response_id → 400（无状态网关，替代路径=回放完整 input）；dispatchExchange(protocol:"openai") 复用全部调度链（路由解析/候选故障转移/记账/usage 统计）；成功路径非流式 JSON 回译 / 流式 SSE 重排版（含 X-Gateway-Account/Model/Fallback 落点头透传 + X-Gateway-Dropped-Tools 头）；错误透传保持 OpenAI error 信封 + dropped-tools 头；OPTIONS 预检 + GET 405
+- 【mock-upstream 强化（QA 裁判）】严格 tool_calls 配对校验复刻真实上游 11148（任何非 tool 消息出现时 pending 必须已清空；tool 结果必须命中 pending 否则孤儿/重复拒绝；结尾 pending 必须空）；「无工具请求+强制 tool_choice」→ 400 code 11148 tool_choice_without_tools；lastChatRequest 回显（__stats 暴露最近 chat 请求 {model,messages,tools,tool_choice,stream}，e2e 字节级断言网关转译产物）；USE_CUSTOM_TOOL 触发 apply_patch 工具调用（custom 回译验证）；校验仅对含 tool 消息的请求生效——现有全部 e2e（纯 user 消息）零影响（route-test 51/51、key-quota 22/22 回归实证）
+- 【e2e】tests/responses-api-e2e.ts 52/52：D 负对照（未合并相邻形态直打 mock → 400/11148；强制 tool_choice 无工具直打 → 400/11148——「修复前」行为可复现证明）；A 组（A1 web_search+function 复现请求 200 + 头值 web_search + 合法 response 对象 + usage 映射 + mock 收到 tools 仅剩 function；A2 stream:true SSE 事件序列 created→item.added→delta(s)→done→completed 全链 + 头携带 + delta 含 mock 应答 + completed 含 usage；A3 仅 web_search+required → 200 + mock 收到 tools=null+tool_choice=auto；A4 三类服务端工具头清单顺序）；B 组六项全 200（B1 custom 配对 + arguments {"input"} 形态字节级断言；B2 悬空 → 合成结果紧随 assistant + content 语义；B3 并行合并为单条双 tool_call + 规范形态顺序；B4 孤儿丢弃 mock 收到零 role:tool；B5 local_shell 配对 + 工具声明剥离头）；C 组守卫回归（普通 200 无剥离无头/previous_response_id 400/item_reference 400/input 缺失 400/错密钥 401/function 环回 function_call 项/custom 环回 custom_tool_call 项 input 解包/无路由 404/instructions→system）；healthz 前后等价
+- 【可观测验证】dev.log 逐条实证全部要求格式：dropping server-side OpenAI tool "web_search"（每次剥离）/ tool_choice "required" downgraded to "auto" / merged adjacent assistant tool_call messages into one (callA, callB) / synthetic tool result repaired "fn1" / orphan tool result dropped "ghost1" / dropping server-side OpenAI tool "local_shell"
+- 【验证矩阵】lint 零错误；tsc src/ 零错误（tests/ 新增 6 条与全部兄弟 e2e 同类非模块声明冲突，bun 直跑不受影响——与 Task 44-48 口径一致）；agent-browser 全新会话登录 + 8 页签遍历零页面错误零 console 错误；RequestLog 诚实记账（qa-resp-model/provider/apiKeyName/usage 42·13·20/usageExact=true，404 noroute 亦落 error 字段）；/admin 规范页 public_endpoints 增 /v1/responses 完整语义文档 + auth.note 配额入口清单补 /v1/responses；healthz 4.6.0；测试资产全清理（key/route/provider 自删 + mock stats 复位）
+- 【排障记录】①浏览器 stale Turbopack 错误浮层：tsc 对比时 git stash/pop 触发 HMR 中途换文件，浏览器残留「overview.tsx Parsing ecmascript source code failed」浮层——文件字节完好（Read 复核）+ dev.log 零编译错误 + 全新 agent-browser 会话 errors:[] 三重证明为陈旧态（Task 47 HMR 干扰同款教训：tsc 基线对比禁用 stash）；②MultiEdit 非原子实态：工具报「No replacement」但前置 edits 已落盘（mock-upstream 两轮 MultiEdit 部分应用痕迹）——用 rg -c 复核关键块唯一性后放行；大编辑后必须复核文件完整性
+- 【git】独立 commit（translate.ts + respond.ts + route.ts + mock 强化 + e2e + /admin 文档 + VERSION 4.6.0）
+
+Stage Summary:
+- /v1/responses 入站端点全链路落地并 52/52 e2e 验证；版本 4.6.0；Codex CLI 可直连本网关（stateless 模式，store:false + 全量历史回放）
+- 两份 bugfix 规格逐条兑现：①「客户端无法避免的默认行为降级而非拒绝」——五类服务端工具剥离 + 双通道可观测（X-Gateway-Dropped-Tools 头 / warn 日志）+ tool_choice 防御降级；②「转译层必须产出规范形态」——switch 三缺口补齐 + repairToolCallSequence 统一修复通道（mock 严格校验裁判下六项全 200，负对照证明未修复形态必 400/11148）
+- 架构要点：新端点零侵入复用 dispatchExchange 调度链（故障转移/记账/配额/落点头全等价）；响应侧回译为纯函数 + 流式重排版（跳过网关 keep-alive 注释行）；mock 严格校验只影响含 tool 消息的请求（存量 e2e 零扰动实证）
+- 400 守卫边界重申（设计原则沉淀）：仅用于「客户端可自行修复且有替代路径」——previous_response_id/item_reference/input 缺失/非法 JSON；能力差异走降级
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（qa-resp-* 全部自建自删；~25 次 e2e 调用全经 mock-upstream 零真实计费；RequestLog/UsageDaily qa-resp-* 行为诚实记账，7 天窗口自然老化）
+2. GET /v1/responses/{id} 未实现（Codex stateless 模式不需要；如后续客户端轮询后台任务再补 404 语义化错误体）
+3. reasoning_content 流式增量无 Responses 事件等价物（当前忽略流式思维链增量，非流式聚合为 reasoning summary 项）；如上游为 DeepSeek 类思考模型且 Codex 依赖 reasoning 项回放，可扩展 response.reasoning_summary_text.delta 事件
+4. output_text 便捷字段为额外字段（官方 API 不含，SDK 自行计算）——保留可提高 curl 调试体验，严格客户端忽略
+5. tool_choice "none"/"auto" 在无剩余工具时被省略而非降级为 "auto"（语义恒空；需求原文仅要求强制形态降级，此为更严格防御）——如客户端按字节断言请求形态需知悉
+6. 顺延项持续开放：标准适配器 getBalance 池形态（优先级低）；模型健康 60-90 天窗口；UsageDaily 模型维度历史天回填工具；Responses 端点可扩展 background=true 轮询语义（当前同步执行 + warn）
+7. tsc 基线对比方法论沉淀：禁用 git stash（HMR 中途换文件产生 stale 浮层假象）；mock-upstream 保持运行（严格校验 + lastChatRequest 裁判能力供后续巡检复用）

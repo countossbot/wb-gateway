@@ -17,7 +17,7 @@ import { db } from "@/lib/db";
 import type { GatewayConfig, ProviderConfig, AccountConfig, RouteCandidateConfig, VirtualKeyEntry } from "../core/types";
 import { refreshRuntimeSettings } from "./runtimeSettings";
 
-export const VERSION = "4.5.0"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.5.0：月度账单与预算 —— 虚拟密钥月度成本预算（monthlyCostLimit，估算口径月累计 ≥ 预算入口 429 + X-Budget-* 头组，下月 1 日重置）+ 总览月度账单卡（按密钥分组月成本报表 + byModel 明细 + 环比上月 + CSV 导出）；4.4.0：用量成本估算（ModelPricing 单价表 + 六视图成本）；4.3.2：运维监控体验升级；4.3.1：路由试跑控制台调试工具
+export const VERSION = "4.6.0"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.6.0：OpenAI Responses API 入站端点 /v1/responses（Codex CLI）—— 服务端工具剥离降级（X-Gateway-Dropped-Tools 头 + warn 日志）+ tool_choice 防御降级 + tool_call 序列统一修复通道（相邻合并/孤儿丢弃/悬空补齐）；4.5.0：月度账单与预算 —— 虚拟密钥月度成本预算（monthlyCostLimit，估算口径月累计 ≥ 预算入口 429 + X-Budget-* 头组，下月 1 日重置）+ 总览月度账单卡（按密钥分组月成本报表 + byModel 明细 + 环比上月 + CSV 导出）；4.4.0：用量成本估算（ModelPricing 单价表 + 六视图成本）；4.3.2：运维监控体验升级；4.3.1：路由试跑控制台调试工具
 
 // ---- 默认路由表（等价保留原 getDefaultConfig 的 routes；用于读路径回填） ----
 export const DEFAULT_ROUTES: Record<string, RouteCandidateConfig[]> = {
