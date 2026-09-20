@@ -8,6 +8,7 @@ import { getConfig } from "@/lib/gateway/config/configService";
 import { getProviderFleet } from "@/lib/gateway/core/fleet";
 import { VERSION } from "@/lib/gateway/config/configService";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
+import { computeModelHealthData, normalizeWindowDays } from "@/lib/console/overviewInsights";
 
 /** v3.9.0：Top 模型行结构（与 types.ts TopModelRow 同形；API 内部局部定义避免跨层依赖） */
 interface TopModelRowShape {
@@ -30,14 +31,6 @@ interface TopProviderRowShape {
   cachedTokens: number;
   /** 占 7 天总请求数份额（0-100，保留 1 位） */
   share: number;
-}
-
-/** v4.2.1：模型健康行（近 7 天 RequestLog 按模型 × 日聚合；sparkline 数据源） */
-interface ModelHealthModelShape {
-  model: string;
-  points: Array<{ day: string; requests: number; okRequests: number }>;
-  requests7d: number;
-  okRequests7d: number;
 }
 
 export const dynamic = "force-dynamic";
@@ -236,42 +229,11 @@ export async function GET(request: NextRequest) {
   // 近 N 天（含今日）按「对外模型 × 本地日」聚合，每模型 N 个日点
   // （requests/okRequests）供 sparkline 渲染；按窗口内请求数取 Top 6。
   // v4.2.3 前历史行（model=""）不参与；新增流量自然细分；超高流量下不再受滚动窗口截断。
-  const mhDaysParam = Number(request.nextUrl.searchParams.get("mh_days"));
-  const mhWindow = mhDaysParam === 14 || mhDaysParam === 30 ? mhDaysParam : 7;
-  const healthDays: string[] = Array.from({ length: mhWindow }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (mhWindow - 1 - i));
-    return localDayKey(d);
-  });
-  const healthRows = await db.usageDaily.findMany({
-    where: { day: { in: healthDays }, model: { not: "" } },
-    select: { day: true, model: true, requests: true, okRequests: true },
-  });
-  const healthMap = new Map<string, Array<{ requests: number; okRequests: number }>>();
-  for (const row of healthRows) {
-    const idx = healthDays.indexOf(row.day);
-    if (idx < 0) continue;
-    let arr = healthMap.get(row.model);
-    if (!arr) {
-      arr = healthDays.map(() => ({ requests: 0, okRequests: 0 }));
-      healthMap.set(row.model, arr);
-    }
-    arr[idx].requests += row.requests;
-    arr[idx].okRequests += row.okRequests;
-  }
-  const modelHealth: { days: string[]; models: ModelHealthModelShape[]; windowDays?: number } = {
-    days: healthDays,
-    windowDays: mhWindow,
-    models: Array.from(healthMap.entries())
-      .map(([model, points]) => ({
-        model,
-        points: points.map((p, i) => ({ day: healthDays[i], ...p })),
-        requests7d: points.reduce((s, p) => s + p.requests, 0),
-        okRequests7d: points.reduce((s, p) => s + p.okRequests, 0),
-      }))
-      .sort((a, b) => b.requests7d - a.requests7d)
-      .slice(0, 6),
-  };
+  // v4.2.4：计算逻辑抽取到 overviewInsights 共享层（与 /api/console/overview/insights
+  // 独立端点同源防口径漂移）；主请求默认返回 7 天种子，窗口切换由前端调独立端点。
+  const mhDaysParam = request.nextUrl.searchParams.get("mh_days");
+  const mhWindow = mhDaysParam !== null ? normalizeWindowDays(mhDaysParam) : 7;
+  const modelHealth = await computeModelHealthData(mhWindow);
 
   // v3.9.1：上游前缀缓存命中统计改为 RequestLog 持久聚合（修复「命中率一直 0%」）。
   // 旧实现 snapshotCacheStats() 为进程内存计数，dev 重启/HMR 后清零导致页面恒显 0%；

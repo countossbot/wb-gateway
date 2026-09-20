@@ -52,7 +52,7 @@ export async function GET(request: NextRequest) {
           {
             path: "/admin/api/checkin",
             methods: ["POST"],
-            description: "Trigger manual daily checkin across all active multi-account pools",
+            description: "Trigger manual daily checkin (respects the checkinProviders whitelist from console jobs settings; empty list = all checkin-capable providers). Response includes a scope field showing the effective provider range for automation auditing",
             requires_auth: true,
           },
           {
@@ -71,6 +71,12 @@ export async function GET(request: NextRequest) {
             path: "/api/console/usage/daily",
             methods: ["GET"],
             description: "UsageDaily dimension query / pivot table (console session or Master Key). Query params: days=N (1-90, default 7) or day=YYYY-MM-DD. Returns rows (day x provider x key x model, v4.2.3 model dimension; empty model = pre-v4.2.3 legacy rows) plus pivot rollups byProvider / byKey / byModel / byDay / totals with successRate. Immune to rolling-log truncation.",
+            requires_auth: true,
+          },
+          {
+            path: "/api/console/overview/insights",
+            methods: ["GET"],
+            description: "Overview insights for window switchers (model health sparkline + Top providers ranking). Query params: mh_days=7|14|30 (model health window), tp_days=7|14|30 (top providers window); invalid values fall back to 7. Returns model_health (per-model daily points from UsageDaily model dimension) and top_providers_7d (share = provider requests / window total requests). Decoupled from the main overview endpoint so window switching does not refetch the whole page.",
             requires_auth: true,
           },
           {

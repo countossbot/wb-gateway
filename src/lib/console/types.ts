@@ -211,6 +211,16 @@ export interface ModelHealthData {
   windowDays?: number; // v4.2.3b：窗口长度（7/14/30；缺省 7 向后兼容）
 }
 
+/** v4.2.4：总览洞察独立 API 响应（GET /api/console/overview/insights?mh_days=&tp_days=）——
+ * 窗口切换不再触发整页 overview 重载（Task 42b 遗留清偿）；字段与主响应同形可作种子无缝切换 */
+export interface OverviewInsightsData {
+  model_health: ModelHealthData;
+  /** 窗口内 Top 提供商（share 语义随窗口联动：占该窗口内全部请求数份额） */
+  top_providers_7d: TopProviderRow[];
+  /** Top 提供商实际窗口天数回显（7/14/30） */
+  top_providers_window_days?: number;
+}
+
 // ---- 账号管理 ----
 export interface ConsoleAccount {
   id: string;

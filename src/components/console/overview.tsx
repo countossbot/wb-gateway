@@ -46,7 +46,7 @@ import {
 } from "@/components/console/ui";
 import { apiGet, errMessage } from "@/lib/console/api";
 import { cooldownRemaining, fmtCompact, fmtNum, relativeTime } from "@/lib/console/format";
-import type { BalanceHistoryData, ModelHealthData, OverviewData, TopKeyRow, TopModelRow, TopProviderRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
+import type { BalanceHistoryData, ModelHealthData, OverviewData, OverviewInsightsData, TopKeyRow, TopModelRow, TopProviderRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
 
 /** v3.0.5：近 24h 逐小时请求趋势 mini 图（纯 CSS 柱状：成功 emerald / 失败 red，Tooltip 显示明细；
  *  有流量的柱可点击 → 跳转运行日志按该小时窗口过滤；移动端横向滚动保证 24 柱可读性） */
@@ -626,18 +626,59 @@ function TopModelsCard({
  * v4.2.1：近 7 天 Top 提供商排行卡（Task 32 顺延项落地）。
  * - UsageDaily providerId 维度聚合（持久数据，不受滚动日志窗口截断）；Top 5 按请求数
  * - 每行：排名徽标（orange 系）+ 提供商名 + 占比条 + 请求数/成功率/token + 份额百分比
- * - 份额 share = 该提供商请求 / 7 天全部请求（含未命中行作分母，忠实反映总盘子）
+ * - 份额 share = 该提供商请求 / 窗口内全部请求（含未命中行作分母，忠实反映总盘子；窗口语义随选择器联动自洽）
  * - 与 Top 密钥（emerald）/ Top 模型（teal）三色区分，一览三卡不混淆
+ * - v4.2.4：窗口选择器（7/14/30 天，orange 主题与卡片一致）+ 独立 insights API 拉取（loading 态内容半透明脉冲）
  */
-function TopProvidersCard({ rows }: { rows: TopProviderRow[] }) {
+const TP_WINDOW_OPTIONS: Array<{ days: 7 | 14 | 30; label: string }> = [
+  { days: 7, label: "7 天" },
+  { days: 14, label: "14 天" },
+  { days: 30, label: "30 天" },
+];
+
+function TopProvidersCard({
+  rows,
+  windowDays = 7,
+  onWindowChange,
+  loading,
+}: {
+  rows: TopProviderRow[];
+  windowDays?: 7 | 14 | 30;
+  onWindowChange?: (days: 7 | 14 | 30) => void;
+  loading?: boolean;
+}) {
   const maxReq = Math.max(1, ...rows.map((r) => r.requests));
   const totalShare = rows.reduce((s, r) => s + r.share, 0);
+  const nDays = windowDays;
+  const windowSelector = onWindowChange ? (
+    <span className="ml-auto shrink-0" role="group" aria-label="切换 Top 提供商窗口长度">
+      {TP_WINDOW_OPTIONS.map((o) => (
+        <button
+          key={o.days}
+          type="button"
+          onClick={() => onWindowChange(o.days)}
+          aria-pressed={windowDays === o.days}
+          title={`按 ${o.days} 天窗口查看 Top 提供商排行（份额为该窗口内占比）`}
+          className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+            windowDays === o.days
+              ? "bg-orange-100 text-orange-700"
+              : "text-stone-400 hover:bg-stone-100 hover:text-stone-600"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </span>
+  ) : null;
   if (rows.length === 0) {
     return (
       <div className="rounded-xl border border-stone-200 bg-white p-4">
-        <p className="text-sm font-medium text-stone-700">近 7 天 Top 提供商</p>
-        <p className="mt-2 text-xs text-muted-foreground">
-          近 7 天尚无命中提供商的调用。调用发生后将按请求数排行（数据来自 UsageDaily 按日聚合，重启不丢）。
+        <div className="flex items-baseline gap-1.5">
+          <p className="text-sm font-medium text-stone-700">近 {nDays} 天 Top 提供商</p>
+          {windowSelector}
+        </div>
+        <p className={`mt-2 text-xs text-muted-foreground ${loading ? "animate-pulse" : ""}`}>
+          近 {nDays} 天尚无命中提供商的调用。调用发生后将按请求数排行（数据来自 UsageDaily 按日聚合，重启不丢）。
         </p>
       </div>
     );
@@ -646,15 +687,17 @@ function TopProvidersCard({ rows }: { rows: TopProviderRow[] }) {
     <div className="rounded-xl border border-stone-200 bg-white p-4">
       <div className="flex items-baseline gap-1.5">
         <Network className="size-4 shrink-0 self-center text-orange-500" aria-hidden />
-        <p className="shrink-0 text-sm font-medium text-stone-700">近 7 天 Top 提供商</p>
+        <p className="shrink-0 text-sm font-medium text-stone-700">近 {nDays} 天 Top 提供商</p>
         {totalShare < 99 && (
           <Badge variant="outline" className="border-stone-200 bg-stone-50 px-1.5 py-0 text-[10px] font-medium text-stone-500" title={`另有 ${(100 - totalShare).toFixed(1)}% 请求未命中提供商（容灾或路由缺失）`}>
             另 {Math.round((100 - totalShare) * 10) / 10}% 未命中
           </Badge>
         )}
+        {windowSelector}
         <span className="truncate text-[11px] text-muted-foreground">按请求数 · Top {rows.length}</span>
       </div>
-      <ol className="mt-3 space-y-2">
+      {/* v4.2.4：独立 API 拉取期间内容半透明脉冲（窗口切换不闪整页 loading） */}
+      <ol className={`mt-3 space-y-2 transition-opacity ${loading ? "animate-pulse opacity-50" : ""}`}>
         {rows.map((r, i) => {
           const rate = r.requests > 0 ? Math.round((r.okRequests / r.requests) * 100) : 100;
           const rateColor =
@@ -722,6 +765,7 @@ function healthBarClass(rate: number | null): string {
  * - v4.2.3b：窗口长度可选 7/14/30 天（数据源为持久聚合，长窗口零额外成本）；
  *   柱宽自适应（flex-1 均分，长窗口自动变窄不溢出）
  * - 脚注注明持久聚合口径（v4.2.3 改读 UsageDaily 模型维度：跨滚动窗口持久，不再受 5000 条截断）
+ * - v4.2.4：数据改由独立 insights API 拉取（切窗口不再整页重载）；loading 态内容半透明脉冲
  */
 const MH_WINDOW_OPTIONS: Array<{ days: 7 | 14 | 30; label: string }> = [
   { days: 7, label: "7 天" },
@@ -733,11 +777,13 @@ function ModelHealthCard({
   data,
   windowDays = 7,
   onWindowChange,
+  loading,
   onModelClick,
 }: {
   data?: ModelHealthData;
   windowDays?: 7 | 14 | 30;
   onWindowChange?: (days: 7 | 14 | 30) => void;
+  loading?: boolean;
   onModelClick?: (model: string) => void;
 }) {
   const models = data?.models || [];
@@ -767,7 +813,7 @@ function ModelHealthCard({
             </span>
           ) : null}
         </div>
-        <p className="mt-2 text-xs text-muted-foreground">
+        <p className={`mt-2 text-xs text-muted-foreground ${loading ? "animate-pulse" : ""}`}>
           近 {nDays} 天暂无网关调用。调用发生后将按模型展示每日请求量与成功率走势（数据来自按日聚合表的模型维度）。
         </p>
       </div>
@@ -801,7 +847,8 @@ function ModelHealthCard({
           <span className="truncate text-[11px] text-muted-foreground">日柱高=请求量 · 色=成功率</span>
         )}
       </div>
-      <ul className="mt-3 space-y-1.5">
+      {/* v4.2.4：独立 API 拉取期间内容半透明脉冲（切窗口不闪整页 loading） */}
+      <ul className={`mt-3 space-y-1.5 transition-opacity ${loading ? "animate-pulse opacity-50" : ""}`}>
         {models.map((m) => {
           const maxDay = Math.max(1, ...m.points.map((p) => p.requests));
           const rateN = m.requests7d > 0 ? Math.round((m.okRequests7d / m.requests7d) * 100) : 100;
@@ -1083,7 +1130,13 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
   const [loading, setLoading] = React.useState(true);
   const [copiedModel, setCopiedModel] = React.useState("");
   // v4.2.3b：模型健康窗口长度（7/14/30 天；数据已持久化，长窗口零额外成本）
+  // v4.2.4：窗口切换改调独立 insights API（不再触发整页 overview 重载，Task 42b 遗留清偿）
   const [mhWindow, setMhWindow] = React.useState<7 | 14 | 30>(7);
+  // v4.2.4：Top 提供商排行窗口（7/14/30 天；share 语义随窗口联动自洽）
+  const [tpWindow, setTpWindow] = React.useState<7 | 14 | 30>(7);
+  // v4.2.4：洞察独立数据（模型健康 + Top 提供商；主响应 7 天种子初始化，窗口切换/刷新由独立 API 更新）
+  const [insights, setInsights] = React.useState<OverviewInsightsData | null>(null);
+  const [insightsLoading, setInsightsLoading] = React.useState(false);
   // v3.4.0：一键清冷却操作反馈（内联轻提示，非报错；3s 自动消失）
   const [cdNotice, setCdNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
   // v3.6.0：余额历史快照（14 天窗口；静默拉取，失败不影响主视图）
@@ -1098,18 +1151,51 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
     setLoading(true);
     setError("");
     try {
-      const d = await apiGet<OverviewData>(`/api/console/overview?mh_days=${mhWindow}`);
+      const d = await apiGet<OverviewData>("/api/console/overview");
       setData(d);
     } catch (e) {
       setError(errMessage(e));
     } finally {
       setLoading(false);
     }
-  }, [mhWindow]);
+  }, []);
 
   React.useEffect(() => {
     void load();
   }, [load]);
+
+  // v4.2.4：洞察独立拉取 —— 切窗口只重拉模型健康/Top 提供商（两个 UsageDaily 轻量查询），
+  // 页面其余数据（余额/账号/趋势等）不动；加载期间卡片内容半透明脉冲而非整页 loading。
+  const loadInsights = React.useCallback(
+    async (mh: 7 | 14 | 30, tp: 7 | 14 | 30) => {
+      setInsightsLoading(true);
+      try {
+        const d = await apiGet<OverviewInsightsData>(
+          `/api/console/overview/insights?mh_days=${mh}&tp_days=${tp}`
+        );
+        setInsights(d);
+      } catch {
+        /* 拉取失败保留旧数据（卡片继续展示上次窗口内容，下次切换/刷新重试） */
+      } finally {
+        setInsightsLoading(false);
+      }
+    },
+    []
+  );
+  // 挂载/切窗口 → 独立拉取（与主 load 并行，互不阻塞）
+  React.useEffect(() => {
+    void loadInsights(mhWindow, tpWindow);
+  }, [loadInsights, mhWindow, tpWindow]);
+  // 主响应到达且洞察仍为空（首次挂载）→ 用 7 天种子即时渲染，随后被独立拉取的同口径数据替换
+  React.useEffect(() => {
+    if (data && !insights && mhWindow === 7 && tpWindow === 7) {
+      setInsights({
+        model_health: data.model_health ?? { days: [], models: [] },
+        top_providers_7d: data.top_providers_7d || [],
+        top_providers_window_days: 7,
+      });
+    }
+  }, [data, insights, mhWindow, tpWindow]);
 
   // v3.6.0：余额趋势独立拉取（quiet；接口/数据缺失时优雅降级为无 footer）
   // v4.2.3b：抽出为可重拉回调 —— 刷新按钮同步重拉（旧实现仅组件挂载时拉取一次，
@@ -1218,7 +1304,7 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
         title="总览"
         description="聚合余额、账号与路由状态、上游缓存命中率"
         actions={
-          <Button variant="outline" size="sm" onClick={() => { void load(); loadBalTrend(); }} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => { void load(); loadBalTrend(); void loadInsights(mhWindow, tpWindow); }} disabled={loading}>
             <RefreshCw className={loading ? "animate-spin" : undefined} />
             刷新
           </Button>
@@ -1453,16 +1539,22 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
             onModelClick={onModelClick}
           />
         </div>
-        {/* v4.2.1：近 7 天 Top 提供商排行（UsageDaily 持久聚合；Task 32 顺延项落地） */}
+        {/* v4.2.1：Top 提供商排行（UsageDaily 持久聚合；v4.2.4：窗口可选 7/14/30 天，独立 API 拉取） */}
         <div className="xl:col-span-3">
-          <TopProvidersCard rows={data.top_providers_7d || []} />
+          <TopProvidersCard
+            rows={insights?.top_providers_7d || []}
+            windowDays={tpWindow}
+            onWindowChange={setTpWindow}
+            loading={insightsLoading}
+          />
         </div>
-        {/* v4.2.1：模型健康 sparkline（v4.2.3b：窗口可选 7/14/30 天；点击行 → 该模型今日日志） */}
+        {/* v4.2.1：模型健康 sparkline（v4.2.3b：窗口可选 7/14/30 天；点击行 → 该模型今日日志；v4.2.4 独立 API 拉取） */}
         <div className="xl:col-span-3">
           <ModelHealthCard
-            data={data.model_health}
+            data={insights?.model_health}
             windowDays={mhWindow}
             onWindowChange={setMhWindow}
+            loading={insightsLoading}
             onModelClick={onModelClick}
           />
         </div>

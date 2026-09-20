@@ -17,7 +17,7 @@ import { db } from "@/lib/db";
 import type { GatewayConfig, ProviderConfig, AccountConfig, RouteCandidateConfig, VirtualKeyEntry } from "../core/types";
 import { refreshRuntimeSettings } from "./runtimeSettings";
 
-export const VERSION = "4.2.3"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.2.3：UsageDaily 增模型维度 —— 模型健康/Top 模型排行改读持久聚合（跨滚动窗口根本解），启动安全拆分迁移 + 备份重建/回填/透视表全链路四维度，admin status providers 去重修复）
+export const VERSION = "4.2.4"; // 重构版版本号（原 2.4.0 → Node.js 重构；4.2.4：runtimeSettings globalThis 共享存储根治 dev 跨模块实例缓存不传播（签到白名单实测复现）；/checkin 与 /admin/api/checkin 机器接口接入签到白名单 + scope 透明化；总览洞察独立 API（模型健康/Top 提供商窗口切换不再整页重载）+ Top 提供商窗口选择器）
 
 // ---- 默认路由表（等价保留原 getDefaultConfig 的 routes；用于读路径回填） ----
 export const DEFAULT_ROUTES: Record<string, RouteCandidateConfig[]> = {

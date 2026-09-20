@@ -62,13 +62,31 @@ function clampInt(
   return n >= min && n <= max ? n : fallback;
 }
 
-let cached: RuntimeSettingsShape = { ...DEFAULTS };
-let loaded = false;
-
 // 进程启动后首次访问时从 DB 水合；之后由 saveRuntimeSetting / refreshRuntimeSettings 主动刷新
+//
+// v4.2.4：globalThis 共享存储 —— dev 模式下 Turbopack 按路由拆分模块图，每个 route
+// 会得到 runtimeSettings.ts 的独立 module 实例（Task 19 曾为 configService 踩过同款坑：
+// 控制台路由写入后写穿缓存只刷新自己实例，网关路由实例永远读旧值——签到白名单实测复现：
+// PUT /api/console/jobs 保存 ["workbuddy"] 后 POST /admin/api/checkin 仍读到 []）。
+// 把 cached/loaded 挂到 globalThis 上让同进程内所有模块实例共享同一份状态；
+// 生产单实例模式行为零变化。HMR 重编译时：模块重新初始化会从 globalThis 取回旧状态，
+// 并与新 DEFAULTS 合并（新增键补默认值），不丢失已加载的设置。
+interface RuntimeSettingsStore {
+  cached: RuntimeSettingsShape;
+  loaded: boolean;
+}
+const gStore = globalThis as typeof globalThis & { __uagRuntimeSettingsStore?: RuntimeSettingsStore };
+if (gStore.__uagRuntimeSettingsStore) {
+  // 复用已有共享状态（另一模块实例已创建/HMR 重编译）：新 DEFAULTS 补齐新增键，保留已加载值
+  gStore.__uagRuntimeSettingsStore.cached = { ...DEFAULTS, ...gStore.__uagRuntimeSettingsStore.cached };
+} else {
+  gStore.__uagRuntimeSettingsStore = { cached: { ...DEFAULTS }, loaded: false };
+}
+const store: RuntimeSettingsStore = gStore.__uagRuntimeSettingsStore;
+
 async function ensureLoaded(): Promise<void> {
-  if (loaded) return;
-  loaded = true;
+  if (store.loaded) return;
+  store.loaded = true;
   try {
     const rows = await db.systemSetting.findMany();
     applyRows(rows);
@@ -157,22 +175,22 @@ function applyRows(rows: Array<{ key: string; value: unknown }>): void {
       /* 单键损坏不影响整体 */
     }
   }
-  cached = merged;
+  store.cached = merged;
 }
 
 // 同步读取（首次未加载时返回默认值；随后台加载。管理面在写入时总是先 refresh，实践中读到的都是新鲜值）
 export function getRuntimeSettings(): RuntimeSettingsShape {
-  return cached;
+  return store.cached;
 }
 
 export function getCorsAllowedOrigins(): string[] {
-  return cached.corsAllowedOrigins;
+  return store.cached.corsAllowedOrigins;
 }
 
 // 异步读取（确保 DB 已水合）
 export async function getRuntimeSettingsAsync(): Promise<RuntimeSettingsShape> {
   await ensureLoaded();
-  return cached;
+  return store.cached;
 }
 
 // 写单个设置键并热刷新内存（代理/CORS/定时任务等热生效入口）
@@ -200,14 +218,14 @@ export async function refreshRuntimeSettings(): Promise<void> {
   try {
     const rows = await db.systemSetting.findMany();
     applyRows(rows);
-    loaded = true;
+    store.loaded = true;
   } catch (e) {
     console.error("[RuntimeSettings] refresh failed:", e);
   }
 }
 
-// 测试隔离
+// 测试隔离（连同 globalThis 共享状态一起重置，防跨测试模块实例残留）
 export function resetRuntimeSettingsForTest(): void {
-  cached = { ...DEFAULTS };
-  loaded = false;
+  store.cached = { ...DEFAULTS };
+  store.loaded = false;
 }

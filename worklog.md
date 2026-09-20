@@ -1835,3 +1835,23 @@ Stage Summary:
 1. 切窗口会整页 overview 重载（含余额等全部数据）——数据量小可接受；如需极致可拆独立接口只拉 model_health
 2. Top 提供商排行卡仍固定 7 天（同范式可扩展窗口选择器，但 share 环比语义需同步设计，暂顺延）
 3. 其余遗留见 Task 42 主节
+---
+Task ID: 43
+Agent: 主会话（Z.ai Code，恢复中断轮 + QA 轮，trace: 1a0bc1e5e26e0a89-web-cron-review-202609201015）
+Task: 恢复并验收上一轮被中断的 v4.2.4 未提交工作（runtimeSettings globalThis 共享存储 / 机器接口签到白名单 / 总览洞察独立 API + Top 提供商窗口选择器），补全 QA 与记录
+
+Work Log:
+- 【中断恢复】发现工作树存在 v4.2.4 未提交变更（8 文件修改 + 2 新文件 + QA 截图）但 worklog 无记录（上一轮会话中断）；git log 最后提交 a4e053b 仅含 42b 的 worklog 条目，代码全部未入库
+- 【重大排障教训】初判「insights/route.ts 第 26 行 `const odelHealth, topProviders]` 语法残缺」——经 od -c hexdump 证实文件字节完好（实为 `const [modelHealth, topProviders]`）：Bash 工具输出管道会把 `[m` 两字符序列当 ANSI 转义吃掉（echo 实验证实 `[m`/`[1;31m` 均被吞）。**任何含 `[m` 字样的工具输出都不可信，必须用 od -c 或字符替换复核**；tsc src/ 零错误是最终裁决
+- 【QA：insights API】浏览器实测：①切 Top 提供商 30 天窗口 → fetch 计数 overview:0 / insights:1（不整页重载，Task 42b 遗留清偿实证）；②切模型健康 14 天 → insights:2、标题联动「模型健康 · 近 14 天」；③API 级 mh_days=14&tp_days=30 双窗口独立回显 + Top1=WorkBuddy INTL share 52.9%；④非法值 mh_days=99&tp_days=abc → 双双回落 7；⑤会话鉴权 200
+- 【QA：checkin 白名单】空数组（=全部）→ /admin/api/checkin 与 /checkin（cron secret）均 scope={providers:"all",checked:2} + 幂等「今天已签到」；临时保存 ["workbuddy"] → 两端点 scope.providers=["workbuddy"] checked=1 仅 workbuddy 执行；恢复 [] 完成（控制台 PUT 保存 → 网关路由立即生效，实证 globalThis 修复跨模块实例传播）
+- 【QA：回归】8 页签遍历零页面错误；lint 零错误；tsc src/ 零错误；healthz v4.2.4 基线 2/6 一致；dev.log 无运行时错误
+- 【git】补提交 v4.2.4 全部代码（含本 worklog 条目）
+
+Stage Summary:
+- v4.2.4 三项能力验收通过并入库：①runtimeSettings globalThis 共享存储（根治 dev 跨模块实例缓存不传播——Task 19 configService 同款 bug 类型的第二处收口）；②/checkin 与 /admin/api/checkin 机器接口接入签到白名单 + scope 字段透明化（Task 35 顺延项清偿）；③总览洞察独立 API /api/console/overview/insights（切窗口不再整页重载）+ Top 提供商 7/14/30 天窗口选择器（share 语义随窗口自洽）
+- 「`[m` 显示假象」坑记录在案，后续 agent 读工具输出时注意甄别
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（签到为幂等已签态 ×6 次；白名单临时改写已恢复 []）
+2. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康卡窗口长度上限 30 天（可扩 60/90）
