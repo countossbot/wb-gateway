@@ -48,7 +48,16 @@ const INTL_FALLBACK_SYSTEM = "You are a helpful assistant.";
 //      Web 来源（带该标识）记为 "WorkBuddy"，无标识的 CLI/plugin 通道（copilot.tencent.com）记为 ""。
 // 网关对上游的全部请求（chat / token refresh / billing / checkin，CN 与 INTL 同构）统一携带该标识，
 // 使服务端记账侧可将网关流量归入「使用端 = WorkBuddy」。
-const WORKBUDDY_CLIENT_PLATFORM = "web";
+//
+// v4.6.3：INTL 版独立标识（用户指定）：国际站（www.codebuddy.ai）请求的使用端标识改为
+// "workbuddy ai"（WorkBuddy AI 产品名），CN 版（copilot.tencent.com / www.codebuddy.cn）保持
+// "web" 对齐 Web 端实测行为。按 provider 实例 region 分流 —— 同一 provider 内四通道
+//（chat / token refresh / billing / checkin）取值一致。
+const WORKBUDDY_CLIENT_PLATFORM_CN = "web";
+const WORKBUDDY_CLIENT_PLATFORM_INTL = "workbuddy ai";
+function workbuddyClientPlatform(region: "cn" | "intl"): string {
+  return region === "intl" ? WORKBUDDY_CLIENT_PLATFORM_INTL : WORKBUDDY_CLIENT_PLATFORM_CN;
+}
 
 // 会话粘性键：优先客户端透传的会话头；回退 system+tools 指纹
 // （同一编码会话内稳定；跨会话碰撞只影响落点、不影响正确性）。
@@ -264,7 +273,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
             Accept: "application/json",
             "X-Refresh-Token": refreshToken,
             "X-Auth-Refresh-Source": "workbuddy",
-            "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
+            "X-Client-Platform": workbuddyClientPlatform(this.region),
             "User-Agent": ep.userAgent,
             Origin: ep.origin,
             Referer: ep.referer,
@@ -424,7 +433,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
         Authorization: `Bearer ${tk}`,
         "X-User-Id": userId,
         "X-Product": "SaaS",
-        "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
+        "X-Client-Platform": workbuddyClientPlatform(this.region),
       };
       return await fetchWithProxy(
         ep.chat,
@@ -621,7 +630,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
             headers: {
               Authorization: `Bearer ${token}`,
               "X-User-Id": userId,
-              "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
+              "X-Client-Platform": workbuddyClientPlatform(this.region),
               "User-Agent": ep.userAgent,
               Origin: ep.origin,
               Referer: ep.referer,
@@ -758,7 +767,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
             headers: {
               Authorization: `Bearer ${token}`,
               "X-User-Id": userId,
-              "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
+              "X-Client-Platform": workbuddyClientPlatform(this.region),
               "Content-Type": "application/json",
               Accept: "application/json",
             },
