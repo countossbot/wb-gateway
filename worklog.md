@@ -1813,3 +1813,25 @@ Stage Summary:
 4. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；/checkin 与 /admin/api/checkin 机器接口未接签到白名单；balTrend 刷新按钮不重拉；模型健康卡窗口长度固定 7 天（数据已持久，可扩展 14/30 天选择器）
 5. 模型维度「空串=历史未细分」的天永远无法细分（日志已滚出）；如用户需要完整历史可导出备份后 overwrite 重导入（重建路径已支持模型维度）
 6. mock-upstream（3040）保持运行供后续巡检复用
+---
+Task ID: 42b（同轮追加）
+Agent: 主会话（Z.ai Code，持续迭代轮）
+Task: 乘 v4.2.3 持久化落地之势追加两项：模型健康窗口选择器（7/14/30 天）+ 刷新按钮重拉余额趋势（Task 40 遗留「balTrend 刷新不重拉」清偿）
+
+Work Log:
+- 【API】overview route 增 mh_days 查询参数（7|14|30 白名单，非法值回落 7；healthDays 长度参数化）；model_health 响应附带 windowDays 回显（前端以服务端值为准渲染）
+- 【UI】ModelHealthCard：头部三档切换按钮组（role=group + aria-pressed + title 说明；选中态 rose-100/rose-700 与卡片主题色一致）；标题「近 N 天」/空态/右侧统计「N 天 XX%」全部动态；柱宽从固定 w-2.5 改 flex-1 自适应（30 根柱自动变窄不溢出卡片）；tooltip 30 天跨月场景用完整 YYYY-MM-DD
+- 【前端状态】OverviewModule 增 mhWindow state；load 按窗口参数请求（useCallback 依赖 mhWindow → 切窗口自动重载，无需手动 load）；ModelHealthCard 受控组件（windowDays + onWindowChange）
+- 【balTrend 修复】余额趋势拉取从一次性 useEffect 抽出为 loadBalTrend 回调；总览刷新按钮 onClick 同步触发（旧实现刷新后余额快照/预计可用天数外推不更新——getBalance 实测会写当日新快照，刷新后趋势应有变化）
+- 【验证】浏览器：三档切换联动正确（7天标题/14天标题/30天标题 + 首行柱数 7/14/30 + API mh_days=30 返回 days=30）；切换后 fetch 计数确认重载；刷新按钮触发 1 次 balances/history（fetch instrumentation 计数）；8 页签回归零 console 错误；VLM 检查 30 天视图：标题/高亮按钮/30 细柱无溢出/统计无异常
+- 【验证】lint 零错误；tsc src/ 零错误
+- 【git】独立 commit 474c196（4 文件 +145/-40）
+
+Stage Summary:
+- 持久化聚合的直接红利兑现：窗口选择器零额外查询成本（同一张 UsageDaily 表按天数过滤）；Task 40 遗留的「balTrend 刷新不重拉」同步清偿
+- 版本维持 4.2.3（同轮增强不单独升版，VERSION 注释已含本特性描述）
+
+未解决问题与风险（下一阶段建议）:
+1. 切窗口会整页 overview 重载（含余额等全部数据）——数据量小可接受；如需极致可拆独立接口只拉 model_health
+2. Top 提供商排行卡仍固定 7 天（同范式可扩展窗口选择器，但 share 环比语义需同步设计，暂顺延）
+3. 其余遗留见 Task 42 主节
