@@ -1855,3 +1855,38 @@ Stage Summary:
 未解决问题与风险（下一阶段建议）:
 1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（签到为幂等已签态 ×6 次；白名单临时改写已恢复 []）
 2. 顺延项持续开放：标准适配器 getBalance 池形态余额查询（优先级低）；模型健康卡窗口长度上限 30 天（可扩 60/90）
+---
+Task ID: 44
+Agent: 主会话（Z.ai Code，持续迭代轮，trace: 1a0bc1e5e26e0a89-web-cron-review-202609201015）
+Task: 巡检验收 v4.2.4 中断遗留 → 新功能开发「虚拟密钥日配额」（密钥级成本护栏）；版本 4.2.4 → 4.3.0
+
+Work Log:
+- 【巡检】dev server 存活（但版本显示 4.2.4 而 worklog 记录止于 4.2.3）→ 发现工作树有上一轮被中断的未提交 v4.2.4 变更（8 文件修改 + insights 独立 API 2 新文件 + QA 截图），代码完整但 worklog/git 均未记录
+- 【重大排障教训：`[m` 显示假象】初判「insights/route.ts `const odelHealth, topProviders]` 语法残缺、overview.tsx `const hWindow, setMhWindow]` 残缺」——经 od -c hexdump 证实文件字节完好（实为 `const [modelHealth` / `const [mhWindow`）：**Bash 工具输出管道会把 `[m` 双字符序列当 ANSI 转义吃掉**（echo 实验证实）。任何含 `[m` 字样的工具输出不可信，必须 od -c 或 tsc 复核；tsc src/ 零错误是最终裁决
+- 【v4.2.4 验收】①insights API：切 Top 提供商 30 天窗口 fetch 计数 overview:0/insights:1（不整页重载）、模型健康 14 天联动、mh_days=14&tp_days=30 双窗口独立回显、非法值回落 7、会话鉴权 200；②checkin 白名单：空白名单两端点 scope={providers:"all",checked:2} 幂等；临时保存 ["workbuddy"] → scope.providers=["workbuddy"] checked=1（同时实证 globalThis 修复跨模块实例传播）；恢复 []；③8 页签零错误；④补记 Task 43 + git commit
+- 【新功能：虚拟密钥日配额（v4.3.0）】
+  - Schema：VirtualKey 增 dailyRequestLimit/dailyTokenLimit Int @default(0)（0=不限额，增量迁移零数据风险；init.sql 重新生成）
+  - 执行层：新 src/lib/gateway/auth/quota.ts —— enforceVirtualKeyQuota 在 body 读取+模型白名单之后、dispatch 之前预检：请求次限额到达即拒；token 限额按「已累计 ≥ 限额」预检（单请求自然越过量≈1 次请求用量，业界通行）；被拒请求零上游成本零日志写入（不存在越拒越超死锁）；429 + {error:{type:"rate_limit_error"}} + X-RateLimit-Limit/Remaining/Reset + Retry-After（本地零点重置秒数）
+  - 账本口径：UsageDaily 已落库行（day×apiKeyName 求和）+ requestLog.ts 新增 peekUsageDailyToday 内存缓冲读（消除 30s flush 盲区；同路由模块图内精确）；配额统计与控制台「今日统计」完全同源
+  - 接线：/v1/messages 与 /v1/chat/completions 两入口（master/cron 主体直通零开销）
+  - 配置层：VirtualKeyEntry 增字段 + configService 下发（>0 才携带）+ saveConfig upsert 全量覆盖（GET→POST 回环保留）+ backup 导入（旧备份缺省 0 兼容）
+  - 控制台 API：keys GET 回显双限额；POST/PUT sanitizeLimit 清洗（非负整数≤1 亿）；PUT 缺省保留现值（开关切换不误清限额），显式 0 清除
+  - UI：新增/编辑对话框「日配额（可选）」双输入（数字键盘 + aria-describedby 提示）；列表新「今日配额」列：双进度条（请求次 + token）三档色（绿<80/黄≥80/红≥100）+「已限额」红字 + 密钥名旁 violet Gauge「限额」徽标（tooltip 全语义）+ 未设限额「不限」淡态 + progressbar aria 完整；页脚口径说明更新
+  - /admin 规范页 auth.note 增配额语义文档（429 + 头组 + 重置规则）
+- 【e2e】tests/key-quota-e2e.ts 22/22 通过：A 请求次限额（3×200→429 头组全对→被拒不计数账本恒 3）；B token 限额（2×200=110tk→第 3 次 429 含 110/100）；C 不限额密钥 4 连 200；D 限额热更新双向（PUT 提高→200，降回→429）；E keys API 回显；F 自清理 + healthz 等价
+- 【e2e 排障记录】首轮 8 失败根因：mock-upstream 保留前缀规则 sk-quota-* → 429 insufficient_quota（Task 41 沉淀），测试提供商 apiKey 命名 sk-quota-e2e 撞中——改 sk-qa-quota-key；次轮 4 失败根因：**配额账本按密钥名持久累积**（与统计页同口径），同名重跑继承当日用量——改轮次唯一名（RUN 时间戳后缀）；「同名重建继承用量」语义本身正确（见风险节）
+- 【UI 验证】agent-browser 全流程：对话框双输入渲染 → 创建（注意：agent-browser 物理点击 Radix Dialog footer 按钮会静默落空三次复现，JS el.click() 走通——agent-browser 怪癖非应用 bug，React 合成事件正常）→ 列表 violet 徽标 + 红档 5/5 已限额 + 黄档 7/8 + 「不限」三态齐验（造数经 mock 上游 12 次真实调用）；VLM 截图六项检查全过（列存在/红档/黄档/徽标/不限/无布局缺陷）
+- 【验证矩阵】tsc src/ 零错误；lint 零错误；8 页签回归零页面错误；dev.log 无运行时错误；healthz v4.3.0 基线 2/6 一致；测试资产全清理（qa-quota-* 键/路由/提供商 + QA 截图按惯例清除）
+- 【git】两个独立 commit（v4.2.4 补提交 + v4.3.0 功能）
+
+Stage Summary:
+- v4.2.4 中断遗留完整验收入库（补 Task 43 记录）；新能力「虚拟密钥日配额」从 schema 到 UI 全链路落地并 22/22 e2e 验证；版本 4.3.0
+- 架构要点：配额账本与统计页同源（UsageDaily + peek 缓冲）；预检语义（被拒不计数 / token 单请求自然越过）；限额热更新走既有 config_version 传播链
+- 排障资产沉淀：「[m 显示假象」坑 + mock 保留前缀清单 + agent-browser Dialog footer 点击怪癖（用 JS click 规避）
+
+未解决问题与风险（下一阶段建议）:
+1. ⚠️ 破坏性 QA 禁令持续有效；本轮业务数据零触碰（qa-quota-*/qa-ui-quota* 全部自建自删；12 次经 mock 上游零成本调用；签到幂等已签态 ×6）
+2. 配额账本按密钥名累积：同名重建密钥继承当日用量（与全部统计页同口径，属一致语义而非 bug；如需「重建即重置」需引入 keyValue 维度记账，成本高暂不做）
+3. dev 模式跨路由模块实例（/v1/messages 与 /v1/chat/completions 各自 requestLog 实例）间仍有 30s 内理论盲区；生产单实例精确。文档已注明
+4. 首次部署本版本需 prisma db push（增量字段，无数据迁移风险）；运行中 dev server 需重启加载新 Prisma Client（本轮已验证：不重启会 PrismaClientValidationError 500）
+5. 顺延项持续开放：标准适配器 getBalance 池形态；模型健康 60/90 天窗口；UsageDaily 模型维度历史天回填工具；路由测试工具（控制台试跑调试）
