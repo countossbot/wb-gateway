@@ -19,6 +19,27 @@ interface TopModelRowShape {
   cachedTokens: number;
 }
 
+/** v4.2.1：Top 提供商行（近 7 天 UsageDaily providerId 维度聚合） */
+interface TopProviderRowShape {
+  providerId: string;
+  providerName: string;
+  requests: number;
+  okRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  /** 占 7 天总请求数份额（0-100，保留 1 位） */
+  share: number;
+}
+
+/** v4.2.1：模型健康行（近 7 天 RequestLog 按模型 × 日聚合；sparkline 数据源） */
+interface ModelHealthModelShape {
+  model: string;
+  points: Array<{ day: string; requests: number; okRequests: number }>;
+  requests7d: number;
+  okRequests7d: number;
+}
+
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
@@ -202,6 +223,74 @@ export async function GET(request: NextRequest) {
     { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0 }
   );
 
+  // v4.2.1：近 7 天 Top 提供商排行 —— 复用已拉取的 14 天 UsageDaily 行（trend7Rows）按
+  // providerId 聚合近 7 天（dayKeys7 命中行），零额外查询；剔除 providerId="" 的未命中行。
+  // 份额 share = 该提供商请求数 / 7 天全部请求数（含未命中行作为分母，忠实反映总盘子）。
+  const providerAgg = new Map<string, { requests: number; okRequests: number; inputTokens: number; outputTokens: number; cachedTokens: number }>();
+  let total7dRequests = 0;
+  for (const r of trend7Rows) {
+    if (!dayKeys7.includes(r.day)) continue;
+    total7dRequests += r.requests;
+    const key = r.providerId || "";
+    if (!key) continue; // 未命中提供商的行不参与排行，但计入分母
+    const b = providerAgg.get(key) || { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+    b.requests += r.requests;
+    b.okRequests += r.okRequests;
+    b.inputTokens += r.inputTokens;
+    b.outputTokens += r.outputTokens;
+    b.cachedTokens += r.cachedTokens;
+    providerAgg.set(key, b);
+  }
+  const topProviders: TopProviderRowShape[] = Array.from(providerAgg.entries())
+    .map(([providerId, b]) => ({
+      providerId,
+      providerName: providers.find((p) => p.id === providerId)?.name || providerId,
+      ...b,
+      share: total7dRequests > 0 ? Math.round((b.requests / total7dRequests) * 1000) / 10 : 0,
+    }))
+    .sort((a, b) => b.requests - a.requests)
+    .slice(0, 5);
+
+  // v4.2.1：模型健康 —— 近 7 天（含今日）RequestLog 按「对外模型 × 本地日」聚合，
+  // 每模型 7 个日点（requests/okRequests）供 sparkline 渲染；按 7 天请求数取 Top 6。
+  // 注意：受请求日志滚动窗口（5000 条）限制，超高流量下远端日可能被截断（卡片脚注已注明）。
+  const healthDays: string[] = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    return localDayKey(d);
+  });
+  const since7d = new Date();
+  since7d.setDate(since7d.getDate() - 6);
+  since7d.setHours(0, 0, 0, 0);
+  const healthRows = await db.requestLog.findMany({
+    where: { createdAt: { gte: since7d } },
+    select: { model: true, createdAt: true, status: true },
+  });
+  const healthMap = new Map<string, Array<{ requests: number; okRequests: number }>>();
+  for (const row of healthRows) {
+    const idx = healthDays.indexOf(localDayKey(row.createdAt));
+    if (idx < 0) continue;
+    let arr = healthMap.get(row.model);
+    if (!arr) {
+      arr = healthDays.map(() => ({ requests: 0, okRequests: 0 }));
+      healthMap.set(row.model, arr);
+    }
+    arr[idx].requests += 1;
+    if ((row.status ?? 0) >= 200 && (row.status ?? 0) < 400) arr[idx].okRequests += 1;
+  }
+  const modelHealth: { days: string[]; models: ModelHealthModelShape[] } = {
+    days: healthDays,
+    models: Array.from(healthMap.entries())
+      .map(([model, points]) => ({
+        model,
+        points: points.map((p, i) => ({ day: healthDays[i], ...p })),
+        requests7d: points.reduce((s, p) => s + p.requests, 0),
+        okRequests7d: points.reduce((s, p) => s + p.okRequests, 0),
+      }))
+      .sort((a, b) => b.requests7d - a.requests7d)
+      .slice(0, 6),
+  };
+
   // v3.9.1：上游前缀缓存命中统计改为 RequestLog 持久聚合（修复「命中率一直 0%」）。
   // 旧实现 snapshotCacheStats() 为进程内存计数，dev 重启/HMR 后清零导致页面恒显 0%；
   // 新口径：分母 = 上游报告了精确 usage 的请求（usageExact=true），分子 = 其中 cachedTokens>0 者
@@ -292,6 +381,10 @@ export async function GET(request: NextRequest) {
     trend24h,
     trend7d,
     trend7d_prev: trend7dPrev,
+    /** v4.2.1：近 7 天 Top 提供商排行（UsageDaily 聚合，Top 5 按请求数） */
+    top_providers_7d: topProviders,
+    /** v4.2.1：模型健康 sparkline（近 7 天模型 × 日成功/失败点阵，Top 6 按请求数） */
+    model_health: modelHealth,
     last_checkin: lastCheckinLog
       ? {
           time: lastCheckinLog.createdAt.toISOString(),

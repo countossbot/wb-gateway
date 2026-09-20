@@ -9,6 +9,7 @@ import {
   Building2,
   Check,
   ChevronDown,
+  CircleAlert,
   Eye,
   Gift,
   Globe,
@@ -1095,10 +1096,20 @@ export function ProvidersModule({
                   </div>
                 )}
               </div>
-
-              {formError && <p className="text-sm text-red-600">{formError}</p>}
             </div>
           </ScrollArea>
+
+          {/* v4.2.1：表单错误固定在滚动区外、footer 上方 —— 长表单无需滚到底即可看到校验错误
+              （此前错误渲染在表单末尾，id 未填等校验错误在长表单下不可见，被误以为「点保存没反应」） */}
+          {formError && (
+            <div
+              role="alert"
+              className="mt-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+            >
+              <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+              <span className="min-w-0 break-words">{formError}</span>
+            </div>
+          )}
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>
