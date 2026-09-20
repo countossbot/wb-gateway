@@ -82,8 +82,55 @@ const dispatcherCache = new BoundedMap<string, Dispatcher>({
   },
 });
 
+// ---- v4.2.0（R2）：上游超时显式化 ----
+// 问题：undici 默认 bodyTimeout=300s / headersTimeout=300s 隐藏在全局 fetch 里，
+// 长思考模型（3 分钟以上零字节）会被静默切断且无从调优。
+// 方案：所有出站 fetch（直连/HTTP 代理/SOCKS 代理）统一从 runtimeSettings 读超时，
+// 显式注入 Agent；设置页可热调（保存后 invalidateProxyDispatchers 重建）。
+interface UpstreamTimeouts {
+  headersTimeout: number;
+  bodyTimeout: number;
+}
+
+/** v4.2.0：从 runtimeSettings 读上游超时（同步缓存读，零开销）；非法值由 clampInt 兑底 */
+function upstreamTimeoutsFromSettings(): UpstreamTimeouts {
+  const s = getRuntimeSettings();
+  return {
+    headersTimeout: s.upstreamHeadersTimeoutMs > 0 ? s.upstreamHeadersTimeoutMs : 300_000,
+    bodyTimeout: s.upstreamBodyTimeoutMs > 0 ? s.upstreamBodyTimeoutMs : 600_000,
+  };
+}
+
+// 直连 dispatcher：按超时参数缓存（参数变更时旧实例 close 后替换；
+// close() 优雅等待在途请求完成，不中断活动流）。
+let directAgentCache: { key: string; agent: Agent } | null = null;
+
+function getDirectDispatcher(): Agent {
+  const t = upstreamTimeoutsFromSettings();
+  const key = `${t.headersTimeout}|${t.bodyTimeout}`;
+  if (directAgentCache && directAgentCache.key === key) return directAgentCache.agent;
+  const agent = new Agent({
+    ...t,
+    // 连接池保活：与代理路径一致（签到与长流式共用，提升连接复用）
+    keepAliveTimeout: 60_000,
+    keepAliveMaxTimeout: 600_000,
+  });
+  if (directAgentCache) {
+    try {
+      void directAgentCache.agent.close().catch(() => {});
+    } catch {
+      /* noop */
+    }
+  }
+  directAgentCache = { key, agent };
+  return agent;
+}
+
 function getDispatcher(proxyUrl: string): Dispatcher | null {
-  const cached = dispatcherCache.get(proxyUrl);
+  const t = upstreamTimeoutsFromSettings();
+  // 超时参数入缓存键：设置页热调后旧 dispatcher 退役（BoundedMap 驱逐时 close）
+  const cacheKey = `${proxyUrl}\u0000${t.headersTimeout}|${t.bodyTimeout}`;
+  const cached = dispatcherCache.get(cacheKey);
   if (cached) return cached;
 
   const parsed = parseProxyUrl(proxyUrl);
@@ -93,30 +140,50 @@ function getDispatcher(proxyUrl: string): Dispatcher | null {
   if (parsed.protocol === "socks5" || parsed.protocol === "socks5h") {
     // v3.6.0 修复：socksDispatcher 原生实现 undici Dispatcher（socks5h = 远程 DNS 解析）；
     // 此前的 SocksProxyAgent 是 node:http Agent，undici fetch 调用其 dispatch() 直接抛错
-    dispatcher = socksDispatcher({
-      type: 5,
-      host: parsed.host,
-      port: parseInt(parsed.port, 10) || 1080,
-      userId: parsed.username,
-      password: parsed.password,
-    }) as unknown as Dispatcher;
+    // v4.2.0：第二参数透传 Agent.Options（headersTimeout/bodyTimeout 显式化）
+    dispatcher = socksDispatcher(
+      {
+        type: 5,
+        host: parsed.host,
+        port: parseInt(parsed.port, 10) || 1080,
+        userId: parsed.username,
+        password: parsed.password,
+      },
+      {
+        ...t,
+        keepAliveTimeout: 60_000,
+        keepAliveMaxTimeout: 600_000,
+      }
+    ) as unknown as Dispatcher;
   } else {
     dispatcher = new ProxyAgent({
       uri: proxyUrl.startsWith("https://") || proxyUrl.startsWith("http://") ? proxyUrl : `http://${proxyUrl}`,
       // Token/连接池保活：签到与长流式共用
       keepAliveTimeout: 60_000,
       keepAliveMaxTimeout: 600_000,
+      // v4.2.0：上游超时显式化（原依赖 undici 隐式默认 300s）
+      headersTimeout: t.headersTimeout,
+      bodyTimeout: t.bodyTimeout,
     });
   }
-  dispatcherCache.set(proxyUrl, dispatcher);
+  dispatcherCache.set(cacheKey, dispatcher);
   return dispatcher;
 }
 
 // 测试/配置变更后清理旧 dispatcher（热生效：不重启进程换代理）
 // v3.9.3：clear() 已通过 onEvict 逐个 close（BoundedMap 语义），不再手动遍历
+// v4.2.0：直连 agent 同步退役（超时参数变更后重建）
 export function invalidateProxyDispatchers(): void {
   dispatcherCache.clear();
   poolRotateIndex = 0;
+  if (directAgentCache) {
+    try {
+      void directAgentCache.agent.close().catch(() => {});
+    } catch {
+      /* noop */
+    }
+    directAgentCache = null;
+  }
 }
 
 // 限流时轮换到代理池下一个地址（原 opencode rotateProxy 全局化）
@@ -177,6 +244,12 @@ function resolveProxyFor(targetUrl: string, scope: OutboundScope | null): string
 /**
  * 统一出站 fetch：注入代理 dispatcher，其余语义与原生 fetch 一致。
  * 所有上游调用（callChat / 余额 / 签到 / 续签 / 模型拉取 / 连通性测试）必须走此出口。
+ *
+ * v4.2.0（R2）：直连路径同样走 undici fetch + 显式超时 Agent ——
+ * 此前直连用全局 fetch，bodyTimeout/headersTimeout 依赖 undici 隐式默认（300s），
+ * 长思考模型流式被静默切断且不可调；现在三条路径（直连/HTTP 代理/SOCKS）统一
+ * 从 runtimeSettings 读超时，设置页热生效。旁注：走 undici 原生 fetch 也顺带
+ * 绕开了 Next.js 对全局 fetch 的补丁（网关出站本就不该被 Next 缓存层接管）。
  */
 export async function fetchWithProxy(
   url: string,
@@ -184,15 +257,20 @@ export async function fetchWithProxy(
   scope: OutboundScope | null = null
 ): Promise<Response> {
   const proxyUrl = resolveProxyFor(url, scope);
+  const { fetch: undiciFetch } = await import("undici");
   if (!proxyUrl) {
-    return fetch(url, init);
+    const direct = getDirectDispatcher();
+    const fetchInit = init as Record<string, unknown>;
+    return (await undiciFetch(url, { ...fetchInit, dispatcher: direct } as never)) as unknown as Response;
   }
   const dispatcher = getDispatcher(proxyUrl);
   if (!dispatcher) {
-    return fetch(url, init);
+    // 代理地址不合法 → 回落直连（与旧行为一致：parse 失败不阻断出站）
+    const direct = getDirectDispatcher();
+    const fetchInit = init as Record<string, unknown>;
+    return (await undiciFetch(url, { ...fetchInit, dispatcher: direct } as never)) as unknown as Response;
   }
   // undici fetch：显式传 dispatcher，不污染全局
-  const { fetch: undiciFetch } = await import("undici");
   const fetchInit = init as Record<string, unknown>;
   const initWithDispatcher: Record<string, unknown> = { ...fetchInit, dispatcher };
   return (await undiciFetch(url, initWithDispatcher as never)) as unknown as Response;

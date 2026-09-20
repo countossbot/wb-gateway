@@ -456,6 +456,243 @@ export function passthroughUsageFromJson(text: string): StreamUsageReport | null
   return { inputTokens: 0, outputTokens: estimateTokensFromChars(contentChars), cachedTokens: 0, upstreamExact: false, source: "estimated" };
 }
 
+// ---- v4.2.0（R6）：透传 SSE 保活 ping + 停滞熔断 ----
+// 结构性缺口（Task 33 诊断 R6）：keep-alive ping 与停滞熔断此前只存在于转译分支
+// （streamOpenAIToAnthropic）；OpenAI 协议透传与 Anthropic 原生透传既无 ping 也无熔断，
+// 上游静默时客户端方向零字节 → 中间层（nginx 默认 60s read timeout / 云 LB idle timeout）
+// 先断连接；上游挂死则挂到 undici bodyTimeout。
+//
+// 保活帧协议适配：
+//   - Anthropic 客户端：独立 ping 事件（`event: ping\ndata: {"type":"ping"}`，Anthropic
+//     协议原生帧，Claude Code 等客户端原生忽略；与转译分支 KEEP_ALIVE_BYTES 同款）
+//   - OpenAI 客户端：SSE 注释行（`: keep-alive`，SSE 规范合法注释，所有合规解析器忽略）
+//
+// 注入安全性：仅在「事件边界」注入（上一完整行是空行）——半开事件（data: 行已到、
+// 结束空行未到）期间注入会提前派发事件，多行 data 事件（JSON 跨行）场景会被截断。
+// 事件边界注入：注释行被解析器完全忽略，独立 ping 事件本身就是完整事件。
+const SSE_COMMENT_PING_BYTES = textEncoder.encode(": keep-alive\n\n");
+
+export interface PassthroughKeepAliveOptions {
+  /** 停滞熔断阈值（ms）；缺省用 UPSTREAM_STALL_MS */
+  stallMs?: number;
+  /** ping 间隔（ms，默认 4000，最小 1000） */
+  pingIntervalMs?: number;
+  /** 客户端协议（决定保活帧格式）：anthropic=ping 事件 / openai=SSE 注释行 */
+  clientProtocol: "openai" | "anthropic";
+  /** 客户端请求（signal 级联中断上游） */
+  request?: Request | null;
+}
+
+/**
+ * v4.2.0（R6）：透传 SSE 流的保活 + 熔断 + 旁路 usage 统计（替代裸 passthroughUsageTee）。
+ * 返回新的 ReadableStream —— 上游字节原样透传，仅在安全时机插入保活帧；
+ * 上游停滞超阈值时补协议终帧后干净收尾：
+ *   - OpenAI：`data: [DONE]`（客户端按正常完成处理，内容为已收到的部分）
+ *   - Anthropic：`event: message_stop`（与转译分支熔断语义一致）
+ * 客户端中断（request.signal abort）级联取消上游读取并释放全部资源。
+ */
+export function passthroughSseWithKeepAlive(
+  body: ReadableStream<Uint8Array>,
+  onUsage: (report: StreamUsageReport) => void,
+  options: PassthroughKeepAliveOptions
+): ReadableStream<Uint8Array> {
+  const stallMs =
+    Number.isFinite(options?.stallMs) && (options?.stallMs as number) > 0
+      ? (options.stallMs as number)
+      : UPSTREAM_STALL_MS;
+  const pingIntervalMs =
+    Number.isFinite(options?.pingIntervalMs) && (options?.pingIntervalMs as number) >= 1000
+      ? (options.pingIntervalMs as number)
+      : 4000;
+  const isAnthropicClient = options?.clientProtocol === "anthropic";
+  // 排障开关：UAG_SSE_DEBUG=1 时输出生效参数（默认静默）
+  if (process.env.UAG_SSE_DEBUG === "1") {
+    console.log(`[SSE-Debug] passthrough: stallMs=${stallMs} pingIntervalMs=${pingIntervalMs} client=${isAnthropicClient ? "anthropic" : "openai"}`);
+  }
+  const pingBytes = isAnthropicClient ? KEEP_ALIVE_BYTES : SSE_COMMENT_PING_BYTES;
+  const stallCloseBytes = isAnthropicClient
+    ? EVENT_MSG_STOP_BYTES
+    : textEncoder.encode("data: [DONE]\n\n");
+
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const reader = body.getReader();
+
+  // ---- 旁路 usage 统计（与 passthroughUsageTee 同款口径） ----
+  let reported = false;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedTokens = 0;
+  let exact = false;
+  let contentChars = 0;
+  const decoder = new TextDecoder();
+  const scanner = new ChunkLineScanner();
+  let atEventBoundary = true; // 初始处于事件边界（流刚起步）
+
+  const scanLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return;
+    const payload = trimmed.slice(5).trim();
+    if (!payload || payload === "[DONE]") return;
+    try {
+      const parsed = JSON.parse(payload) as ParsedChunk;
+      const usage = usageFromFrame(parsed);
+      if (usage) {
+        exact = true;
+        if (usage.input > inputTokens) inputTokens = usage.input;
+        if (usage.output > outputTokens) outputTokens = usage.output;
+        if (usage.cached > cachedTokens) cachedTokens = usage.cached;
+      }
+      const delta = parsed.choices?.[0]?.delta?.content;
+      if (typeof delta === "string") contentChars += delta.length;
+      const msgContent = parsed.choices?.[0]?.message?.content;
+      if (typeof msgContent === "string") contentChars += msgContent.length;
+    } catch {
+      /* 非 JSON 行忽略 */
+    }
+  };
+
+  const report = (): void => {
+    if (reported) return;
+    reported = true;
+    try {
+      onUsage({
+        inputTokens: exact ? inputTokens : 0,
+        outputTokens: exact ? outputTokens : estimateTokensFromChars(contentChars),
+        cachedTokens,
+        upstreamExact: exact,
+        source: exact ? "upstreamUsageFrame" : "estimated",
+      });
+    } catch {
+      /* noop */
+    }
+  };
+
+  // ---- 保活 + 熔断定时器 ----
+  let stalled = false;
+  let finished = false;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const cleanupTimer = (): void => {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+  let lastUpstreamByteAt = Date.now();
+
+  timer = setInterval(() => {
+    if (finished) {
+      cleanupTimer();
+      return;
+    }
+    // 停滞熔断：上游长时间零字节 → cancel 上游读取（读循环以 done 收尾），
+    // finally 分支补协议终帧后干净关闭（比裸断连/挂到 bodyTimeout 对客户端更友好）
+    if (!stalled && Date.now() - lastUpstreamByteAt > stallMs) {
+      stalled = true;
+      console.warn(
+        `[Passthrough Stall] No upstream bytes for ${stallMs}ms, closing SSE stream (${isAnthropicClient ? "anthropic" : "openai"} protocol)`
+      );
+      cleanupTimer();
+      try {
+        void reader.cancel(new Error("Upstream stalled")).catch(() => {});
+      } catch {
+        /* noop */
+      }
+      return;
+    }
+    // 保活 ping：仅在事件边界注入（半开事件期间注入会截断多行 data 帧，见函数头注释）
+    if (stalled || !atEventBoundary) return;
+    try {
+      void writer.write(pingBytes).catch(() => {
+        /* 下游已断：读循环 write 分支会 break */
+      });
+    } catch {
+      /* noop */
+    }
+  }, pingIntervalMs);
+
+  // ---- 客户端中断级联（Ctrl+C / 停止生成 / 中间层断开） ----
+  const clientSignal = options?.request?.signal ?? null;
+  const onClientAbort = () => {
+    cleanupTimer();
+    try {
+      void reader.cancel(new Error("Client aborted")).catch(() => {});
+    } catch {
+      /* noop */
+    }
+    try {
+      void writer.abort(new Error("Client aborted")).catch(() => {});
+    } catch {
+      /* noop */
+    }
+  };
+  if (clientSignal) {
+    if (clientSignal.aborted) onClientAbort();
+    else clientSignal.addEventListener("abort", onClientAbort, { once: true });
+  }
+
+  // ---- 透传读循环 ----
+  (async () => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        lastUpstreamByteAt = Date.now();
+        try {
+          scanner.push(decoder.decode(value, { stream: true }));
+          for (let line = scanner.nextLine(); line !== null; line = scanner.nextLine()) {
+            if (line === "") {
+              atEventBoundary = true; // 空行 = 事件结束
+            } else {
+              atEventBoundary = false;
+              scanLine(line);
+            }
+          }
+          // 关键：chunk 以半行结尾（无完整行产出，循环体不执行，边界标记停留在旧值）
+          // → 残行未闭合期间必须视为非边界，否则 ping 会注入到半行中间截断帧
+          if (scanner.bufferedChars > 0) atEventBoundary = false;
+        } catch {
+          /* 统计失败不影响透传 */
+        }
+        try {
+          await writer.write(value);
+        } catch {
+          break; // 下游已断（abort 级联或框架关闭）
+        }
+      }
+    } catch {
+      /* 上游错误：走 finally 收尾 */
+    } finally {
+      finished = true;
+      cleanupTimer();
+      if (clientSignal) clientSignal.removeEventListener("abort", onClientAbort);
+      // 停滞熔断收尾：补协议终帧（客户端拿到干净的流结束，内容为已收到的部分）
+      if (stalled) {
+        try {
+          await writer.write(stallCloseBytes);
+        } catch {
+          /* noop */
+        }
+      }
+      // 残行扫描（上游意外截断时最后的半行可能有 usage）
+      try {
+        const remainder = scanner.drainRemainder();
+        if (remainder.trim()) scanLine(remainder);
+      } catch {
+        /* noop */
+      }
+      report();
+      try {
+        await writer.close();
+      } catch {
+        /* noop */
+      }
+    }
+  })();
+
+  return readable;
+}
+
 export function streamOpenAIToAnthropic(
   upstreamResponse: Response,
   requestedModel: string,
@@ -1110,12 +1347,50 @@ export async function aggregateOpenAIToChatJson(
   requestedModel: string,
   extraHeaders: StreamDebugHeaders = {},
   request: Request | null = null,
-  onUsage?: (report: StreamUsageReport) => void
+  onUsage?: (report: StreamUsageReport) => void,
+  options: { stallMs?: number } = {}
 ): Promise<Response> {
   const completionId = "chatcmpl-" + Math.random().toString(36).substring(2, 15);
   const created = Math.floor(Date.now() / 1000);
   const reader = (upstreamResponse.body as ReadableStream<Uint8Array>).getReader();
   const decoder = new TextDecoder();
+  // v4.2.0（R6）：SSE→JSON 聚合路径的停滞熔断 —— 此前挂死会一直等到 undici bodyTimeout；
+  // 现在：上游零字节超阈值 → cancel 上游 → 用已聚合内容拼装 JSON 响应（附警告注记）
+  const stallMs =
+    Number.isFinite(options?.stallMs) && (options?.stallMs as number) > 0
+      ? (options.stallMs as number)
+      : 0;
+  let stalled = false;
+  let lastUpstreamByteAt = Date.now();
+  /** 带停滞看门狗的 read：每 1s 轮询一次字节间隔；停滞 → cancel 上游并以 done 收尾 */
+  const readWithStallWatchdog = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    let pending = reader.read();
+    for (;;) {
+      const winner = await Promise.race([
+        pending,
+        new Promise<"tick">((resolve) => {
+          const t = setTimeout(() => resolve("tick"), 1000);
+          (t as unknown as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      if (winner !== "tick") return winner as ReadableStreamReadResult<Uint8Array>;
+      if (Date.now() - lastUpstreamByteAt > (stallMs as number)) {
+        stalled = true;
+        console.warn(`[Aggregate Stall] No upstream bytes for ${stallMs}ms, aggregating partial SSE to JSON for model "${requestedModel}"`);
+        try {
+          void reader.cancel(new Error("Upstream stalled")).catch(() => {});
+        } catch {
+          /* noop */
+        }
+        // cancel 后 pending read 以 done/错误收尾（不等会泄漏未决 promise；releaseLock 也会拒绝）
+        try {
+          return (await pending) as ReadableStreamReadResult<Uint8Array>;
+        } catch {
+          return { done: true, value: undefined } as ReadableStreamReadResult<Uint8Array>;
+        }
+      }
+    }
+  };
 
   let accumulated = "";
   let accumulatedThinking = "";
@@ -1175,8 +1450,9 @@ export async function aggregateOpenAIToChatJson(
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = stallMs > 0 ? await readWithStallWatchdog() : await reader.read();
       if (done) break;
+      lastUpstreamByteAt = Date.now();
       const text = decoder.decode(value, { stream: true });
       // 逐行扫 data: 帧（与 formatOpenAIToAnthropicJson 同款解析口径）
       let lineStart = 0;
@@ -1210,6 +1486,12 @@ export async function aggregateOpenAIToChatJson(
         accumulated = accumulated || trimmed; // 纯文本兜底
       }
     }
+  }
+
+  // v4.2.0：停滞熔断时在正文附警告注记（与转译分支 [Gateway Warning: ...] 口径一致）
+  if (stalled) {
+    const warn = `[Gateway Warning: Upstream stalled, no data for ${Math.round((stallMs as number) / 1000)}s, response may be truncated]`;
+    accumulated = accumulated ? `${accumulated}\n${warn}` : warn;
   }
 
   const finalContent = accumulated || upstreamNotice || " ";

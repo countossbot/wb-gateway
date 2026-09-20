@@ -6,8 +6,9 @@ import { isModelLevelError } from "../core/scheduler";
 import { hasCallChat, hasCallMessages, wantsStreamedChat } from "../core/contract";
 import { runFailover, type FailOutcome } from "../core/failover";
 import { transformAnthropicToOpenAI, HttpError } from "./transform";
-import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson, aggregateOpenAIToChatJson, passthroughUsageTee, passthroughUsageFromJson, type StreamUsageReport } from "./stream";
+import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson, aggregateOpenAIToChatJson, passthroughSseWithKeepAlive, passthroughUsageFromJson, type StreamUsageReport } from "./stream";
 import { recordRequestLog } from "../config/requestLog";
+import { getRuntimeSettings } from "../config/runtimeSettings";
 import type { ProviderFleet } from "../core/fleet";
 import type { GatewayConfig, RouteCandidateConfig } from "../core/types";
 
@@ -31,6 +32,12 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
   const startedAt = Date.now();
   const isAnthropic = protocol === "anthropic";
   const routes = config.routes || {};
+
+  // v4.2.0（R1）：上游停滞熔断阈值可配置（设置页热生效；0 = 默认 180s）。
+  // 三条流式路径统一消费：转译 streamOpenAIToAnthropic / 透传 passthroughSseWithKeepAlive /
+  // 聚合 aggregateOpenAIToChatJson。同步缓存读，零开销。
+  const settingsStallMs = getRuntimeSettings().streamStallMs;
+  const stallMs = settingsStallMs > 0 ? settingsStallMs : undefined;
 
   // 记账（请求日志）：无论成败都落库，字段含模型/命中提供商/耗时/状态码/Token
   // v3.0.2：usage 支持（上游精确优先，估算兑底）；流式路径延迟到流结束时落库
@@ -264,6 +271,7 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
                 debugHeaders,
                 {
                   request,
+                  stallMs,
                   onUsage: (usage) => writeLog(200, usage),
                 }
               ),
@@ -302,11 +310,18 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
                 model,
                 debugHeaders,
                 request ?? null,
-                onUsage
+                onUsage,
+                { stallMs }
               ),
             };
           }
-          const teedBody = passthroughUsageTee(upstreamRes.body, onUsage);
+          // v4.2.0（R6）：透传 SSE 补保活 ping（协议适配帧）+ 停滞熔断（补协议终帧干净收尾）
+          // + 旁路 usage 统计 —— 替代裸 passthroughUsageTee（无 ping 无熔断的结构缺口）
+          const teedBody = passthroughSseWithKeepAlive(upstreamRes.body, onUsage, {
+            stallMs,
+            clientProtocol: isAnthropic ? "anthropic" : "openai",
+            request,
+          });
           return {
             done: new Response(teedBody, {
               status: 200,

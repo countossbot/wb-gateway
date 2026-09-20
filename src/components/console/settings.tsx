@@ -158,6 +158,10 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
   const [auditRetention, setAuditRetention] = React.useState("90");
   // v3.7.0：余额快照保留期（字符串态供 Select；保存时归一为整数）
   const [balanceRetention, setBalanceRetention] = React.useState("365");
+  // v4.2.0：SSE 流式保活与上游超时（秒态展示/编辑，保存时转 ms；与后端 clampInt 范围一致）
+  const [stallSec, setStallSec] = React.useState("180"); // 0 = 默认 180s
+  const [headersTimeoutSec, setHeadersTimeoutSec] = React.useState("300");
+  const [bodyTimeoutSec, setBodyTimeoutSec] = React.useState("600");
   const [sysSaving, setSysSaving] = React.useState(false);
   const [sysError, setSysError] = React.useState("");
 
@@ -215,6 +219,10 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
       setListenLan(!!s.listenLan);
       setMaxTurns(String(s.maxContextTurns ?? 0));
       setLogLevel(s.logLevel || "info");
+      // v4.2.0：ms → 秒展示（0 = 默认语义保留展示为 0）
+      setStallSec(String(Math.round((s.streamStallMs ?? 180_000) / 1000)));
+      setHeadersTimeoutSec(String(Math.round((s.upstreamHeadersTimeoutMs ?? 300_000) / 1000)));
+      setBodyTimeoutSec(String(Math.round((s.upstreamBodyTimeoutMs ?? 600_000) / 1000)));
       setUsageProvider(s.usageProviderId || "");
       setAuditRetention(String(s.auditRetentionDays ?? 90));
       setBalanceRetention(String(s.balanceRetentionDays ?? 365));
@@ -363,6 +371,22 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
       setSysError("余额快照保留期必须为 0~3650 的整数（0 = 永久保留）");
       return;
     }
+    // v4.2.0：SSE/超时校验（秒态；范围与后端 ms 校验一致）
+    const stall = Number(stallSec);
+    if (!Number.isInteger(stall) || (stall !== 0 && (stall < 10 || stall > 900))) {
+      setSysError("停滞熔断阈值必须为 0（默认 180s）或 10~900 的整数秒");
+      return;
+    }
+    const headersT = Number(headersTimeoutSec);
+    if (!Number.isInteger(headersT) || headersT < 5 || headersT > 3600) {
+      setSysError("响应头超时必须为 5~3600 的整数秒");
+      return;
+    }
+    const bodyT = Number(bodyTimeoutSec);
+    if (!Number.isInteger(bodyT) || bodyT < 10 || bodyT > 3600) {
+      setSysError("body 字节间隔超时必须为 10~3600 的整数秒");
+      return;
+    }
     setSysSaving(true);
     try {
       await apiPut("/api/console/settings", {
@@ -372,6 +396,9 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
         logLevel,
         auditRetentionDays: Math.floor(retention),
         balanceRetentionDays: Math.floor(balRetention),
+        streamStallMs: stall * 1000,
+        upstreamHeadersTimeoutMs: headersT * 1000,
+        upstreamBodyTimeoutMs: bodyT * 1000,
         ...(usageProvider ? { usageProviderId: usageProvider } : {}),
       });
       setNotice("系统设置已保存（热生效）");
@@ -791,7 +818,7 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
       <Section
         icon={<Wifi className="size-4.5" />}
         title="系统参数"
-        description="CORS / 监听范围 / 上下文控制 / 日志级别 / 用量统计来源"
+        description="CORS / 监听范围 / 上下文控制 / 日志级别 / 用量统计来源 / SSE 流式与超时"
         actions={
           <Button size="sm" className="bg-stone-900 hover:bg-stone-800" onClick={saveSystem} disabled={sysSaving}>
             {sysSaving ? <Loader2 className="animate-spin" /> : <Save />}
@@ -891,6 +918,65 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">余额历史快照清理阈值（0 = 永久；趋势图窗口最长 14 天，默认 365 天足够）</p>
+            </div>
+          </div>
+
+          {/* v4.2.0：SSE 流式保活与上游超时（三条流式路径统一：转译 / 透传 / SSE→JSON 聚合） */}
+          <div className="space-y-3 rounded-lg border border-stone-200 bg-stone-50/60 p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-stone-700">SSE 流式保活与上游超时</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  透传流每 4s 注入协议适配保活帧（Anthropic ping 事件 / OpenAI 注释行）防中间层空闲断连；上游零字节超阈值时补协议终帧后干净收尾
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="sys-stall">停滞熔断阈值（秒）</Label>
+                <Input
+                  id="sys-stall"
+                  type="number"
+                  min={0}
+                  max={900}
+                  value={stallSec}
+                  onChange={(e) => setStallSec(e.target.value)}
+                  aria-describedby="sys-stall-hint"
+                />
+                <p id="sys-stall-hint" className="text-xs text-muted-foreground">
+                  0 = 默认 180s；长思考模型可调大（有效 10~900）
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sys-headers-timeout">响应头超时（秒）</Label>
+                <Input
+                  id="sys-headers-timeout"
+                  type="number"
+                  min={5}
+                  max={3600}
+                  value={headersTimeoutSec}
+                  onChange={(e) => setHeadersTimeoutSec(e.target.value)}
+                  aria-describedby="sys-headers-timeout-hint"
+                />
+                <p id="sys-headers-timeout-hint" className="text-xs text-muted-foreground">
+                  等待上游响应头的上限（非流式慢模型勿调低；有效 5~3600）
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sys-body-timeout">Body 字节间隔超时（秒）</Label>
+                <Input
+                  id="sys-body-timeout"
+                  type="number"
+                  min={10}
+                  max={3600}
+                  value={bodyTimeoutSec}
+                  onChange={(e) => setBodyTimeoutSec(e.target.value)}
+                  aria-describedby="sys-body-timeout-hint"
+                />
+                <p id="sys-body-timeout-hint" className="text-xs text-muted-foreground">
+                  上游流式字节最大间隔安全网（默认 600s；有效 10~3600）
+                </p>
+              </div>
             </div>
           </div>
 
