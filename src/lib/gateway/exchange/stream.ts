@@ -472,6 +472,12 @@ export function passthroughUsageFromJson(text: string): StreamUsageReport | null
 // 事件边界注入：注释行被解析器完全忽略，独立 ping 事件本身就是完整事件。
 const SSE_COMMENT_PING_BYTES = textEncoder.encode(": keep-alive\n\n");
 
+// v4.6.1：上游读错误标记注释行 —— passthrough 层捕获到上游 body 读异常时，在干净关闭前
+// 注入此注释（SSE 规范合法注释，所有合规解析器忽略，对 chat 透传客户端零影响）。
+// 下游协议转译层（/v1/responses）识别该标记后发 response.failed，而非把截断内容伪装成
+// 正常完成 —— 解决「上游断流被透传层吸收成干净 EOF，转译层无从区分」的观测断层。
+const UPSTREAM_ERROR_MARKER_PREFIX = "uag-upstream-error";
+
 export interface PassthroughKeepAliveOptions {
   /** 停滞熔断阈值（ms）；缺省用 UPSTREAM_STALL_MS */
   stallMs?: number;
@@ -632,6 +638,9 @@ export function passthroughSseWithKeepAlive(
   }
 
   // ---- 透传读循环 ----
+  // v4.6.1：捕获上游 body 读异常（连接重置/截断等）—— 与停滞熔断（合成 [DONE]）和
+  // 客户端中断（writer.abort）区分，在 finally 向下游发错误标记注释行后再干净关闭。
+  let upstreamFailedMessage: string | null = null;
   (async () => {
     try {
       while (true) {
@@ -660,8 +669,13 @@ export function passthroughSseWithKeepAlive(
           break; // 下游已断（abort 级联或框架关闭）
         }
       }
-    } catch {
-      /* 上游错误：走 finally 收尾 */
+    } catch (err) {
+      /* 上游读错误：记录消息（finally 发标记 + 干净收尾） */
+      const message = (err instanceof Error ? err.message : String(err)) || "upstream read failed";
+      // cancel(reason) 的 reason 不应计入（停滞熔断/客户端中断已有各自专履收尾路径）
+      if (message !== "Upstream stalled" && message !== "Client aborted") {
+        upstreamFailedMessage = message.replace(/\s+/g, " ").slice(0, 180);
+      }
     } finally {
       finished = true;
       cleanupTimer();
@@ -670,6 +684,13 @@ export function passthroughSseWithKeepAlive(
       if (stalled) {
         try {
           await writer.write(stallCloseBytes);
+        } catch {
+          /* noop */
+        }
+      } else if (upstreamFailedMessage) {
+        // v4.6.1：上游读异常 → 注入错误标记注释行（合规解析器忽略；转译层据此时 response.failed）
+        try {
+          await writer.write(textEncoder.encode(`: ${UPSTREAM_ERROR_MARKER_PREFIX} ${upstreamFailedMessage}\n\n`));
         } catch {
           /* noop */
         }

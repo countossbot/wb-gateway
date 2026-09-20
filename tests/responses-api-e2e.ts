@@ -365,6 +365,134 @@ try {
     const msgs9 = stats9.lastChatRequest?.messages as Array<any> || [];
     check("C9 instructions → 首条 system 消息", msgs9[0]?.role === "system" && msgs9[0]?.content === "You are a helpful gateway tester.", JSON.stringify(msgs9[0] || {}).slice(0, 120));
   }
+
+  // ================= E. 严格 Responses SSE 生命周期（v4.6.1） =================
+  // 契约：流绝不以裸 EOF 结束 —— 任何结束路径必须先发协议终点事件
+  //（completed / incomplete / failed），每个事件携带单调递增 sequence_number。
+  console.log("\n[E] 严格 SSE 生命周期：终点事件保证 + sequence_number + in_progress");
+  {
+    const parseSse = (raw: string) => {
+      const events: string[] = [];
+      const payloads = new Map<string, any[]>();
+      for (const block of raw.split("\n\n")) {
+        const evLine = block.split("\n").find((l) => l.startsWith("event:"));
+        const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
+        if (!evLine || !dataLine) continue;
+        const ev = evLine.slice(6).trim();
+        events.push(ev);
+        try {
+          const payload = JSON.parse(dataLine.slice(5).trim());
+          if (!payloads.has(ev)) payloads.set(ev, []);
+          payloads.get(ev)!.push(payload);
+        } catch { /* 非 JSON 帧（keep-alive 注释等） */ }
+      }
+      return { events, payloads };
+    };
+
+    // E1 正常流：created → in_progress 起始 + sequence_number 单调递增（起点 0）+ completed 终点
+    {
+      const r = await postResponses({ model: "qa-resp-model", input: [userMsg("Lifecycle normal stream")], stream: true }, KEY);
+      const raw = await r.text();
+      const { events, payloads } = parseSse(raw);
+      check("E1 HTTP 200 + text/event-stream", r.status === 200 && (r.headers.get("content-type") || "").includes("text/event-stream"), `${r.status} ${r.headers.get("content-type")}`);
+      check("E1 事件序列以 created → in_progress 起始", events[0] === "response.created" && events[1] === "response.in_progress", events.slice(0, 3).join(","));
+      check("E1 终点为 response.completed", events[events.length - 1] === "response.completed", events.join(","));
+      const perTypeCount = new Map<string, number>();
+      const seqs: unknown[] = [];
+      for (const ev of events) {
+        const n = perTypeCount.get(ev) || 0;
+        perTypeCount.set(ev, n + 1);
+        seqs.push(payloads.get(ev)![n]?.sequence_number);
+      }
+      const monotonic = seqs.every((s, i) => typeof s === "number" && (i === 0 || (s as number) > (seqs[i - 1] as number)));
+      check("E1 sequence_number 严格单调递增（起点 0，无缺号）", seqs[0] === 0 && monotonic, JSON.stringify(seqs));
+    }
+
+    // E2 finish_reason=length → response.incomplete 终点（incomplete_details 回明原因）
+    {
+      const r = await postResponses({ model: "qa-resp-model", input: [userMsg("USE_LENGTH_TRUNCATE please")], stream: true }, KEY);
+      const raw = await r.text();
+      const { events, payloads } = parseSse(raw);
+      const inc = (payloads.get("response.incomplete") || [])[0];
+      check("E2 length → 终点为 response.incomplete（非 completed）", events[events.length - 1] === "response.incomplete", events.join(","));
+      check("E2 incomplete 事件含 status=incomplete + reason=max_output_tokens",
+        inc?.response?.status === "incomplete" && inc?.response?.incomplete_details?.reason === "max_output_tokens",
+        JSON.stringify(inc?.response?.incomplete_details));
+      check("E2 无 completed 事件（截断不伪装完成）", !events.includes("response.completed"), "");
+      // 非流式 parity
+      const r2 = await postResponses({ model: "qa-resp-model", input: [userMsg("USE_LENGTH_TRUNCATE non-stream")] }, KEY);
+      const b2 = await r2.json() as Record<string, any>;
+      check("E2 非流式 length → status=incomplete + reason", b2.status === "incomplete" && b2.incomplete_details?.reason === "max_output_tokens", JSON.stringify({ status: b2.status, d: b2.incomplete_details }));
+    }
+
+    // E3 content_filter → response.incomplete（reason=content_filter）+ 非流式 parity
+    {
+      const r = await postResponses({ model: "qa-resp-model", input: [userMsg("USE_CONTENT_FILTER please")], stream: true }, KEY);
+      const raw = await r.text();
+      const { events, payloads } = parseSse(raw);
+      const inc = (payloads.get("response.incomplete") || [])[0];
+      check("E3 content_filter → response.incomplete（reason=content_filter）",
+        events[events.length - 1] === "response.incomplete" && inc?.response?.incomplete_details?.reason === "content_filter",
+        events.join(","));
+      const r2 = await postResponses({ model: "qa-resp-model", input: [userMsg("USE_CONTENT_FILTER non-stream")] }, KEY);
+      const b2 = await r2.json() as Record<string, any>;
+      check("E3 非流式 content_filter → status=incomplete + reason", b2.status === "incomplete" && b2.incomplete_details?.reason === "content_filter", JSON.stringify({ status: b2.status, d: b2.incomplete_details }));
+    }
+
+    // E4 上游真断流（raw TCP 3041：发 2 帧后无终止块 destroy socket）→ response.failed 终点
+    //    链路：undici 读异常 → passthrough 层 uag-upstream-error 标记 → 转译层 response.failed
+    {
+      const provRaw = await post("/api/console/providers", {
+        id: "qa-resp-raw", name: "qa-resp-raw", type: "openai", enabled: true,
+        config: { baseUrl: "http://127.0.0.1:3041/v1", apiKey: "sk-qa-resp-raw-upstream" },
+      });
+      const routeRaw = await post("/api/console/routes", {
+        model: "qa-resp-raw-model", candidates: [{ providerId: "qa-resp-raw", model: "mock-chat" }],
+      });
+      check("E4 前置：raw 断流提供商/路由创建", provRaw.status === 200 && routeRaw.status === 200, `${provRaw.status}/${routeRaw.status}`);
+      const r = await postResponses({ model: "qa-resp-raw-model", input: [userMsg("ABORT_RAW please")], stream: true }, KEY);
+      const raw = await r.text();
+      const { events, payloads } = parseSse(raw);
+      check("E4 HTTP 200（错误在流内以 response.failed 表达而非断流）", r.status === 200, `${r.status}`);
+      check("E4 终点为 response.failed", events[events.length - 1] === "response.failed", events.join(","));
+      const failed = (payloads.get("response.failed") || [])[0];
+      check("E4 failed 事件含 status=failed + error 信息",
+        failed?.response?.status === "failed" && typeof failed?.response?.error?.message === "string" && failed.response.error.message.length > 0,
+        JSON.stringify(failed?.response?.error));
+      check("E4 无 completed/incomplete 事件（截断不伪装完成）", !events.includes("response.completed") && !events.includes("response.incomplete"), "");
+      check("E4 已流出部分文本生命周期闭合（output_text.done 在 failed 前）",
+        events.includes("response.output_text.done") && events.indexOf("response.output_text.done") < events.indexOf("response.failed"),
+        events.join(","));
+      check("E4 部分文本保留（raw 注入的 partial text）",
+        (payloads.get("response.output_text.delta") || []).map((d: any) => String(d.delta || "")).join("").includes("partial text before"),
+        "");
+    }
+
+    // E5 流内 error 帧（INBAND_ERROR：data 帧携带 {"error":{...}}）→ response.failed 终点
+    {
+      const r = await postResponses({ model: "qa-resp-model", input: [userMsg("INBAND_ERROR please")], stream: true }, KEY);
+      const raw = await r.text();
+      const { events, payloads } = parseSse(raw);
+      const failed = (payloads.get("response.failed") || [])[0];
+      check("E5 流内 error 帧 → 终点为 response.failed",
+        events[events.length - 1] === "response.failed" && /in-band/i.test(String(failed?.response?.error?.message || "")),
+        `${events.join(",")} | ${JSON.stringify(failed?.response?.error)}`);
+      check("E5 error.code 透传（mock_inband）", failed?.response?.error?.code === "mock_inband", JSON.stringify(failed?.response?.error));
+    }
+
+    // E6 优雅截断无 finish 帧（ABORT_STREAM：Bun 将流错误转为干净 chunked 终止 → 客户端 clean EOF）
+    //    → 流尾兜底：无 finish 帧也保证 response.completed 终点（永不裸 EOF）
+    {
+      const r = await postResponses({ model: "qa-resp-model", input: [userMsg("ABORT_STREAM please")], stream: true }, KEY);
+      const raw = await r.text();
+      const { events, payloads } = parseSse(raw);
+      check("E6 终点为 response.completed（无 finish 帧的流尾兜底）", events[events.length - 1] === "response.completed", events.join(","));
+      const deltas = (payloads.get("response.output_text.delta") || []).map((d: any) => String(d.delta || "")).join("");
+      check("E6 截断前的部分文本已流出", deltas.includes("Hello from mock upstream stream"), deltas.slice(0, 80));
+      const completed = (payloads.get("response.completed") || [])[0];
+      check("E6 completed 事件含部分文本与 usage", completed?.response?.output_text === deltas && typeof completed?.response?.usage?.input_tokens === "number", JSON.stringify(completed?.response?.usage));
+    }
+  }
 } finally {
   // ---- 清理：自建资产全删 + mock 复位 + healthz 等价 ----
   console.log("\n[F] 清理自建资产");
@@ -375,8 +503,12 @@ try {
   }
   const routeDel = await fetch(`${BASE}/api/console/routes?model=qa-resp-model`, { method: "DELETE", headers: { cookie } });
   console.log("  delete route qa-resp-model:", routeDel.status);
+  const routeRawDel = await fetch(`${BASE}/api/console/routes?model=qa-resp-raw-model`, { method: "DELETE", headers: { cookie } });
+  console.log("  delete route qa-resp-raw-model:", routeRawDel.status);
   const provDel = await fetch(`${BASE}/api/console/providers?id=qa-resp`, { method: "DELETE", headers: { cookie } });
   console.log("  delete provider qa-resp:", provDel.status);
+  const provRawDel = await fetch(`${BASE}/api/console/providers?id=qa-resp-raw`, { method: "DELETE", headers: { cookie } });
+  console.log("  delete provider qa-resp-raw:", provRawDel.status);
   await db.$disconnect();
   await fetch(`${MOCK}/__stats/reset`, { method: "POST" });
   const healthzAfter = await (await fetch(`${BASE}/healthz`)).json();
