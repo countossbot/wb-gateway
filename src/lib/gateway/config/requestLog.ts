@@ -3,6 +3,7 @@
 // v3.0.6：同步写 UsageDaily 按日聚合（日 × 提供商 × 密钥维度），统计不再受滚动窗口截断。
 // v4.2.3：聚合维度增加 model（模型健康/Top 模型排行的跨滚动窗口根本解）。
 import { db } from "@/lib/db";
+import { loadPricingMap, estimateRowCost } from "@/lib/console/pricing";
 import type { Prisma } from "@prisma/client";
 
 export interface RequestLogEntry {
@@ -541,8 +542,10 @@ export async function exportRequestLogsCsv(opts: RequestLogQuery): Promise<{ csv
 
   const header = [
     "时间", "模型", "协议", "提供商", "账号", "调用方密钥", "状态码", "耗时(ms)",
-    "流式", "输入tokens", "输出tokens", "缓存命中tokens", "用量来源", "错误",
+    "流式", "输入tokens", "输出tokens", "缓存命中tokens", "用量来源", "估算成本$", "错误",
   ];
+  // v4.4.0：行级成本估算（ModelPricing × tokens；未配置单价 → 空串）
+  const pricing = await loadPricingMap();
   const lines = [header.map(csvCell).join(",")];
   for (const r of rows) {
     lines.push([
@@ -559,6 +562,7 @@ export async function exportRequestLogsCsv(opts: RequestLogQuery): Promise<{ csv
       r.outputTokens ?? "",
       r.cachedTokens ?? "",
       r.usageExact === true ? "精确(上游usage)" : r.usageExact === false ? "估算(字符折算)" : "未记录",
+      estimateRowCost(pricing, r.model, r.inputTokens ?? 0, r.outputTokens ?? 0, r.cachedTokens ?? 0)?.toFixed(6) ?? "",
       r.error ?? "",
     ].map(csvCell).join(","));
   }

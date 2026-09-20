@@ -9,6 +9,7 @@ import { getProviderFleet } from "@/lib/gateway/core/fleet";
 import { VERSION } from "@/lib/gateway/config/configService";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
 import { computeModelHealthData, computeSloData, normalizeWindowDays } from "@/lib/console/overviewInsights";
+import { loadPricingMap, estimateRowCost, EMPTY_COST_AGG, type CostAgg } from "@/lib/console/pricing";
 
 /** v3.9.0：Top 模型行结构（与 types.ts TopModelRow 同形；API 内部局部定义避免跨层依赖） */
 interface TopModelRowShape {
@@ -31,6 +32,10 @@ interface TopProviderRowShape {
   cachedTokens: number;
   /** 占 7 天总请求数份额（0-100，保留 1 位） */
   share: number;
+  /** v4.4.0：近 7 天估算成本（$） */
+  cost: number;
+  /** v4.4.0：已计价请求数 */
+  pricedRequests: number;
 }
 
 export const dynamic = "force-dynamic";
@@ -219,6 +224,8 @@ export async function GET(request: NextRequest) {
       providerId,
       providerName: providers.find((p) => p.id === providerId)?.name || providerId,
       ...b,
+      cost: 0, // v4.4.0：占位，后续成本块按 costByProvider 回填
+      pricedRequests: 0,
       share: total7dRequests > 0 ? Math.round((b.requests / total7dRequests) * 1000) / 10 : 0,
     }))
     .sort((a, b) => b.requests - a.requests)
@@ -238,6 +245,88 @@ export async function GET(request: NextRequest) {
   // v4.3.2：服务质量 SLO 种子（默认 24h 窗口；前端切窗口由独立 insights API 承接）——
   // 延迟分位数 / 成功率 / 流式占比 / 延迟分布直方图（RequestLog 聚合）。
   const slo = await computeSloData(24);
+
+  // v4.4.0：用量成本估算（ModelPricing 单价表 × UsageDaily 模型维度）——
+  // 复用已拉取的 todayRows / trend7Rows（含 model 维度），仅新增一次单价表整表查询。
+  // 口径见 lib/console/pricing.ts 头注释：未配置单价的模型归「未计价」，绝不估值。
+  const pricingMap = await loadPricingMap();
+  const costAggFromRows = (
+    rows: Array<{ model: string; requests: number; inputTokens: number; outputTokens: number; cachedTokens: number }>
+  ): CostAgg => {
+    const agg = { ...EMPTY_COST_AGG };
+    for (const r of rows) {
+      const c = estimateRowCost(pricingMap, r.model, r.inputTokens, r.outputTokens, r.cachedTokens);
+      if (c === null) agg.unpricedRequests += r.requests;
+      else {
+        agg.cost += c;
+        agg.pricedRequests += r.requests;
+      }
+    }
+    agg.cost = Math.round(agg.cost * 1e6) / 1e6;
+    return agg;
+  };
+
+  // 今日成本（复用 todayRows）
+  const todayCostAgg = costAggFromRows(todayRows);
+
+  // 近 7 天逐日成本趋势 + 窗口合计（复用 trend7Rows，按 day 归桶后逐模型计价）
+  const costByDay = new Map<string, CostAgg>();
+  const costByModel = new Map<string, { model: string; cost: number; requests: number }>();
+  const costByProvider = new Map<string, CostAgg>();
+  const cost7dRows: Array<{ day: string; model: string; requests: number; inputTokens: number; outputTokens: number; cachedTokens: number }> = [];
+  const cost7dPrevRows: typeof cost7dRows = [];
+  for (const r of trend7Rows) {
+    const target = dayKeys7.includes(r.day) ? cost7dRows : prevKeys7.includes(r.day) ? cost7dPrevRows : null;
+    if (target) target.push(r);
+    if (!dayKeys7.includes(r.day)) continue;
+    // 逐桶累加（byDay 供趋势；byModel 供 Top 成本模型 chips；byProvider 供 Top 提供商成本列）
+    const c = estimateRowCost(pricingMap, r.model, r.inputTokens, r.outputTokens, r.cachedTokens);
+    const dayAgg = costByDay.get(r.day) || { ...EMPTY_COST_AGG };
+    const provAgg = costByProvider.get(r.providerId || "") || { ...EMPTY_COST_AGG };
+    if (c === null) {
+      dayAgg.unpricedRequests += r.requests;
+      provAgg.unpricedRequests += r.requests;
+    } else {
+      dayAgg.cost += c;
+      dayAgg.pricedRequests += r.requests;
+      provAgg.cost += c;
+      provAgg.pricedRequests += r.requests;
+      if (r.model) {
+        const mb = costByModel.get(r.model) || { model: r.model, cost: 0, requests: 0 };
+        mb.cost += c;
+        mb.requests += r.requests;
+        costByModel.set(r.model, mb);
+      }
+    }
+    costByDay.set(r.day, dayAgg);
+    costByProvider.set(r.providerId || "", provAgg);
+  }
+  const cost7dTrend = dayKeys7.map((day) => {
+    const a = costByDay.get(day) || { ...EMPTY_COST_AGG };
+    return { day, cost: Math.round(a.cost * 1e6) / 1e6, unpricedRequests: a.unpricedRequests };
+  });
+  const cost7dAgg = costAggFromRows(cost7dRows);
+  const cost7dPrevAgg = costAggFromRows(cost7dPrevRows);
+  const topCostModels = Array.from(costByModel.values())
+    .map((m) => ({ ...m, cost: Math.round(m.cost * 1e6) / 1e6 }))
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 3);
+
+  // v4.4.0：Top 提供商种子行附成本（与 computeTopProviders 同口径；此处复用 trend7Rows 零额外查询）
+  for (const row of topProviders) {
+    const a = costByProvider.get(row.providerId);
+    row.cost = a ? Math.round(a.cost * 1e6) / 1e6 : 0;
+    row.pricedRequests = a ? a.pricedRequests : 0;
+  }
+
+  const cost = {
+    today: { cost: todayCostAgg.cost, pricedRequests: todayCostAgg.pricedRequests, unpricedRequests: todayCostAgg.unpricedRequests },
+    window7d: { cost: cost7dAgg.cost, pricedRequests: cost7dAgg.pricedRequests, unpricedRequests: cost7dAgg.unpricedRequests },
+    window7dPrev: { cost: cost7dPrevAgg.cost },
+    trend7d: cost7dTrend,
+    topModels: topCostModels,
+    pricingRows: pricingMap.size,
+  };
 
   // v3.9.1：上游前缀缓存命中统计改为 RequestLog 持久聚合（修复「命中率一直 0%」）。
   // 旧实现 snapshotCacheStats() 为进程内存计数，dev 重启/HMR 后清零导致页面恒显 0%；
@@ -335,6 +424,8 @@ export async function GET(request: NextRequest) {
     model_health: modelHealth,
     /** v4.3.2：服务质量 SLO（近 24h 种子；切窗口走独立 insights API） */
     slo,
+    /** v4.4.0：用量成本估算（今日 + 近 7 天窗口 + 逐日趋势 + Top 成本模型；单价未配置时 cost=0 且 unpricedRequests 完整回显） */
+    cost,
     last_checkin: lastCheckinLog
       ? {
           time: lastCheckinLog.createdAt.toISOString(),

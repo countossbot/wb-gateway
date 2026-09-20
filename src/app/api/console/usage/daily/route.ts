@@ -10,20 +10,23 @@
 //   range: { from, to },              // 日期范围（含端点）
 //   rows: [                           // 原始明细行（day × provider × key × model）
 //     { day, providerId, apiKeyName, model, requests, okRequests, successRate,
-//       inputTokens, outputTokens, cachedTokens }
+//       inputTokens, outputTokens, cachedTokens, cost }
 //   ],
 //   pivot: {                          // 透视汇总（各维度对 model 维度行求和）
-//     byProvider: [ { providerId, requests, okRequests, tokens... } ],  // 降序
-//     byKey:      [ { apiKeyName,  requests, okRequests, tokens... } ],  // 降序
-//     byModel:    [ { model,       requests, okRequests, tokens... } ],  // 降序（v4.2.3；model="" 排除）
-//     byDay:      [ { day, requests, okRequests, tokens... } ],          // 升序
-//     totals:     { requests, okRequests, inputTokens, outputTokens, cachedTokens }
+//     byProvider: [ { providerId, requests, okRequests, tokens..., cost, pricedRequests, unpricedRequests } ],  // 降序
+//     byKey:      [ { apiKeyName,  requests, okRequests, tokens..., cost } ],  // 降序
+//     byModel:    [ { model,       requests, okRequests, tokens..., cost } ],  // 降序（v4.2.3；model="" 排除）
+//     byDay:      [ { day, requests, okRequests, tokens..., cost } ],          // 升序
+//     totals:     { requests, okRequests, inputTokens, outputTokens, cachedTokens, cost, pricedRequests, unpricedRequests }
 //   }
 // }
+// v4.4.0：cost 字段 = 按 ModelPricing 单价表估算（$/百万 tokens；未配置单价 → null 行级 /
+// 桶级计价请求数 0）；桶级成本由模型维度逐行累加后再汇总（不能由聚合后的 token 直接乘单价）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
+import { loadPricingMap, estimateRowCost, EMPTY_COST_AGG, type CostAgg } from "@/lib/console/pricing";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +42,7 @@ interface AggBucket {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  cost: CostAgg; // v4.4.0：桶级成本聚合（模型维度逐行计价后归入桶）
 }
 
 export async function GET(request: NextRequest) {
@@ -71,36 +75,67 @@ export async function GET(request: NextRequest) {
     return fail(`UsageDaily 查询失败: ${e instanceof Error ? e.message : String(e)}`, 500);
   }
 
-  const totals = { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  // v4.4.0：单价表一次性加载（模型维度逐行计价 → 各桶累加）
+  const pricing = await loadPricingMap();
+  const rowCosts = new Map<number, number | null>(); // rows 下标 → 行级成本
+  for (let i = 0; i < rows.length; i++) {
+    rowCosts.set(i, estimateRowCost(pricing, rows[i].model, rows[i].inputTokens, rows[i].outputTokens, rows[i].cachedTokens));
+  }
+
+  const totals = { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: { ...EMPTY_COST_AGG } };
   const byProvider = new Map<string, AggBucket>();
   const byKey = new Map<string, AggBucket>();
   const byModel = new Map<string, AggBucket>();
   const byDay = new Map<string, AggBucket>();
 
-  const bump = (m: Map<string, AggBucket>, k: string, r: (typeof rows)[number]) => {
-    const b = m.get(k) || { requests: 0, okRequests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  const emptyBucket = (): AggBucket => ({
+    requests: 0,
+    okRequests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedTokens: 0,
+    cost: { ...EMPTY_COST_AGG },
+  });
+
+  const bump = (m: Map<string, AggBucket>, k: string, r: (typeof rows)[number], cost: number | null) => {
+    const b = m.get(k) || emptyBucket();
     b.requests += r.requests;
     b.okRequests += r.okRequests;
     b.inputTokens += r.inputTokens;
     b.outputTokens += r.outputTokens;
     b.cachedTokens += r.cachedTokens;
+    if (cost === null) {
+      b.cost.unpricedRequests += r.requests;
+    } else {
+      b.cost.cost += cost;
+      b.cost.pricedRequests += r.requests;
+    }
     m.set(k, b);
   };
 
-  for (const r of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const cost = rowCosts.get(i) ?? null;
     totals.requests += r.requests;
     totals.okRequests += r.okRequests;
     totals.inputTokens += r.inputTokens;
     totals.outputTokens += r.outputTokens;
     totals.cachedTokens += r.cachedTokens;
-    bump(byProvider, r.providerId || "(unknown)", r);
-    bump(byKey, r.apiKeyName || "(unknown)", r);
-    if (r.model) bump(byModel, r.model, r); // v4.2.3：模型维度透视（空串=历史未细分，不单列）
-    bump(byDay, r.day, r);
+    if (cost === null) {
+      totals.cost.unpricedRequests += r.requests;
+    } else {
+      totals.cost.cost += cost;
+      totals.cost.pricedRequests += r.requests;
+    }
+    bump(byProvider, r.providerId || "(unknown)", r, cost);
+    bump(byKey, r.apiKeyName || "(unknown)", r, cost);
+    if (r.model) bump(byModel, r.model, r, cost); // v4.2.3：模型维度透视（空串=历史未细分，不单列）
+    bump(byDay, r.day, r, cost);
   }
 
   const withRate = (x: AggBucket): AggBucket & { successRate: number | null } => ({
     ...x,
+    cost: { ...x.cost, cost: Math.round(x.cost.cost * 1e6) / 1e6 },
     successRate: x.requests > 0 ? Math.round((x.okRequests / x.requests) * 100) : null,
   });
 
@@ -117,10 +152,12 @@ export async function GET(request: NextRequest) {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([name, v]) => ({ day: name, ...withRate(v) }));
 
+  const totalsOut = withRate(totals);
+
   return ok({
     days: Math.abs(dayDiff(fromKey, toKey)) + 1,
     range: { from: fromKey, to: toKey },
-    rows: rows.map((r) => ({
+    rows: rows.map((r, i) => ({
       day: r.day,
       providerId: r.providerId,
       apiKeyName: r.apiKeyName,
@@ -131,13 +168,15 @@ export async function GET(request: NextRequest) {
       inputTokens: r.inputTokens,
       outputTokens: r.outputTokens,
       cachedTokens: r.cachedTokens,
+      // v4.4.0：行级成本（模型未配置单价 → null）
+      cost: rowCosts.get(i) ?? null,
     })),
     pivot: {
       byProvider: byProviderRows,
       byKey: byKeyRows,
       byModel: byModelRows,
       byDay: byDayRows,
-      totals: withRate({ ...totals }),
+      totals: totalsOut,
     },
   });
 }

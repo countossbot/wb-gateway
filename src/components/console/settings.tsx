@@ -51,6 +51,8 @@ import {
   PageHeader,
   TagInput,
 } from "@/components/console/ui";
+import { Section } from "@/components/console/settings-sections";
+import { PricingSection } from "@/components/console/pricing-section";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
 import { relativeTime } from "@/lib/console/format";
 import type {
@@ -71,35 +73,6 @@ const PROXY_TEST_MODE_LABEL: Record<ProxyTestRecord["mode"], string> = {
   global: "生效配置",
 };
 
-function Section({
-  icon,
-  title,
-  description,
-  children,
-  actions,
-}: {
-  icon?: React.ReactNode;
-  title: string;
-  description?: string;
-  children: React.ReactNode;
-  actions?: React.ReactNode;
-}) {
-  return (
-    <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4 lg:p-6">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5">
-          {icon && <span className="flex size-9 items-center justify-center rounded-lg bg-stone-100 text-stone-600">{icon}</span>}
-          <div>
-            <h2 className="text-sm font-semibold text-stone-900">{title}</h2>
-            {description && <p className="text-xs text-muted-foreground">{description}</p>}
-          </div>
-        </div>
-        {actions}
-      </div>
-      {children}
-    </section>
-  );
-}
 
 // v3.2.0：操作审计类型
 interface AuditEntry {
@@ -1004,6 +977,9 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
           用于 /admin/api/*（Master Key）与 /checkin 定时触发（Cron Secret，降权）。再生成后使用旧密钥的脚本将全部失效。
         </p>
       </Section>
+
+      {/* ---------- 模型单价 · 成本估算（v4.4.0）---------- */}
+      <PricingSection />
 
       {/* ---------- 操作审计（v3.2.0，v3.2.2 增保留期清理）---------- */}
       <Section
