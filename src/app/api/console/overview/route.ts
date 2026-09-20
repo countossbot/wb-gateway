@@ -232,12 +232,15 @@ export async function GET(request: NextRequest) {
     .slice(0, 5);
 
   // v4.2.3：模型健康改读 UsageDaily 模型维度（跨滚动窗口根本解，Task 40 起顺延项清偿）——
-  // 近 7 天（含今日）按「对外模型 × 本地日」聚合，每模型 7 个日点
-  // （requests/okRequests）供 sparkline 渲染；按 7 天请求数取 Top 6。
+  // 窗口长度可配（mh_days=7|14|30，默认 7；v4.2.3b：数据已持久，长窗口零成本），
+  // 近 N 天（含今日）按「对外模型 × 本地日」聚合，每模型 N 个日点
+  // （requests/okRequests）供 sparkline 渲染；按窗口内请求数取 Top 6。
   // v4.2.3 前历史行（model=""）不参与；新增流量自然细分；超高流量下不再受滚动窗口截断。
-  const healthDays: string[] = Array.from({ length: 7 }, (_, i) => {
+  const mhDaysParam = Number(request.nextUrl.searchParams.get("mh_days"));
+  const mhWindow = mhDaysParam === 14 || mhDaysParam === 30 ? mhDaysParam : 7;
+  const healthDays: string[] = Array.from({ length: mhWindow }, (_, i) => {
     const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
+    d.setDate(d.getDate() - (mhWindow - 1 - i));
     return localDayKey(d);
   });
   const healthRows = await db.usageDaily.findMany({
@@ -256,8 +259,9 @@ export async function GET(request: NextRequest) {
     arr[idx].requests += row.requests;
     arr[idx].okRequests += row.okRequests;
   }
-  const modelHealth: { days: string[]; models: ModelHealthModelShape[] } = {
+  const modelHealth: { days: string[]; models: ModelHealthModelShape[]; windowDays?: number } = {
     days: healthDays,
+    windowDays: mhWindow,
     models: Array.from(healthMap.entries())
       .map(([model, points]) => ({
         model,
