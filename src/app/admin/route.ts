@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
           type: "Bearer Token, x-api-key, or Console Session Cookie",
           required_key: "MASTER_KEY",
           header: "Authorization: Bearer <MASTER_KEY>",
-          note: "Web console sessions (uag_session cookie) are also accepted on /admin/api/*. Virtual keys (client role) may carry optional daily quotas (dailyRequestLimit / dailyTokenLimit in virtual_keys entries since v4.3.0): when a key exhausts its local-day quota, gateway entrypoints /v1/messages and /v1/chat/completions return 429 with rate_limit_error and standard X-RateLimit-Limit / X-RateLimit-Remaining / X-RateLimit-Reset / Retry-After headers (quota resets at local midnight; rejected requests are not counted). Since v4.5.0 virtual keys may also carry a monthly cost budget (monthlyCostLimit, USD, estimated basis): when the key's current-month estimated cost (UsageDaily month rows x ModelPricing per-model rates; unpriced models excluded) reaches the budget, entrypoints return 429 with rate_limit_error plus X-Budget-Limit / X-Budget-Remaining / X-Budget-Reset / Retry-After headers (budget resets at start of next local month; rejected requests are not counted).",
+          note: "Web console sessions (uag_session cookie) are also accepted on /admin/api/*. Virtual keys (client role) may carry optional daily quotas (dailyRequestLimit / dailyTokenLimit in virtual_keys entries since v4.3.0): when a key exhausts its local-day quota, gateway entrypoints /v1/messages, /v1/chat/completions and /v1/responses return 429 with rate_limit_error and standard X-RateLimit-Limit / X-RateLimit-Remaining / X-RateLimit-Reset / Retry-After headers (quota resets at local midnight; rejected requests are not counted). Since v4.5.0 virtual keys may also carry a monthly cost budget (monthlyCostLimit, USD, estimated basis): when the key's current-month estimated cost (UsageDaily month rows x ModelPricing per-model rates; unpriced models excluded) reaches the budget, entrypoints return 429 with rate_limit_error plus X-Budget-Limit / X-Budget-Remaining / X-Budget-Reset / Retry-After headers (budget resets at start of next local month; rejected requests are not counted).",
         },
         endpoints: [
           {
@@ -111,6 +111,12 @@ export async function GET(request: NextRequest) {
           { path: "/v1/models", method: "GET", description: "OpenAI-compatible models catalog (requires API Key)" },
           { path: "/v1/messages", method: "POST", description: "Anthropic Messages protocol exchange (Claude Code)" },
           { path: "/v1/chat/completions", method: "POST", description: "OpenAI Chat Completions protocol exchange" },
+          {
+            path: "/v1/responses",
+            method: "POST",
+            description:
+              "OpenAI Responses API protocol exchange (Codex CLI / Responses SDK), translated to Chat Completions upstream (v4.6.0). Stateless: previous_response_id / item_reference are rejected with 400 — replay full history in input. Server-side OpenAI tools (web_search / web_search_preview / code_interpreter / computer_use_preview / local_shell) are stripped with graceful degradation instead of rejection: every dropped tool type is listed in the X-Gateway-Dropped-Tools response header (both JSON and SSE) and logged as a warning; forced tool_choice (\"required\" or a function object) is downgraded to \"auto\" when no tools remain. Conversation history (input items) is translated to canonical Chat Completions form: function_call / custom_tool_call / local_shell_call items pair with their outputs, adjacent parallel calls are merged into a single multi-tool_call assistant message, orphan tool results are dropped, and unanswered calls (interrupted turns) receive a synthetic tool result — so strict upstream pairing validation (e.g. 11148 tool_call_sequence_broken) never rejects a replayed session. Streaming requests receive a full Responses SSE event sequence (response.created → output_item.added → output_text.delta → output_item.done → response.completed).",
+          },
         ],
         authenticated,
       },

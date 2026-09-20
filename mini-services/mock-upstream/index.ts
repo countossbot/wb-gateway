@@ -9,14 +9,68 @@
 //     sk-bad-*   → 401 invalid_api_key（验证网关账号级切换 + 冷却）
 //     sk-quota-* → 429 quota exceeded（验证惩罚性退避）
 //     正常 key → 响应正文附 [key:后4位] 指纹（验证轮换落点均匀）
-//     GET /__stats 返回 { cancelledCount, perKey: {key: count} }
+//     GET /__stats 返回 { cancelledCount, perKey, lastChatRequest }
 //     POST /__stats/reset 清零（测试隔离）
+//   v4.6.0 Responses 入站端点验证支撑：
+//     严格 tool_calls 配对校验（复刻真实严格上游 11148 tool_call_sequence_broken 行为）：
+//       - 悬空 tool_call（无结果）/ 孤儿 tool 结果 / 重复应答 / 未应答即转入下一条消息 → 400 code 11148
+//     tool_choice 强制形态 + 无 tools 声明 → 400（复刻「无工具请求 + 强制 tool_choice」非法形态拒绝）
+//     lastChatRequest 回显：最近一次 chat 请求的 {model, messages, tools, tool_choice, stream}（字节级断言网关转译产物）
+//     用户文本含 USE_CUSTOM_TOOL → 返回 apply_patch 工具调用（custom 工具回译验证）
 const PORT = 3040;
 
 // v4.2.0：网关停滞熔断 cancel 计数（GET /__stats 查询，验证级联取消生效）
 let cancelledCount = 0;
 // v4.2.2：per-key 请求计数（验证多账号轮换均匀性）
 const perKeyCounts = new Map<string, number>();
+// v4.6.0：最近一次 chat 请求回显（网关转译产物字节级断言）
+let lastChatRequest: Record<string, unknown> | null = null;
+
+/** v4.6.0：严格 tool_calls 配对校验（复刻真实严格上游行为 —— 网关 Responses 转译层修复验证的裁判） */
+function validateToolCallSequence(body: Record<string, unknown>): { ok: true } | { ok: false; message: string } {
+  const messages = body.messages;
+  if (!Array.isArray(messages)) return { ok: true };
+
+  const pending = new Set<string>(); // 已声明未应答的 tool_call id
+  for (const m of messages as Array<Record<string, unknown>>) {
+    const role = m?.role;
+    if (role === "tool") {
+      const callId = typeof m.tool_call_id === "string" ? m.tool_call_id : "";
+      if (!callId || !pending.has(callId)) {
+        return {
+          ok: false,
+          message: "tool calls and tool results do not match, please start a new conversation and retry",
+        };
+      }
+      pending.delete(callId);
+      continue;
+    }
+    // 任何非 tool 消息出现时，此前声明的 tool_call 必须全部已应答（严格形态）
+    if (pending.size > 0) {
+      return {
+        ok: false,
+        message: "tool calls and tool results do not match, please start a new conversation and retry",
+      };
+    }
+    if (role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls as Array<{ id?: string }>) {
+        if (tc?.id) pending.add(tc.id);
+      }
+    }
+  }
+  if (pending.size > 0) {
+    return { ok: false, message: "tool calls and tool results do not match, please start a new conversation and retry" };
+  }
+  return { ok: true };
+}
+
+/** v4.6.0：「无工具请求 + 强制 tool_choice」非法形态拒绝（网关 tool_choice 降级验证的裁判） */
+function toolChoiceViolatesNoTools(body: Record<string, unknown>): boolean {
+  const toolsDeclared = Array.isArray(body.tools) && (body.tools as unknown[]).length > 0;
+  if (toolsDeclared) return false;
+  const tc = body.tool_choice;
+  return tc === "required" || (tc !== null && typeof tc === "object");
+}
 
 function bearerKey(req: Request): string {
   const auth = req.headers.get("authorization") || "";
@@ -51,12 +105,13 @@ const server = Bun.serve({
     }
 
     if (req.method === "GET" && url.pathname === "/__stats") {
-      return Response.json({ cancelledCount, perKey: Object.fromEntries(perKeyCounts) });
+      return Response.json({ cancelledCount, perKey: Object.fromEntries(perKeyCounts), lastChatRequest });
     }
 
     if (req.method === "POST" && url.pathname === "/__stats/reset") {
       cancelledCount = 0;
       perKeyCounts.clear();
+      lastChatRequest = null;
       return Response.json({ ok: true });
     }
 
@@ -119,6 +174,38 @@ const server = Bun.serve({
 
       const body = await req.json().catch(() => ({}));
       const model = body.model || "mock-chat";
+
+      // v4.6.0：lastChatRequest 回显（验证后立即查询断言网关转译产物；失败路径也回显便于排障）
+      lastChatRequest = {
+        model,
+        messages: body.messages,
+        tools: body.tools ?? null,
+        tool_choice: body.tool_choice ?? null,
+        stream: body.stream === true,
+      };
+
+      // v4.6.0：严格 tool_calls 配对校验（11148 行为复刻 —— Responses 转译层规范形态的裁判）
+      const seq = validateToolCallSequence(body);
+      if (!seq.ok) {
+        return Response.json(
+          { code: 11148, extError: { code: "tool_call_sequence_broken", message: seq.message } },
+          { status: 400 }
+        );
+      }
+      // v4.6.0：「无工具请求 + 强制 tool_choice」非法形态拒绝（网关 tool_choice 降级的裁判）
+      if (toolChoiceViolatesNoTools(body)) {
+        return Response.json(
+          {
+            code: 11148,
+            extError: {
+              code: "tool_choice_without_tools",
+              message: "tool_choice is forced but no tools are declared; remove tool_choice or declare tools",
+            },
+          },
+          { status: 400 }
+        );
+      }
+
       // 模型名触发失败：fail429-* → 429（验证候选级故障转移与冷却分类）
       if (model.startsWith("fail429-")) {
         return Response.json(
@@ -152,6 +239,17 @@ const server = Bun.serve({
               id: "call_mock_1",
               type: "function",
               function: { name: "get_weather", arguments: JSON.stringify({ city: "Beijing" }) },
+            },
+          ];
+          message.content = null;
+          finish = "tool_calls";
+        } else if (userText.includes("USE_CUSTOM_TOOL")) {
+          // v4.6.0：custom(freeform) 工具调用回放（Responses 回译 custom_tool_call 项验证）
+          message.tool_calls = [
+            {
+              id: "call_mock_2",
+              type: "function",
+              function: { name: "apply_patch", arguments: JSON.stringify({ input: "*** Begin Patch\n*** End Patch" }) },
             },
           ];
           message.content = null;
