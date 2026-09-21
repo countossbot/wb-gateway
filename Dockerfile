@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
 
+LABEL org.opencontainers.image.source="https://github.com/countossbot/wb-gateway"
+
 # Build only. The final image contains no Bun, TypeScript, Prisma CLI, or source tree.
 FROM node:22-bookworm-slim AS builder
 
