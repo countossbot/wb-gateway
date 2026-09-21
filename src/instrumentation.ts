@@ -2,8 +2,11 @@
 // 原 Cloudflare Cron Triggers 的 Node 常驻等价物；调度配置存 SQLite，热生效。
 // v3.0.7：启动时自动执行 UsageDaily 历史回填（幂等，已有行的天跳过）。
 // v4.0.0：容器首启自动建表（prisma/init.sql）+ 默认管理员播种（幂等），先于一切业务 DB 访问。
+import { applySqlitePragmas } from "@/lib/db";
+
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  await applySqlitePragmas();
   // ---- v4.0.0：schema 初始化与默认管理员播种（必须最前：后续 refreshRuntimeSettings /
   // ensureSystemSecrets / startScheduler 均依赖业务表存在；空库/新卷首启即自动就绪） ----
   try {

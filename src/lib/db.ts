@@ -105,6 +105,3 @@ export async function applySqlitePragmas(): Promise<void> {
     console.error('[DB] PRAGMA init failed:', (e as Error).message)
   }
 }
-
-// 进程启动时自动应用（module import 即生效；instrumentation.register 之前 PRAGMA 已就绪）
-void applySqlitePragmas()
