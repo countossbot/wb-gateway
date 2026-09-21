@@ -2214,3 +2214,25 @@ Stage Summary:
 3. public/ 下 20260919 旧 tar（825K）保留未动（先例产物，已入库跟踪；新 zip 未包含它）
 4. 顺延项持续开放：计费 client 字段验证（CN「你好（网关测试）」/ INTL A/B 样本）；标准适配器 getBalance 池形态；GET /v1/responses/{id}
 5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+
+---
+Task ID: 55
+Agent: 主会话（Z.ai Code，用户直派任务轮：源码包重打）
+Task: 用户要求「请再次打包」—— 复用 Task 54 白名单清单重打源码包；发现 public/downloads/ 目录已被环境清理（隔夜 23h，期间有定时任务 agent 零星活动痕迹：download/qa-*.png ×2、.zscripts/dev.pid 变更，均无 worklog 记录），需重建目录部署；源码本身自 ce5fea0 后零变化（git diff 空）
+
+Work Log:
+- 重打差异：worklog.md 现含 Task 54 完整记录（上版打包时 Task 54 尚未写入，此为唯一实质内容差异）；文件名换新 uag-src-v4.6.4-2.zip 避开浏览器缓存，删除旧包避免混淆
+- 同白名单 staging：src / prisma / mini-services / tests / examples / docs / scripts / .zscripts(去运行时文件) / public(仅 logo.svg+robots.txt) / 全套配置 / README / worklog / bun.lock + .env.example；零泄漏校验通过（db/.env/node_modules/.git/upload/skills/tool-results 全零命中）
+- 部署：public/downloads/ 重建 + 部署（890K / 308 文件）；HTTP 200（application/zip + Accept-Ranges）；端到端 md5 一致（290c1fbd…）+ unzip -t 308 文件通过
+- 环境观察（不处理不提交）：download/qa-v424-insights-window*.png 两张未跟踪 QA 截图与 .zscripts/dev.pid 变更为隔夜外部活动产物，与本任务无关，保持原样
+
+Stage Summary:
+- 最新下载链接：/downloads/uag-src-v4.6.4-2.zip（890K，308 文件；内容 = Task 54 版 + worklog Task 54 记录）
+- 源码零变化（ce5fea0 后无新提交），版本维持 4.6.4
+- 环境提示：public/downloads 属易失位置（本轮已被清理过一次），如需长期保留源码包建议另行存放
+
+未解决问题与风险（下一阶段建议）:
+1. public/downloads 隔夜被清理的根因未查（疑似某清理机制按 .gitignore 清 untracked；本轮重建后可能再次被清——用户应尽快下载）
+2. download/ 两张 QA 截图来历未归档（无 worklog 记录），建议相关会话补记或清理
+3. 顺延项持续开放：计费 client 字段验证（CN/INTL A/B 样本）；标准适配器 getBalance 池形态；GET /v1/responses/{id}
+4. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
