@@ -582,6 +582,7 @@ export interface RouteTestResult {
     upstreamModel: string | null;
     fallback: boolean;
     contentType: string;
+    providerBalance?: { success: boolean; total: number; unit: string } | null;
   };
   trace: RouteTestTraceEvent[];
   body?: unknown;

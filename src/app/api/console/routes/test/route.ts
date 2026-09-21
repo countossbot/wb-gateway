@@ -10,10 +10,16 @@ import { corsHeadersFor } from "@/lib/gateway/http/headers";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-function traceHeaders(trace: DispatchTraceEvent[], startedAt: number, response: Response): Headers {
+function traceHeaders(
+  trace: DispatchTraceEvent[],
+  startedAt: number,
+  response: Response,
+  balance?: { success: boolean; total: number; unit: string } | null
+): Headers {
   const headers = new Headers(response.headers);
   headers.set("X-Test-Trace", JSON.stringify(trace));
   headers.set("X-Test-Latency", String(Date.now() - startedAt));
+  if (balance) headers.set("X-Test-Balance", JSON.stringify(balance));
   return headers;
 }
 
@@ -77,7 +83,14 @@ export async function POST(request: NextRequest) {
       onDispatchEvent: (event) => trace.push(event),
     });
 
-    const headers = traceHeaders(trace, startedAt, upstreamResponse);
+    const successEvent = trace.find((event) => event.type === "success");
+    const providerBalance = successEvent
+      ? await fleet.getBalance(successEvent.provider)
+      : null;
+    const balanceSummary = providerBalance
+      ? { success: !!providerBalance.success, total: providerBalance.total ?? 0, unit: providerBalance.unit || "积分" }
+      : null;
+    const headers = traceHeaders(trace, startedAt, upstreamResponse, balanceSummary);
 
     if (upstreamResponse.headers.get("content-type")?.includes("text/event-stream") && upstreamResponse.body) {
       return new Response(upstreamResponse.body, {
@@ -101,6 +114,7 @@ export async function POST(request: NextRequest) {
         upstreamModel: upstreamResponse.headers.get("X-Gateway-Model"),
         fallback: upstreamResponse.headers.get("X-Gateway-Fallback") === "true",
         contentType: upstreamResponse.headers.get("content-type") || "",
+        providerBalance: balanceSummary,
       },
       trace,
       body: parsed,
