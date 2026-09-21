@@ -1,0 +1,16 @@
+.git
+.github
+.gitignore
+node_modules
+.next
+coverage
+tests
+docs
+examples
+mini-services
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+worklog.md
