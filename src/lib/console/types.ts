@@ -548,53 +548,6 @@ export interface RoutesData {
   providerModels?: Record<string, string[]>;
 }
 
-// ---- 路由试跑（v4.3.1 控制台调试工具）----
-export interface RouteTestTraceEvent {
-  type: "noroute" | "attempt" | "fatal" | "error" | "fail" | "retry" | "success" | "exhausted";
-  /** 距 dispatch 开始的毫秒数 */
-  t: number;
-  index?: number;
-  provider?: string;
-  model?: string;
-  status?: number;
-  message?: string;
-  summary?: string;
-  action?: "cooldown" | "retry";
-  account?: string | null;
-  fallback?: boolean;
-  contentType?: string;
-  available?: string[];
-  lastError?: string | null;
-}
-
-export interface RouteTestUsage {
-  input?: number | null;
-  output?: number | null;
-  cached?: number | null;
-}
-
-/** 非流式响应结构（/api/console/routes/test JSON 信封内层） */
-export interface RouteTestResult {
-  status: number;
-  latencyMs: number;
-  meta: {
-    account: string | null;
-    upstreamModel: string | null;
-    fallback: boolean;
-    contentType: string;
-    providerBalance?: { success: boolean; total: number; unit: string } | null;
-  };
-  trace: RouteTestTraceEvent[];
-  body?: unknown;
-  rawLength?: number;
-  /** 以下为流式模式前端增量组装字段 */
-  streamText?: string;
-  sseEvents?: number;
-  pings?: number;
-  streamDone?: boolean;
-  usage?: RouteTestUsage;
-}
-
 // ---- 定时任务 ----
 export interface JobsConfig {
   checkinEnabled: boolean;
