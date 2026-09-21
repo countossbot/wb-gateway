@@ -21,42 +21,15 @@ export interface DispatchParams {
   request: Request;
   /** v3.0.4：调用方密钥名（虚拟密钥名 / Master Admin / Cron Trigger）——落请求日志，供密钥维度统计 */
   apiKeyName?: string | null;
-  /**
-   * v4.3.1：诊断钩子（控制台「路由试跑」专用）——正常网关流量不传，零开销。
-   * 在调度关键节点同步回调：noroute / attempt / fatal / error / fail / retry / success / exhausted。
-   * t 字段为距 dispatch 开始的毫秒数，用于构建候选链时间线。
-   */
-  onDispatchEvent?: (event: DispatchTraceEvent) => void;
 }
-
-/** v4.3.1：路由试跑诊断事件（时间线渲染数据源；字段刻意扁平便于序列化） */
-export type DispatchTraceEvent =
-  | { type: "noroute"; t: number; model: string; available: string[] }
-  | { type: "attempt"; t: number; index: number; provider: string; model: string }
-  | { type: "fatal"; t: number; index: number; provider: string; status: number; message: string }
-  | { type: "error"; t: number; index: number; provider: string; message: string }
-  | { type: "fail"; t: number; index: number; provider: string; model: string; status: number; summary: string }
-  | { type: "retry"; t: number; index: number; provider: string; action: "cooldown" | "retry" }
-  | { type: "success"; t: number; index: number; provider: string; model: string; account: string | null; fallback: boolean; contentType: string }
-  | { type: "exhausted"; t: number; lastError: string | null };
 
 /**
  * Deep Exchange Module:
  * 单一深度接口，封装完整的协议探测、跨协议转译、指纹清洗、优先级回退与流式输出
  */
 export async function dispatchExchange(params: DispatchParams): Promise<Response> {
-  const { protocol, model, body, fleet, config, request, apiKeyName, onDispatchEvent } = params;
+  const { protocol, model, body, fleet, config, request, apiKeyName } = params;
   const startedAt = Date.now();
-  // v4.3.1：诊断事件发射器（未注入时为空函数，正常流量零开销）
-  const emit = onDispatchEvent
-    ? (e: DispatchTraceEvent) => {
-        try {
-          onDispatchEvent(e);
-        } catch {
-          /* 诊断钩子异常绝不影响调度主链路 */
-        }
-      }
-    : (_e: DispatchTraceEvent) => {};
   const isAnthropic = protocol === "anthropic";
   const routes = config.routes || {};
 
@@ -134,7 +107,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
   // 仅当 routes 中存在精确匹配时才使用配置的路由，否则返回 404 错误并提供可用模型建议。
   if (!candidates || candidates.length === 0) {
     const availableModels = Object.keys(routes || {});
-    emit({ type: "noroute", t: Date.now() - startedAt, model, available: availableModels });
     finishLog(404, `No route configured for model "${model}"`);
     return new Response(
       JSON.stringify({
@@ -156,13 +128,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
   // 由驱动器统一处理；单个候选的「试一次」（取 provider → 调上游 → 成功渲染 / 失败收口）见 attempt。
   const response = await runFailover<RouteCandidateConfig>(candidates, {
     onRetryable: async (candidate, action, fail: FailOutcome) => {
-      emit({
-        type: "retry",
-        t: Date.now() - startedAt,
-        index: candidates.indexOf(candidate),
-        provider: candidate.provider,
-        action,
-      });
       console.warn(
         `[Fallback] Provider "${candidate.provider}" (${candidate.model}) returned ${fail.status}${
           action === "cooldown" ? " [cooldown]" : ""
@@ -170,11 +135,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
       );
     },
     renderExhausted: ({ lastError }) => {
-      emit({
-        type: "exhausted",
-        t: Date.now() - startedAt,
-        lastError: lastError ? lastError.message : null,
-      });
       finishLog(502, `All providers for model "${model}" failed. Last error: ${lastError ? lastError.message : "none"}`);
       return new Response(
         JSON.stringify({
@@ -191,13 +151,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
       );
     },
     attempt: async (candidate, candidateIndex) => {
-      emit({
-        type: "attempt",
-        t: Date.now() - startedAt,
-        index: candidateIndex,
-        provider: candidate.provider,
-        model: candidate.model,
-      });
       const provider = fleet.getProvider(candidate.provider);
       if (!provider) {
         // 明确报错：路由指向了不可用的 provider，而不是静默跳过。
@@ -209,13 +162,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
           console.error(
             `[Exchange] Route candidate "${candidate.provider}" is disabled (enabled=false), skipped by fleet`
           );
-          emit({
-            type: "error",
-            t: Date.now() - startedAt,
-            index: candidateIndex,
-            provider: candidate.provider,
-            message: `提供商已停用（enabled=false）——在「API 中转」中启用后才能服务请求`,
-          });
           throw new Error(
             `Provider "${candidate.provider}" is disabled. Enable it in the console (API 中转) to serve requests.`
           );
@@ -223,13 +169,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
         console.error(
           `[Exchange] Route candidate "${candidate.provider}" not found in provider fleet`
         );
-        emit({
-          type: "error",
-          t: Date.now() - startedAt,
-          index: candidateIndex,
-          provider: candidate.provider,
-          message: `提供商未配置（fleet 中不存在）`,
-        });
         throw new Error(`Provider "${candidate.provider}" not configured`);
       }
       loggedProvider = candidate.provider;
@@ -265,14 +204,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
           } catch (err) {
             // 参数校验失败（400 / 404）：直接返回，不进行故障转移
             if (err instanceof HttpError && (err.status === 400 || err.status === 404)) {
-              emit({
-                type: "fatal",
-                t: Date.now() - startedAt,
-                index: candidateIndex,
-                provider: candidate.provider,
-                status: err.status,
-                message: err.message,
-              });
               finishLog(err.status, err.message);
               return {
                 done: new Response(
@@ -302,14 +233,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
       } catch (err) {
         // 上游抛出的客户端错误（400 / 404）：直接返回，不进行故障转移
         if (err instanceof HttpError && (err.status === 400 || err.status === 404)) {
-          emit({
-            type: "fatal",
-            t: Date.now() - startedAt,
-            index: candidateIndex,
-            provider: candidate.provider,
-            status: err.status,
-            message: err.message,
-          });
           finishLog(err.status, err.message);
           return {
             done: new Response(JSON.stringify({ error: { message: err.message } }), {
@@ -321,13 +244,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
         console.warn(
           `[Fallback] Provider "${candidate.provider}" failed: ${(err as Error).message}, retrying next candidate...`
         );
-        emit({
-          type: "error",
-          t: Date.now() - startedAt,
-          index: candidateIndex,
-          provider: candidate.provider,
-          message: (err as Error).message,
-        });
         throw err;
       }
 
@@ -336,16 +252,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
           upstreamRes.headers.get("x-gateway-account") || "default";
         loggedAccount = hitAccount;
         const isFallback = candidateIndex > 0;
-        emit({
-          type: "success",
-          t: Date.now() - startedAt,
-          index: candidateIndex,
-          provider: candidate.provider,
-          model: candidate.model,
-          account: hitAccount,
-          fallback: isFallback,
-          contentType: (upstreamRes.headers.get("content-type") || "").toLowerCase(),
-        });
         const debugHeaders = {
           "X-Gateway-Account": hitAccount,
           "X-Gateway-Model": candidate.model,
@@ -448,15 +354,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
         const errText = await upstreamRes.text();
         // v3.0.8：记录失败摘要（若后续候选成功则被成功日志覆盖，不会误写）
         lastFailError = `${candidate.provider}: ${summarizeUpstreamError(errText)}`;
-        emit({
-          type: "fail",
-          t: Date.now() - startedAt,
-          index: candidateIndex,
-          provider: candidate.provider,
-          model: candidate.model,
-          status,
-          summary: summarizeUpstreamError(errText, 200),
-        });
         // 尝试解析 JSON 以进行结构化错误码判定；分类本身由驱动器经 classify 完成
         let parsedErrJson: Record<string, unknown> | null = null;
         try {
