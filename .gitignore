@@ -49,6 +49,10 @@ dev.out.log
 test
 prompt
 
+# Next.js API route named `test` is source code, not a test artifact.
+!src/app/api/console/routes/test/
+!src/app/api/console/routes/test/route.ts
+
 server.log
 # Skills directory
 /skills/tool-results/
