@@ -3,7 +3,7 @@
 # 使用前提：
 #   1. 镜像已发布到 GHCR（本文件只用 image: 引用，绝不 build——构建期峰值 1.5~2GB
 #      会在小内存 VPS 上 OOM，镜像构建请在 CI 或大内存机器完成）。
-#      默认镜像名占位为 ghcr.io/ericsunsk/universal-ai-gateway:latest，
+#      默认镜像名占位为 ghcr.io/countossbot/wb-gateway:latest，
 #      请按实际发布仓库名替换（GHCR 镜像名一律小写）。
 #   2. 全新空卷首启：容器自动检测空库并执行内置 /app/prisma/init.sql 建表，
 #      并播种默认管理员（admin / gateway-admin-2026），无需任何人工介入即可登录控制台。
@@ -18,7 +18,7 @@ services:
   uag:
     # ---- 镜像 ----
     # 只引用远端镜像，本机不构建（小内存 VPS 防爆）。按实际 GHCR 仓库替换 tag。
-    image: ghcr.io/ericsunsk/universal-ai-gateway:latest
+    image: ghcr.io/countossbot/wb-gateway:latest
     container_name: uag
 
     # ---- 网络 ----
@@ -64,7 +64,7 @@ services:
       # 会被 YAML 切成嵌套映射，探针直接失效（与 HOSTNAME=:: 同类陷阱）。
       test:
         - CMD
-        - bun
+        - node
         - -e
         - 'const r = await fetch("http://127.0.0.1:" + (process.env.PORT || 18787) + "/healthz"); process.exit(r.status === 200 || r.status === 503 ? 0 : 1);'
       interval: 30s
