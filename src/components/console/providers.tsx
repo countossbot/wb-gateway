@@ -1,5 +1,5 @@
 // API 中转管理 —— 提供商实例卡片网格 + 新增/编辑配置悬浮窗（按类型动态字段、
-// 提供商级代理覆盖、保存前测试连接）+ 删除（被路由引用时后端 409 展示原因）。
+// 提供商级代理覆盖）+ 删除（被路由引用时后端 409 展示原因）。
 "use client";
 
 import * as React from "react";
@@ -61,7 +61,6 @@ import type {
   ConsoleProvider,
   ModelHealthRow,
   NativeProviderPreset,
-  ProviderTestResult,
   ProviderType,
   ProvidersData,
 } from "@/lib/console/types";
@@ -357,9 +356,6 @@ export function ProvidersModule({
   // v3.8.0：模型健康一览折叠态（默认展开；用户手折后 session 内保持）
   const [healthOpen, setHealthOpen] = React.useState(true);
 
-  // 卡片级测试结果
-  const [cardTest, setCardTest] = React.useState<Record<string, { loading: boolean; result: ProviderTestResult | null; error: string }>>({});
-
   const load = React.useCallback(async () => {
     setLoading(true);
     setError("");
@@ -387,11 +383,6 @@ export function ProvidersModule({
   const [formError, setFormError] = React.useState("");
   const [fingerprintError, setFingerprintError] = React.useState("");
 
-  // Dialog 内测试连接
-  const [testing, setTesting] = React.useState(false);
-  const [testResult, setTestResult] = React.useState<ProviderTestResult | null>(null);
-  const [testError, setTestError] = React.useState("");
-
   // 删除
   const [delTarget, setDelTarget] = React.useState<ConsoleProvider | null>(null);
   const [delSaving, setDelSaving] = React.useState(false);
@@ -410,8 +401,6 @@ export function ProvidersModule({
     setIdCustom(false);
     setFormError("");
     setFingerprintError("");
-    setTestResult(null);
-    setTestError("");
     setDialogOpen(true);
   };
 
@@ -420,8 +409,6 @@ export function ProvidersModule({
     setForm(formFromProvider(p));
     setFormError("");
     setFingerprintError("");
-    setTestResult(null);
-    setTestError("");
     setDialogOpen(true);
   };
 
@@ -437,8 +424,6 @@ export function ProvidersModule({
       baseUrl: preset.baseUrl || PROVIDER_TYPE_META[preset.type as ProviderType]?.defaultBaseUrl || "",
       name: f.name || preset.id,
     }));
-    setTestResult(null);
-    setTestError("");
   };
 
   const changeType = (t: ProviderType) => {
@@ -447,39 +432,6 @@ export function ProvidersModule({
       type: t,
       baseUrl: f.baseUrl ? f.baseUrl : PROVIDER_TYPE_META[t]?.defaultBaseUrl || "",
     }));
-    setTestResult(null);
-    setTestError("");
-  };
-
-  const runDialogTest = async () => {
-    setTesting(true);
-    setTestResult(null);
-    setTestError("");
-    try {
-      let payload: Record<string, unknown>;
-      if (editing && allSecretsMasked(form)) {
-        // 凭据未改动（掩码）→ 用已保存的 DB 凭据实测
-        payload = { providerId: editing.id };
-      } else {
-        const built = buildPayload(form, !!editing);
-        const { config, accounts } = built as { config: Record<string, unknown>; accounts: Array<{ credentials?: Record<string, unknown> }> };
-        const credentials =
-          form.type === "workbuddy"
-            ? accounts[0]?.credentials || {}
-            : {
-                ...(form.apiKey ? { apiKey: form.apiKey } : {}),
-                ...(form.token ? { token: form.token } : {}),
-                ...(form.cookie ? { cookie: form.cookie } : {}),
-              };
-        payload = { type: form.type, config, credentials };
-      }
-      const r = await apiPost<ProviderTestResult>("/api/console/providers/test", payload);
-      setTestResult(r);
-    } catch (e) {
-      setTestError(errMessage(e));
-    } finally {
-      setTesting(false);
-    }
   };
 
   const save = async () => {
@@ -552,16 +504,6 @@ export function ProvidersModule({
     }
   };
 
-  const runCardTest = async (p: ConsoleProvider) => {
-    setCardTest((s) => ({ ...s, [p.id]: { loading: true, result: null, error: "" } }));
-    try {
-      const r = await apiPost<ProviderTestResult>("/api/console/providers/test", { providerId: p.id });
-      setCardTest((s) => ({ ...s, [p.id]: { loading: false, result: r, error: "" } }));
-    } catch (e) {
-      setCardTest((s) => ({ ...s, [p.id]: { loading: false, result: null, error: errMessage(e) } }));
-    }
-  };
-
   const confirmDelete = async () => {
     if (!delTarget) return;
     setDelSaving(true);
@@ -626,7 +568,6 @@ export function ProvidersModule({
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {providers.map((p) => {
             const TypeIcon = TYPE_ICONS[p.type] || Server;
-            const t = cardTest[p.id];
             return (
               <div key={p.id} className="flex flex-col rounded-xl border border-stone-200 bg-white p-4 shadow-xs">
                 <div className="flex items-start justify-between gap-2">
@@ -707,26 +648,7 @@ export function ProvidersModule({
                   <p className="mt-3 text-[11px] text-stone-300">近 24h 无调用记录</p>
                 )}
 
-                {/* 测试结果 */}
-                {t?.loading && (
-                  <p className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Loader2 className="size-3.5 animate-spin" /> 正在实测连通性…
-                  </p>
-                )}
-                {t?.error && <p className="mt-3 text-xs text-red-600">{t.error}</p>}
-                {t?.result && (
-                  <p className={`mt-3 text-xs ${t.result.success ? "text-emerald-700" : "text-red-600"}`}>
-                    {t.result.success ? "✓ " : "✗ "}
-                    {t.result.message}
-                    {typeof t.result.elapsedMs === "number" ? `（${t.result.elapsedMs}ms）` : ""}
-                  </p>
-                )}
-
                 <div className="mt-auto flex justify-end gap-1 pt-4">
-                  <Button variant="outline" size="sm" onClick={() => void runCardTest(p)} disabled={t?.loading}>
-                    {t?.loading ? <Loader2 className="animate-spin" /> : <Zap />}
-                    测试
-                  </Button>
                   <Button variant="outline" size="sm" onClick={() => openEdit(p)}>
                     <Pencil />
                     编辑
@@ -798,7 +720,7 @@ export function ProvidersModule({
           <DialogHeader>
             <DialogTitle>{editing ? `编辑中转 · ${editing.name}` : "新增 API 中转"}</DialogTitle>
             <DialogDescription>
-              按提供商类型渲染字段；凭据显示掩码，未改动将沿用原值；可先「测试连接」再保存。
+              按提供商类型渲染字段；凭据显示掩码，未改动将沿用原值。
             </DialogDescription>
           </DialogHeader>
 
@@ -1085,29 +1007,6 @@ export function ProvidersModule({
                 <p className="text-xs text-muted-foreground">优先级：提供商覆盖 &gt; 全局代理 &gt; 环境变量 &gt; 直连</p>
               </div>
 
-              {/* 测试连接 */}
-              <div className="space-y-2 rounded-lg border border-stone-200 bg-stone-50/60 p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-stone-700">连接测试（保存前可测）</span>
-                  <Button type="button" variant="outline" size="sm" onClick={runDialogTest} disabled={testing}>
-                    {testing ? <Loader2 className="animate-spin" /> : <Zap />}
-                    测试连接
-                  </Button>
-                </div>
-                {testError && <p className="text-xs text-red-600">{testError}</p>}
-                {testResult && (
-                  <div className={`rounded-md px-2.5 py-2 text-xs ${testResult.success ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
-                    <p className="font-medium">
-                      {testResult.success ? "✓ 连接成功" : "✗ 连接失败"}
-                      {typeof testResult.elapsedMs === "number" ? ` · ${testResult.elapsedMs}ms` : ""}
-                    </p>
-                    <p className="mt-0.5 break-all">{testResult.message}</p>
-                    {testResult.models && testResult.models.length > 0 && (
-                      <p className="mt-1 break-all font-mono text-[10px] opacity-80">{testResult.models.slice(0, 8).join(" · ")}</p>
-                    )}
-                  </div>
-                )}
-              </div>
             </div>
           </ScrollArea>
 
