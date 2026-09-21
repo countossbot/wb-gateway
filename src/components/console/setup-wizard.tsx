@@ -16,7 +16,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   SkipForward,
-  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,7 +27,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { errMessage, apiPost } from "@/lib/console/api";
 import { PROVIDER_TYPE_META, passwordStrength } from "@/lib/console/format";
-import type { ProviderType, SetupResult, ProviderTestResult } from "@/lib/console/types";
+import type { ProviderType, SetupResult } from "@/lib/console/types";
 import { CopyButton } from "@/components/console/ui";
 
 type WizardStep = 1 | 2 | 3;
@@ -93,41 +92,11 @@ export function SetupWizard({ onCompleted }: { onCompleted: () => void }) {
   const [submitting, setSubmitting] = React.useState(false);
   const [result, setResult] = React.useState<SetupResult | null>(null);
 
-  // 测试连接（初始化阶段无会话，401 时给出说明）
-  const [testing, setTesting] = React.useState(false);
-  const [testResult, setTestResult] = React.useState<ProviderTestResult | null>(null);
-  const [testError, setTestError] = React.useState("");
-
   const strength = passwordStrength(password);
   const strengthPercent = (strength.score / 5) * 100;
   const strengthColor = ["bg-red-500", "bg-red-500", "bg-amber-500", "bg-amber-500", "bg-emerald-500", "bg-emerald-500"][strength.score];
 
   const step1Valid = password.length >= 8 && password === confirm;
-
-  const runTest = async () => {
-    setTesting(true);
-    setTestResult(null);
-    setTestError("");
-    try {
-      const payload: Record<string, unknown> = { type: draft.type };
-      if (draft.type === "workbuddy") {
-        payload.config = { region: draft.region };
-        payload.credentials = { userId: draft.userId, accessToken: draft.accessToken };
-      } else if (draft.type === "qwenweb") {
-        payload.config = { baseUrl: draft.baseUrl };
-        payload.credentials = { token: draft.token, cookie: draft.cookie };
-      } else {
-        payload.config = { baseUrl: draft.baseUrl };
-        payload.credentials = { apiKey: draft.apiKey };
-      }
-      const r = await apiPost<ProviderTestResult>("/api/console/providers/test", payload, { quiet: true });
-      setTestResult(r);
-    } catch (e) {
-      setTestError(errMessage(e));
-    } finally {
-      setTesting(false);
-    }
-  };
 
   const submitSetup = async (withProvider: boolean) => {
     setSubmitting(true);
@@ -346,30 +315,6 @@ export function SetupWizard({ onCompleted }: { onCompleted: () => void }) {
                       </div>
                     </div>
                   )}
-
-                  {/* 测试连接 */}
-                  <div className="space-y-2 rounded-lg border border-stone-200 bg-stone-50/60 p-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium text-stone-700">连接测试</span>
-                      <Button type="button" variant="outline" size="sm" onClick={runTest} disabled={testing}>
-                        {testing ? <Loader2 className="animate-spin" /> : <Zap />}
-                        测试连接
-                      </Button>
-                    </div>
-                    {testError && (
-                      <p className="text-xs text-amber-700">
-                        {testError}
-                        {testError.includes("未登录") || testError.includes("401") ? "（初始化阶段暂无会话；可完成初始化后在控制台中测试）" : ""}
-                      </p>
-                    )}
-                    {testResult && (
-                      <p className={`text-xs ${testResult.success ? "text-emerald-700" : "text-red-600"}`}>
-                        {testResult.success ? "✓ " : "✗ "}
-                        {testResult.message}
-                        {typeof testResult.elapsedMs === "number" ? `（${testResult.elapsedMs}ms）` : ""}
-                      </p>
-                    )}
-                  </div>
 
                   {error && <p className="text-sm text-red-600">{error}</p>}
 

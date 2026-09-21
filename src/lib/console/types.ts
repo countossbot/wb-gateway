@@ -470,19 +470,6 @@ export interface ModelHealthRow {
   lastUsedAt: string | null;
 }
 
-export interface ProviderTestResult {
-  success: boolean;
-  elapsedMs: number;
-  message: string;
-  balance?: number;
-  modelsCount?: number;
-  models?: string[];
-  freeModels?: string[];
-  region?: string;
-  hasCredentials?: boolean;
-  [key: string]: unknown;
-}
-
 // ---- 虚拟密钥 ----
 export interface VirtualKeyRow {
   id: string;
