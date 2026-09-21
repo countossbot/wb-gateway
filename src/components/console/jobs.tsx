@@ -261,7 +261,7 @@ function TzField({
 
 /**
  * v4.1.0：签到提供商多选下拉（DropdownMenu + CheckboxItem）。
- * 空选 = 全部支持签到的提供商（后端 checkinProviders 空数组语义）；勾选项热保存（随「保存配置」整体 PUT）。
+ * 空选 = 全部支持签到的提供商（后端 checkinProviders 空数组语义）。勾选后立即自动保存当前选择。
  * 勾选后菜单不自动关闭（onSelect preventDefault），支持连续勾选。
  */
 function CheckinProviderPicker({
@@ -367,6 +367,17 @@ export function JobsModule() {
   }, [notice]);
 
   const setCfg = (patch: Partial<JobsConfig>) => setConfig((c) => (c ? { ...c, ...patch } : c));
+
+  const autoSaveCheckinProviders = React.useCallback((next: string[]) => {
+    setConfig((current) => {
+      if (!current) return current;
+      const nextConfig = { ...current, checkinProviders: next };
+      void apiPut("/api/console/jobs", nextConfig).catch((e) => {
+        setConfigError(errMessage(e));
+      });
+      return nextConfig;
+    });
+  }, []);
 
   const save = async () => {
     if (!config) return;
@@ -481,10 +492,10 @@ export function JobsModule() {
               <CheckinProviderPicker
                 candidates={data?.checkinCandidates ?? []}
                 selected={config.checkinProviders ?? []}
-                onChange={(next) => setCfg({ checkinProviders: next })}
+                onChange={autoSaveCheckinProviders}
               />
               <p className="text-xs text-muted-foreground">
-                不选 = 全部支持签到的提供商；仅勾选的提供商会执行签到。「立即执行」按当前下拉选择运行（无需先保存）；定时调度按保存的配置执行
+                不选 = 全部支持签到的提供商；选择变更后自动保存。仅勾选的提供商会执行签到；「立即执行」和定时调度都会使用当前已保存的配置
               </p>
             </div>
           )}
