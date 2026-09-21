@@ -6,7 +6,6 @@ import * as React from "react";
 import {
   ArrowRight,
   Check,
-  FlaskConical,
   GripVertical,
   Loader2,
   Pencil,
@@ -58,7 +57,6 @@ import {
 } from "@/components/console/ui";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
 import type { RouteRow, RoutesData } from "@/lib/console/types";
-import { RouteTestDialog } from "@/components/console/route-test";
 
 // ---- 上游模型目录拉取（/api/console/providers/models）----
 // 模块级缓存 60s：同一提供商多行候选/反复打开表单不重复打上游；强制刷新穿透。
@@ -326,14 +324,6 @@ export function RoutesModule() {
   const [delTarget, setDelTarget] = React.useState<RouteRow | null>(null);
   const [delSaving, setDelSaving] = React.useState(false);
 
-  // 试跑（v4.3.1）
-  const [testOpen, setTestOpen] = React.useState(false);
-  const [testModel, setTestModel] = React.useState<string | undefined>(undefined);
-  const openTest = (model: string) => {
-    setTestModel(model);
-    setTestOpen(true);
-  };
-
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -441,7 +431,7 @@ export function RoutesModule() {
     <div className="space-y-6">
       <PageHeader
         title="模型路由"
-        description={`客户端模型 → 有序候选链（顺序即故障转移优先级）· 共 ${routes.length} 条 · 点行内烧瓶可试跑验证`}
+        description={`客户端模型 → 有序候选链（顺序即故障转移优先级）· 共 ${routes.length} 条`}
         actions={
           <>
             <Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -516,15 +506,6 @@ export function RoutesModule() {
                 </div>
 
                 <div className="flex shrink-0 justify-end gap-1">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => openTest(r.model)}
-                    aria-label={`试跑路由 ${r.model}`}
-                    title={`试跑「${r.model}」——真实链路调用验证候选链/转译/落点`}
-                  >
-                    <FlaskConical className="text-rose-600" />
-                  </Button>
                   <Button variant="ghost" size="icon" onClick={() => openEdit(r)} aria-label="编辑路由">
                     <Pencil className="text-stone-500" />
                   </Button>
@@ -541,15 +522,6 @@ export function RoutesModule() {
       {providers.length === 0 && (
         <p className="text-xs text-amber-700">尚无提供商 —— 请先在「API 中转」中创建，否则路由候选无处可选。</p>
       )}
-
-      {/* ---------- 路由试跑（v4.3.1） ---------- */}
-      <RouteTestDialog
-        open={testOpen}
-        onOpenChange={setTestOpen}
-        routes={routes}
-        providers={providers}
-        initialModel={testModel}
-      />
 
       {/* ---------- 新增 / 编辑路由 Dialog ---------- */}
       <Dialog open={dialogOpen} onOpenChange={(o) => !o && setDialogOpen(false)}>
