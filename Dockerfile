@@ -3,8 +3,6 @@
 # Build only. The final image contains no Bun, TypeScript, Prisma CLI, or source tree.
 FROM node:22-bookworm-slim AS builder
 
-LABEL org.opencontainers.image.source="https://github.com/countossbot/wb-gateway"
-
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
@@ -36,6 +34,10 @@ RUN --mount=type=cache,target=/app/.next/cache node_modules/.bin/next build \
 
 # Minimal production runtime.
 FROM node:22-bookworm-slim AS runner
+
+# OCI source label 必须定义在最终 stage：多阶段构建中 builder 的 LABEL 不会继承到最终镜像，
+# GHCR 仓库关联（commit d75cefd 意图）此前因放在 builder 而实际失效。
+LABEL org.opencontainers.image.source="https://github.com/countossbot/wb-gateway"
 
 WORKDIR /app
 ENV NODE_ENV=production

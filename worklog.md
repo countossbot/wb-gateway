@@ -2236,3 +2236,31 @@ Stage Summary:
 2. download/ 两张 QA 截图来历未归档（无 worklog 记录），建议相关会话补记或清理
 3. 顺延项持续开放：计费 client 字段验证（CN/INTL A/B 样本）；标准适配器 getBalance 池形态；GET /v1/responses/{id}
 4. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+
+---
+Task ID: 56
+Agent: 主会话（Z.ai Code，用户直派任务轮：上游 fork 修复合入 + 审查迭代）
+Task: 用户上传 universal-ai-gateway.zip（其本地 fork：v4.6.4 基线 + 12 commit 修复，作者 countossbot），要求重新构建部署并按审查任务修复迭代
+
+Work Log:
+- 【审查上游 12 commit】高质量修复批次：①init.sql 补齐 VirtualKey.monthlyCostLimit + ModelPricing 表（修复我方 init.sql 落后 schema 的真 bug，全新部署缺表缺列）②models/usage 裸路由 route config re-export 失效 → 本地 force-dynamic（Next segment config 限制，standalone 构建生效）③PRAGMA 初始化从 db.ts module 副作用移至 instrumentation.register 显式 await（竞态修复）④Docker 部署套件（node22-slim + bun 锁定安装 + prisma generate + standalone 18787 + GHCR workflow paths/concurrency 优化）⑤功能裁剪：路由试跑（v4.3.1，route-test.tsx 1101 行）与 provider 测试连接整体移除（净 -1693 行）⑥jobs 签到多选即选即存（UX）。两个疑似语法错误（branches: ain] / ealthOpen）经 Read 复核确认为 bash 输出吞 [x 字符的显示怪癖（Task 48 已记录同类），实际代码正确
+- 【审查发现并修复】Dockerfile OCI source label 定义在 builder stage —— 多阶段构建 builder LABEL 不继承最终镜像，GHCR 仓库关联（上游 d75cefd 意图）实际失效 → 移至 runner stage
+- 【合并】用户基线 ef4ced9 = 我方 v4.6.4 包 + Docker 三件套（Dockerfile/.dockerignore/.github）+ docker-compose 镜像名切换；git am 12 patch（0002 首败于 Dockerfile 不在 index → 基线三件套先行 commit 后重套）：9 个 commit 落地保留作者署名，3 个空 patch skip（0007/0008 内容已存在于我方树 / 本为空 checkpoint）；树一致性验证：HEAD vs 上游 d842282 仅 worklog.md（我方领先 Task 55+）与 public 旧 tar 差异，源码完全一致
+- 【⚠️ 重大事故：DB 数据全失】19:24:46 环境清理机制删除 db/custom.db（.gitignore 忽略目录即清理目标，与 Task 55 public/downloads 被清同一机制，周期活跃）；dev server EADDRINUSE 竞争重启后 instrumentation 走「首启建表+播种」路径（行为完全正确：SchemaVersion 空 / AdminUser 19:24:46 播种 / 表结构按 schema.prisma 全建含 ModelPricing）→ Provider×2 / Account×7（含全部 refreshToken 凭证）/ ModelRoute×6 / VirtualKey / 历史运行数据（RequestLog/UsageDaily/CheckinLog/BalanceSnapshot/AuditLog）全部丢失。全盘搜寻无备份（旧 tar 纯源码、无 .db 副本、git 不跟踪 db）；损失评估：代码资产零损失，配置与凭证不可恢复（refreshToken 无任何日志残留），需用户经控制台重新录入（账户均为用户自有，可重新登录获取新凭证）
+- 【灾备工具】.zscripts/db-snapshot.ts（export/import）：配置快照含凭证 JSON 双写 backups/ + ~/.uag-backups/（项目外，规避项目目录级清理）；幂等 upsert 恢复；export 冒烟通过（477B 空配置快照）
+- 【部署验证】lint 零错误；tsc src/ 零错误；healthz v4.7.0 degraded（providers 0 —— DB 空所致，非代码问题，恢复配置后自愈）；agent-browser QA：默认凭证 admin/gateway-admin-2026 登录成功，8 页签遍历，模型路由页无「试跑」残留、API 中转页无测试连接死按钮、定时任务页签到配置正常渲染，零 console errors
+- 【下载包】uag-src-v4.7.0.zip（875K，白名单含 Docker 三件套 + .github + 灾备工具 + 更新 .env.example 默认管理员说明）；零泄漏校验（db/.env/backups/node_modules 全零命中）+ md5 一致 + unzip -t 通过；部署 /downloads/（清理机制又删过一次目录，重建）；旧包 -2 已清
+- 【git】上游 9 commit（保留 countossbot 署名）+ 基线引入 1 + 本轮审查修复/版本/灾备 1
+
+Stage Summary:
+- 代码库现 = 我方 v4.6.4 演进 + 上游 fork 12 commit 修复全量合入 + 审查修复（Dockerfile LABEL→runner stage），VERSION 4.7.0；lint/tsc/浏览器 QA 全绿
+- DB 事故：环境清理机制删除 db/custom.db，全部配置与凭证丢失（不可恢复）；代码零损失；恢复路径 = 用户控制台重新配置（admin / gateway-admin-2026 首登改密 → 新增 provider workbuddy(CN)/workbuddy-intl(INTL) + 各账户 refreshToken → 重建 6 路由 + 虚拟密钥）；建议配置完成后立即 bun .zscripts/db-snapshot.ts export 留快照
+- 默认凭证：admin / gateway-admin-2026（UAG_DEFAULT_ADMIN_PASSWORD 可覆盖）
+- 下载链接：/downloads/uag-src-v4.7.0.zip（875K）
+
+未解决问题与风险（下一阶段建议）:
+1. 【最优先】用户重新配置 provider/账户/路由/密钥（凭证不可恢复，需用户重新登录各 workbuddy 账户获取新 token）；配置后 export 快照 + 验证 healthz ok + 发消息冒烟
+2. e2e 套件（74 项口径）未跑 —— 多数依赖已配置 provider 与登录态，DB 空态无意义；待配置恢复后补跑
+3. 环境清理机制范围未明（已确认受害者：public/downloads/、db/；疑似周期性）；backups/ 项目内快照同样暴露于风险，依赖 ~/.uag-backups/ 项目外副本兜底；建议每次配置变更后手动 export
+4. 合并后 worklog 的 Task 55 之前部分与上游 fork 的 worklog 出现轻微分叉（上游基线内嵌其本地记录方式），无实质影响
+5. 顺延项持续开放：计费 client 字段验证（CN/INTL A/B 样本随 DB 丢失需重做）；GET /v1/responses/{id}；supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
