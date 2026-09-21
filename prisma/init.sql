@@ -167,6 +167,20 @@ CREATE TABLE "UsageDaily" (
 );
 
 -- CreateTable
+CREATE TABLE "ModelPricing" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "model" TEXT NOT NULL,
+    "inputPerMTok" REAL NOT NULL DEFAULT 0,
+    "outputPerMTok" REAL NOT NULL DEFAULT 0,
+    "cachedPerMTok" REAL NOT NULL DEFAULT 0,
+    "updatedAt" DATETIME NOT NULL,
+    "updatedBy" TEXT NOT NULL DEFAULT 'admin'
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "ModelPricing_model_key" ON "ModelPricing"("model");
+
+-- CreateTable
 CREATE TABLE "BalanceSnapshot" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "day" TEXT NOT NULL,
