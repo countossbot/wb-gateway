@@ -422,6 +422,14 @@ export function RouteTestDialog({
             upstreamModel: res.headers.get("x-gateway-model"),
             fallback: res.headers.get("x-gateway-fallback") === "true",
             contentType: ct,
+            providerBalance: (() => {
+              try {
+                const rawBalance = res.headers.get("x-test-balance");
+                return rawBalance ? JSON.parse(rawBalance) : null;
+              } catch {
+                return null;
+              }
+            })(),
           },
           trace,
           streamText: "",
@@ -997,6 +1005,11 @@ export function RouteTestDialog({
                   {result.meta.account && (
                     <Badge variant="outline" className="max-w-36 truncate text-[10px] text-violet-700" title={`落点账号 ${result.meta.account}`}>
                       账号 {result.meta.account}
+                    </Badge>
+                  )}
+                  {result.meta.providerBalance && (
+                    <Badge variant="outline" className="text-[10px]">
+                      提供商总余额：{result.meta.providerBalance.total} {result.meta.providerBalance.unit}
                     </Badge>
                   )}
                   {result.meta.fallback && successIdx !== null && (
