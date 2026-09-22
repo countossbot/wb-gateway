@@ -2362,3 +2362,27 @@ Stage Summary:
 2. INTL 槽位模型（default-model/fast-model 等）语义待验证（智能路由 or 固定别名）
 3. 顺延项：计费 client 字段验证；GET /v1/responses/{id}；标准适配器 getBalance 池形态；建议配置变更后 bun .zscripts/db-snapshot.ts export
 4. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+---
+Task ID: 61
+Agent: 主会话（Z.ai Code，用户直派任务轮：修复方法提示词整理）
+
+Task: 用户要求「将最近修复 bug 的方法整理成提示词，还有 cn 和国际版拉取模型和列表溢出的修复方法都要整理成提示词」—— 把 Task 57–60（v4.7.1→v4.7.3）三批修复沉淀为可复用的 AI 提示词
+
+Work Log:
+- 【状态确认】worklog Task 60（v4.7.3 模型下拉精简）已完整落地（版本注释链 + routes.tsx 实码核对）；本轮零代码改动，纯文档产出
+- 【素材回读】providers/workbuddy/index.ts（listUpstreamModels 全量实现 + endpoints /v2 结论注释）、routes.tsx（collisionBoundary 三件套 + creditsBadgeLabel + SelectItem 精简渲染 + MODEL_MANUAL_SENTINEL）、configService VERSION 注释链，确保提示词代码段与库内实现逐行一致
+- 【产物】prompts/bugfix-prompts.md —— 4 份自包含提示词：
+  ① WorkBuddy/CodeBuddy 模型目录拉取（CN+INTL 双区）：/v2 端点结论（两区统一 /v2/enterprises/personal/models + 三 host 等价）、/console 500 大坑全记录（4 账户×2 host×全头组合实测矩阵 + 对照实验实锤路径鉴权面差异）、请求头全集、响应解析（agents[].name==="cli" 白名单有序过滤 + 空回退）、401 无感续签重试、多账户容灾（≤3）、60s 缓存、失败降级透明化、完整 TS 参考实现、验收标准（CN 16/30、INTL 18 含 GPT-5.x 系与槽位模型）
+  ② 上游同构端点「一区通、一区 500」排查方法论五步法：对照实验定边界 → HAR 抓包对照（含 HAR 导出清洗鉴权头的注意事项）→ JS bundle 逆向枚举端点（网页前端只含网页路径，CLI 端点要去 CLI 产物里找）→ 全矩阵实测（稳定复现 = 换路径，停止调头）→ 逐字段 diff 验证 + 结论写注释防回归
+  ③ Dialog 内 Radix Select 弹层溢出修复：根因（默认 collisionBoundary=视口，不感知 Dialog DOM 边界）+ 修复三件套（collisionBoundary=closest("[role=dialog]") 展开时捕获 / collisionPadding=8 / 内联 maxHeight=min(18rem, --radix-select-content-available-height) 双保险）+ React 19 ref-as-prop + 桌面 1280×800 / 移动 390×700 验收标准
+  ④ 模型下拉项展示精简：仅模型名+倍率徽章（免费绿色/×倍率灰色/无固定不显示）、creditsBadgeLabel 解析函数、placeholder 三态文案（上游实时/已知目录/朴素，无 CLI 可用后缀）、trigger 回显同步精简、details 契约保留原则（展示精简 ≠ 数据裁剪）、CN/INTL 验收样例
+- 【交付】提示词全文在会话回复中同步交付；文件入库持久化（prompts/bugfix-prompts.md，git 提交）
+- 【定时任务】按会话规则创建 webDevReview 类型的 15 分钟周期 cron 任务（自主 QA + 继续开发）
+
+Stage Summary:
+- 三批修复方法（CN/INTL 模型拉取、上游 500 排查方法论、下拉弹层溢出、展示精简）全部沉淀为可复用提示词，内嵌全部实测结论、坑位警示与参考代码，可直接投喂 AI 助手在同类项目中复现
+- 零代码改动，版本维持 4.7.3；产物 prompts/bugfix-prompts.md
+
+未解决问题与风险（下一阶段建议）:
+1. 既有顺延项不变：QA 路由留存（gpt-5.6-luna-test / hy4-preview，用户可删）；deepseek-v4-flash 死路由（待用户决策）；INTL 槽位模型语义验证；计费 client 字段验证；GET /v1/responses/{id}；标准适配器 getBalance 池形态
+2. 环境维护：配置变更后 bun .zscripts/db-snapshot.ts export；supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
