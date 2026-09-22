@@ -9,7 +9,7 @@
 // }
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { purgeExpiredAuditLogs } from "@/lib/gateway/jobs/scheduler";
 import { recordAudit } from "@/lib/gateway/console/auditService";
 import { getRuntimeSettingsAsync } from "@/lib/gateway/config/runtimeSettings";
@@ -20,7 +20,7 @@ const VALID_ENTITIES = ["provider", "account", "route", "key", "setting", "syste
 const VALID_ACTIONS = ["delete", "create", "update", "toggle", "regenerate", "restore"];
 
 export async function GET(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "log.read");
   if (session instanceof Response) return session;
 
   const params = request.nextUrl.searchParams;
@@ -75,7 +75,7 @@ export async function GET(request: NextRequest) {
 // v3.2.2：手动清理过期审计（按当前保留期设置；0 = 永久保留，拒绝执行并提示）。
 // 清理动作本身留审计痕（删除数量进 detail），保证操作可追溯。
 export async function POST(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "settings.write");
   if (session instanceof Response) return session;
   const retention = (await getRuntimeSettingsAsync()).auditRetentionDays;
   if (!retention || retention <= 0) {

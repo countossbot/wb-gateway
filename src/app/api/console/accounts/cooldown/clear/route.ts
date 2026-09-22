@@ -4,14 +4,14 @@
 // 审计：清除动作写 auditUpdate 留痕（含清除前的 streak / reason 摘要，排障可追溯）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { adminClearCooldown } from "@/lib/gateway/providers/workbuddy/cooldown";
 import { auditUpdate } from "@/lib/gateway/console/auditService";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "provider.write");
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     providerId?: string;

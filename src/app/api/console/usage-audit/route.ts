@@ -3,13 +3,13 @@
 // 响应：三种来源（upstreamUsageFrame/estimated/unknown）各自请求数、input/output/cached 合计、
 //       cachedTokens 占 inputTokens 比值。纯只读聚合，不引入任何写入。
 import { NextRequest } from "next/server";
-import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission, ok } from "@/lib/gateway/console/consoleHelpers";
 import { summarizeUsageBySource } from "@/lib/gateway/config/requestLog";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "usage.read");
   if (session instanceof Response) return session;
   try {
     const now = Date.now();

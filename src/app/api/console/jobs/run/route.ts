@@ -2,7 +2,7 @@
 // v4.1.1：签到可显式传 providers（当前 UI 下拉选择，空数组 = 全部）——无需先保存配置即按所选范围执行；
 //   未传 providers 时回落为已保存的运行时设置（向后兼容）。逐项校验与 PUT /api/console/jobs 白名单同规则。
 import { NextRequest } from "next/server";
-import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { runJob, checkinCapableProviderTypes } from "@/lib/gateway/jobs/scheduler";
 import { invalidateBalanceCache } from "@/lib/gateway/core/fleet";
 import { db } from "@/lib/db";
@@ -10,7 +10,7 @@ import { db } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "settings.write");
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as { job?: string; providers?: unknown };
   const job = body.job;

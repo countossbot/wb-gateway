@@ -4,7 +4,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
-  requireSessionOr401,
+  requirePermission,
   ok,
   fail,
   maskAccountCredentials,
@@ -16,7 +16,7 @@ import { auditCreate, auditDelete, auditToggle, auditUpdate } from "@/lib/gatewa
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "provider.read");
   if (session instanceof Response) return session;
   const providerId = request.nextUrl.searchParams.get("providerId");
 
@@ -97,7 +97,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "provider.write");
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     providerId?: string;
@@ -135,7 +135,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "provider.write");
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     providerId?: string;
@@ -174,7 +174,7 @@ export async function PUT(request: NextRequest) {
 
 // PATCH：快速启停（列表开关）
 export async function PATCH(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "provider.write");
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     providerId?: string;
@@ -198,7 +198,7 @@ export async function PATCH(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "provider.write");
   if (session instanceof Response) return session;
   const providerId = request.nextUrl.searchParams.get("providerId");
   const id = request.nextUrl.searchParams.get("id");
