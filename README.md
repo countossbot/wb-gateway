@@ -143,7 +143,7 @@ docker compose logs -f
 
 | 配置项 | 取值 | 作用 |
 | :--- | :--- | :--- |
-| `image` | `ghcr.io/countossbot/wb-gateway:latest` | 只拉取不构建，小内存机器安全 |
+| `image` | `ghcr.io/<用户名>/<仓库名>:latest` | 只拉取不构建，小内存机器安全（镜像名以仓库内 `docker-compose.yml` 实际取值为准） |
 | `init.sql` 自动建表 | 空卷首启自动执行 | 无需人工跑迁移；重复重启幂等 |
 | 默认管理员播种 | 仅当库内无管理员时 | 重复重启不覆盖不报错 |
 | `[::]:18787:18787` | 双栈监听 | IPv4 + IPv6 同时可达 |
@@ -172,10 +172,16 @@ docker compose down -v          # 停止并删除数据卷（数据全丢）
 
 ### 方式三：从源码构建 Docker 镜像
 
-适用：私有定制、需要修改镜像内容、自建 registry。
+适用：私有定制、需要修改镜像内容、自建 registry。**唯一要求：构建机可访问公网基础镜像源且内存充足（见下方警告）**，不需要预装 Node / Bun / Prisma——依赖安装、`prisma generate`、`next build` 全部在构建阶段内完成。
 
 ```bash
+# 1. 克隆并进入仓库
+git clone <你的仓库地址> uag && cd uag
+
+# 2. 构建镜像（默认无构建参数，全流程在容器内完成）
 docker build -t uag:local .
+
+# 3. 运行（数据落具名卷，重启不丢）
 docker run -d \
   --name uag \
   -p 127.0.0.1:18787:18787 \
@@ -185,9 +191,36 @@ docker run -d \
   uag:local
 ```
 
-[多阶段构建](Dockerfile)说明：builder 阶段装 Bun 与依赖、跑 `prisma generate`、执行 `next build`（走 Node 而非 Bun）并把 static / public / init.sql 复制进 standalone 产物；runner 阶段仅保留 `node:22-bookworm-slim` + `ca-certificates` + `openssl` + standalone 产物，以非 root 的 `node` 用户运行，镜像内**不含 Bun、TypeScript、Prisma CLI 与源码树**。
+> 容器首启会自动执行 `prisma/init.sql` 建表并播种默认管理员（仅在库内无管理员时），无需手动跑迁移。库内已有管理员后，`UAG_DEFAULT_ADMIN_PASSWORD` 不再生效。
 
-> ⚠️ **必须知道**：构建期峰值内存约 1.5～2 GB。小内存 VPS（≤1 GB）请改用方式二拉取镜像，或在 CI 中构建（见方式六）。
+**自定义构建参数**（可选）：
+
+```bash
+docker build \
+  --build-arg DATABASE_URL=file:/app/db/custom.db \   # 构建期 Prisma 生成所用路径
+  -t uag:local .
+```
+
+**推送到自建 / 私有 registry**：
+
+```bash
+docker tag uag:local registry.example.com/uag:4.9.0
+docker tag uag:local registry.example.com/uag:latest
+docker push registry.example.com/uag:4.9.0
+docker push registry.example.com/uag:latest
+```
+
+**多阶段构建说明**（见仓库内 `Dockerfile`）：builder 阶段装 Bun 与依赖、跑 `prisma generate`、执行 `next build`（走 Node 而非 Bun）并把 static / public / init.sql 复制进 standalone 产物；runner 阶段仅保留 `node:22-bookworm-slim` + `ca-certificates` + `openssl` + standalone 产物，以非 root 的 `node` 用户运行，镜像内**不含 Bun、TypeScript、Prisma CLI 与源码树**。
+
+**改用宿主目录绑定数据**时须先处理属主（容器以 UID 1000 运行）：
+
+```bash
+mkdir -p ./data && sudo chown -R 1000:1000 ./data
+docker run -d --name uag -p 127.0.0.1:18787:18787 \
+  -v "$PWD/data:/app/db" --restart unless-stopped uag:local
+```
+
+> ⚠️ **必须知道**：构建期峰值内存约 1.5～2 GB。小内存 VPS（≤1 GB）请改用方式二拉取镜像，或在 CI 中构建（见方式六）。构建机若无法访问 Docker Hub，可在 `Dockerfile` 顶部换用可达的基础镜像源。
 
 ### 方式四：systemd（Linux 常驻）
 
@@ -244,17 +277,17 @@ sudo journalctl -u uag -f
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.uag.gateway</string>
-  <key>WorkingDirectory</key><string>/Users/you/uag</string>
+  <key>WorkingDirectory</key><string>/opt/uag</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/you/.bun/bin/bun</string>
+    <string>/usr/local/bin/bun</string>
     <string>start</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PORT</key><string>18787</string>
     <key>NODE_ENV</key><string>production</string>
-    <key>DATABASE_URL</key><string>file:/Users/you/uag/db/custom.db</string>
+    <key>DATABASE_URL</key><string>file:/opt/uag/db/custom.db</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -263,6 +296,8 @@ sudo journalctl -u uag -f
 </dict>
 </plist>
 ```
+
+> 上述路径为占位示例，请替换为你的实际部署目录与 `bun` 安装路径（`which bun` 查看）。`WorkingDirectory` 与 `ProgramArguments` 中的 `bun` 必须使用**绝对路径**，launchd 不加载登录 shell 的 `PATH`。
 
 ```bash
 launchctl load -w ~/Library/LaunchAgents/com.uag.gateway.plist
@@ -288,6 +323,8 @@ Fork 后需修改镜像名（GitHub 容器镜像名必须全小写）：
 #   Dockerfile                    → LABEL org.opencontainers.image.source="https://github.com/<你的用户名>/<仓库名>"
 #   docker-compose.yml            → image: ghcr.io/<你的用户名>/<仓库名>:latest
 ```
+
+> 上述三处是唯一的改名点。若直接使用本仓库已发布的镜像，则无需改动，但需确认该包为 Public（或在使用端先 `docker login ghcr.io`）。
 
 首次推送后到 GitHub 仓库 `Packages` 设置该包为 Public（或在使用端 `docker login ghcr.io`）。
 
