@@ -659,6 +659,8 @@ export interface SettingsData {
   keepaliveCron: string;
   keepaliveTz: string;
   maxContextTurns: number;
+  /** v4.9.2：账号池调度模式（load-balance = 会话粘性优先；sequential = 纯轮转） */
+  accountSchedulingMode?: "load-balance" | "sequential";
   usageProviderId: string | null;
   /** v3.2.2：操作审计保留天数（0 = 永久保留） */
   auditRetentionDays?: number;

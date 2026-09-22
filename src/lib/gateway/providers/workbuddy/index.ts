@@ -8,6 +8,7 @@ import { runFailover, type FailOutcome } from "../../core/failover";
 import { accountCooldownRecord, hydrateCooldowns, setAccountCooldown } from "./cooldown";
 import { fetchWithProxy } from "../../proxy/proxyAgent";
 import { localDayKey } from "../../config/requestLog";
+import { getRuntimeSettingsAsync } from "../../config/runtimeSettings";
 import { db } from "@/lib/db";
 import type {
   ProviderAdapter,
@@ -22,7 +23,9 @@ import type {
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
 const memoryTokenCache = new Map<string, { token: string; timestamp: number }>();
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
-let roundRobinCounter = 0;
+// 轮转计数器按 providerId 分片：全局单计数器会让 CN/INTL 两个账号池互相推进下标，
+// 使各自池内的轮转失去均匀性（A 池的请求推进 B 池的下标）。
+const roundRobinCounters = new Map<string, number>();
 
 // 抖动重试基准延迟：env RETRY_BASE_MS（.env），默认 600ms；非法值回退默认。
 export const DEFAULT_RETRY_DELAY_MS = 600;
@@ -547,15 +550,22 @@ export class WorkBuddyProvider implements ProviderAdapter {
     // 先水合 DB 中的冷却记录（外部修改或重启后的状态），再做健康度筛选
     await hydrateCooldowns(this.id, allAccounts);
 
+    // v4.9.2：调度模式 —— sequential 忽略粘性键（纯轮转），load-balance 用粘性键（会话固定账号）。
+    // 用异步版确保 DB 已水合：同步版在冷启动首请求会读到 DEFAULTS（配置失效），
+    // 本函数已是 async，等一次水合无额外成本。
+    const schedulingMode = (await getRuntimeSettingsAsync()).accountSchedulingMode;
+    const affinityKey = schedulingMode === "sequential" ? null : affinityKeyForCall(payload, options);
+
     // 账号排序委托给纯函数调度器：有粘性键时固定落点，无键时 round-robin，冷却账号按到期时间兜底
+    const rr = roundRobinCounters.get(this.id) ?? 0;
     const accounts = orderAccounts(
       allAccounts,
       accountCooldownRecord,
       Date.now(),
-      roundRobinCounter,
-      affinityKeyForCall(payload, options)
+      rr,
+      affinityKey
     );
-    roundRobinCounter += 1;
+    roundRobinCounters.set(this.id, rr + 1);
 
     if (payload.messages) {
       payload.messages = sanitizeMessages(payload.messages as never) as never;
@@ -1044,5 +1054,5 @@ export class WorkBuddyProvider implements ProviderAdapter {
 // 测试隔离：清空进程级 Token 缓存与轮转计数
 export function resetWorkbuddyCacheForTest(): void {
   memoryTokenCache.clear();
-  roundRobinCounter = 0;
+  roundRobinCounters.clear();
 }
