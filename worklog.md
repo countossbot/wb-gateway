@@ -2386,3 +2386,39 @@ Stage Summary:
 未解决问题与风险（下一阶段建议）:
 1. 既有顺延项不变：QA 路由留存（gpt-5.6-luna-test / hy4-preview，用户可删）；deepseek-v4-flash 死路由（待用户决策）；INTL 槽位模型语义验证；计费 client 字段验证；GET /v1/responses/{id}；标准适配器 getBalance 池形态
 2. 环境维护：配置变更后 bun .zscripts/db-snapshot.ts export；supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+---
+Task ID: 62
+Agent: 主会话（Z.ai Code，用户直派任务轮：使用端归因研究 —— GitHub workbuddy2api 逆向 + 修复方案）
+
+Task: 用户要求在 GitHub 搜索 workbuddy2api 项目作参考，研究「AI 网关给 workbuddy 上游发送的表头如何让上游识别使用端为 WorkBuddy」，结合源码给出修复方案，需支持 CN 和全球（INTL）
+
+Work Log:
+- 【参考项目】GitHub 定位 Sliverkiss/workbuddy2api（Go 实现的 WorkBuddy OpenAI 兼容层），克隆至 /tmp/w2a 全量逆向
+- 【w2a 核心发现 ①使用端归因机制】internal/upstream/headers.go + config.go issue #42 结论：官网「使用端」列（= get-user-request-usage 响应的 client 字段）由服务端按出站请求的 UA / X-Product 归因；官方 WorkBuddy 桌面端 UA 为三段式 `WorkBuddy/<ver> <platform>/<ver> CLI/<cliVer>`（默认 5.5.4 / CLI 2.137.1，平台段 CN=WorkBuddy、global=WorkBuddy AI——global 发错平台段可能触发 403 code 11140 风控）
+- 【w2a 核心发现 ②归属头组】injectAttribution：真实桌面端发 X-Agent-Purpose="conversation" + X-IDE-Name/Type/X-Product="WorkBuddy" + X-IDE-Version=<ver> 识别 client（来源 xiaofan6ya/converter.py，与官方 application-manifest.js banner 白名单头组同形），避免用量统计 client/agentPurpose 为空的「网关特征」；X-Product:"SaaS" 是他们显式废弃的旧行为 —— 本网关 chat 路径现发 X-Product:"SaaS"（index.ts attemptAccount）
+- 【w2a 核心发现 ③完整桌面指纹】X-CodeBuddy-Request:"1"（官方风控闸门头全请求必带）+ X-Machine-ID/X-Session-ID（按 uid sha256 盐化派生 36hex，跨重启稳定账号间互异）+ 企业头 X-No-* 约定（global：X-No-Enterprise-Id:1 + X-Domain:www.workbuddy.ai；CN：X-No-Department-Info:1）+ Accept-Language 按区（zh-CN/en-US）+ 会话头族（X-Conversation-Request-ID 轮级聚合主键等，issue #35）+ refresh 渠道标识 X-Auth-Refresh-Source:"plugin"
+- 【本网关现状】chat 出站（index.ts attemptAccount.makeRequest）：CLI/2.63.2 CodeBuddy/2.63.2 UA + X-Product:"SaaS" + X-Client-Platform:"web"（v4.6.2）—— 混血 persona（CLI UA + web 标识 + SaaS 产品），使用端归因两区从未验证（顺延项）
+- 【实测矩阵（本轮，marbella CN / xiaoyi550w INTL，hy3 ×0.00 免费模型，证据 /tmp/wb-attr/）】
+  ① CN + 现网关表头（历史记录）：client='WorkBuddy' ✓ agentPurpose='' —— CN 后端认 X-Client-Platform:web
+  ② INTL + 现网关表头（历史记录「你好（网关INTL测试）」等 20 条）：client='' ✗ agentPurpose='' —— INTL 后端不认 web 标识，这就是用户要修的问题！
+  ③ INTL + w2a 桌面指纹表头（WorkBuddy AI UA 三段式 + 归属头组 + Machine/Session + No-Enterprise + Domain:workbuddy.ai + en-US，非流式 400 11101 需 stream:true，流式 200 4.7s）：client='WorkBuddy' ✓ agentPurpose='conversation' ✓ —— 修复方案 INTL 实锤有效
+  ④ CN + 桌面指纹表头（WorkBuddy 平台段 + zh-CN + copilot.tencent.com chat 端点，流式 200）：client='WorkBuddy' ✓ agentPurpose=''（CN 后端不从 X-Agent-Purpose 头记 agentPurpose，区域记账管道差异，非阻塞——使用端目标已达成）
+- 【用量明细查询端点（本轮确认）】POST https://www.workbuddy.cn|ai/billing/meter/get-user-request-usage（Web 控制台路径无 /v2，CLI Bearer 可用！与 /console 家族不同）body {"startTime":"...","endTime":"...","pageNum":1,"pageSize":N}（注意 pageNum 小驼峰，非 billing 家族的 PageNumber），响应 data.data[] 含 client/agentPurpose/model/credit/requestTime/inputTrunc
+- 【结论·根因】使用端归因 = 服务端按出站 UA + X-Product（归属头组）记账；CN 现状 client=WorkBuddy 属侥幸（CN 把 web 标识也归因 WorkBuddy），INTL 只认桌面端归属头组 → 网关在 INTL 使用端为空
+
+Stage Summary（修复方案 —— 下一任务实施，版本 4.7.3 → 4.8.0）:
+- 【方案 A·两区统一桌面 persona（推荐，实测背书）】chat 出站表头切换官方 WorkBuddy Desktop 指纹：
+  1. UA 三段式按区：CN `WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1`；INTL `WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1`（平台段不可混！INTL 发 WorkBuddy 有 11140 风控）
+  2. 归属头组替换 X-Product:"SaaS" → X-Agent-Purpose:"conversation" + X-IDE-Name:"WorkBuddy" + X-IDE-Type:"WorkBuddy" + X-IDE-Version:"5.5.4" + X-Product:"WorkBuddy"
+  3. 新增：X-CodeBuddy-Request:"1" + X-Machine-ID/X-Session-ID（sha256(`uag:{machine|session}:{userId}`) 截 36hex，纯函数派生跨重启稳定）+ Accept-Language（zh-CN/en-US）+ 企业头（两区 X-No-Enterprise-Id:"1"；INTL 另加 X-Domain:"www.workbuddy.ai"，CN 加 X-No-Department-Info:"1"）
+  4. 移除 chat 路径 X-Client-Platform:"web"（桌面 persona 不发；实测不带它归因正确）；Connection:keep-alive 可保留
+  5. 改动位置：index.ts 常量区（desktopUaFor/accountStableId）+ WorkbuddyEndpoints 增 desktopUserAgent + attemptAccount.makeRequest 表头重构；refresh/billing/checkin/models 四路径本轮不动（现形态已验证可用）
+- 【Phase 2 可选对齐】refresh 的 X-Auth-Refresh-Source:"workbuddy"→官方"plugin" + 桌面 UA；billing/checkin 单段 UA `WorkBuddy/5.5.4`；models 端点桌面 persona 实测后切换
+- 【Phase 3 可选增强】会话头族（X-Conversation-Request-ID 轮级聚合 + B3 链路，官方后台按它聚合碎片化用量）；X-Device-Token 注入口（设备风控，需外部 token）
+- 【实施后验收】①lint/tsc ②经网关真实发 CN+INTL 各一条（hy3 免费）③get-user-request-usage 复查两区 client='WorkBuddy' + INTL agentPurpose='conversation' ④回归 401 续签/failover/流式
+- 【已知非阻塞】CN agentPurpose 恒空（后端不记该头，web 会话才有值）；CN 桌面指纹记录 inputTrunc 为空（记账展示差异，不影响归因字段）
+
+未解决问题与风险（下一阶段建议）:
+1. 【最优先】实施方案 A（chat 桌面 persona 两区统一，实测矩阵 ③④ 背书）；实施后跑验收四步
+2. 既有顺延项不变：QA 路由留存；deepseek-v4-flash 死路由；INTL 槽位模型语义；GET /v1/responses/{id}；标准适配器 getBalance 池形态
+3. 环境维护：配置变更后 bun .zscripts/db-snapshot.ts export；supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
