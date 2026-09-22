@@ -80,12 +80,8 @@ export async function POST(request: NextRequest) {
       credentials.userId = p.userId || "";
       credentials.accessToken = p.accessToken || "";
       credentials.refreshToken = p.refreshToken || "";
-    } else if (p.type === "qwenweb") {
-      config.baseUrl = p.baseUrl || "https://chat.qwen.ai";
-      credentials.token = p.token || "";
-      credentials.cookie = p.cookie || "";
     } else {
-      // openai / anthropic / opencode
+      // openai / anthropic
       config.baseUrl = p.baseUrl || "";
       if (p.apiKey) credentials.apiKey = p.apiKey;
     }

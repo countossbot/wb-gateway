@@ -1,8 +1,8 @@
-// 全局代理层 —— 所有出站请求的统一入口（原项目仅 opencode 有代理池轮换，此处全局化）。
+// 全局代理层 —— 所有出站请求的统一入口（原项目有代理池轮换，此处全局化）。
 //
 // 能力：
 // 1. 协议：http、https、socks5、socks5h（远程 DNS 解析）；支持 user:pass@host:port 与分字段
-// 2. 代理池：逗号 / 分号 / 换行分隔多地址；上游限流（429）时自动轮换到下一个（原 opencode 行为全局化）
+// 2. 代理池：逗号 / 分号 / 换行分隔多地址；上游限流（429）时自动轮换到下一个（原行为全局化）
 // 3. 作用域：全部出站请求 —— 提供商调用、余额与积分查询、签到、令牌续签、免费模型拉取、连通性测试
 // 4. 两层覆盖：全局默认代理 + 提供商级覆盖（自有代理 / "direct" 直连）；支持绕过列表（指定域名直连）
 // 5. 优先级：设置页配置 > 环境变量（HTTP_PROXY/HTTPS_PROXY/NO_PROXY）> 直连
@@ -21,7 +21,7 @@ import { BoundedMap } from "../core/boundedMap";
 
 export interface ProxyConfig {
   enabled: boolean;
-  // 多地址池：逗号/分号/换行分隔（保留原 opencode 代理池轮换语义）
+  // 多地址池：逗号/分号/换行分隔（保留原代理池轮换语义）
   list: string;
   bypass: string[]; // 绕过列表：命中的主机名直连
   // 测试结果缓存（最近一次 /console/api/proxy/test 写入，供总览展示）
@@ -34,7 +34,7 @@ export interface ProxyConfig {
   } | null;
 }
 
-// ---- 代理池轮换状态（进程级，与原 opencode 实例行为等价） ----
+// ---- 代理池轮换状态（进程级，与原行为等价） ----
 let poolRotateIndex = 0;
 
 export function parseProxyList(raw: string | null | undefined): string[] {
@@ -186,7 +186,7 @@ export function invalidateProxyDispatchers(): void {
   }
 }
 
-// 限流时轮换到代理池下一个地址（原 opencode rotateProxy 全局化）
+// 限流时轮换到代理池下一个地址（原 rotateProxy 全局化）
 export function rotateProxyPool(): void {
   poolRotateIndex += 1;
 }

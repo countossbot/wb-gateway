@@ -87,11 +87,6 @@ const CRED_FIELDS: Record<string, Array<{ key: string; label: string; placeholde
   ],
   openai: [{ key: "apiKey", label: "API Key", placeholder: "sk-…" }],
   anthropic: [{ key: "apiKey", label: "API Key", placeholder: "sk-ant-…" }],
-  qwenweb: [
-    { key: "token", label: "Token", placeholder: "Web 端 Token" },
-    { key: "cookie", label: "Cookie", placeholder: "浏览器 Cookie 字符串（可选）", textarea: true },
-  ],
-  opencode: [],
 };
 
 function credFieldsFor(type: string) {
@@ -579,7 +574,7 @@ export function AccountsModule({ onViewLogs }: { onViewLogs?: (target: { provide
                   <EmptyState
                     icon={<Users className="size-5" />}
                     title="该提供商暂无账号"
-                    description={g.provider.type === "opencode" ? "OpenCode Zen 免费层无需账号凭据，可直接使用。" : "点击右上角「新增账号」添加，或使用批量导入。"}
+                    description="点击右上角「新增账号」添加，或使用批量导入。"
                     className="py-8"
                   />
                 </div>
@@ -730,9 +725,7 @@ export function AccountsModule({ onViewLogs }: { onViewLogs?: (target: { provide
           <DialogHeader>
             <DialogTitle>新增账号 · {addFor?.name}</DialogTitle>
             <DialogDescription>
-              {addFor?.type === "opencode"
-                ? "OpenCode Zen 免费层无需凭据字段。"
-                : "凭据按提供商类型填写；保存后界面仅显示掩码。"}
+              凭据按提供商类型填写；保存后界面仅显示掩码。
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
@@ -799,10 +792,7 @@ export function AccountsModule({ onViewLogs }: { onViewLogs?: (target: { provide
               <Label htmlFor="edit-acc-name">账号名称</Label>
               <Input id="edit-acc-name" value={editForm.name} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} />
             </div>
-            {(data?.grouped.find((g) => g.provider.id === editAcc?.providerId)?.provider.type === "opencode"
-              ? []
-              : credFieldsFor(data?.grouped.find((g) => g.provider.id === editAcc?.providerId)?.provider.type || "")
-            ).map((f) => (
+            {credFieldsFor(data?.grouped.find((g) => g.provider.id === editAcc?.providerId)?.provider.type || "").map((f) => (
               <div key={f.key} className="space-y-1.5">
                 <Label htmlFor={`edit-cred-${f.key}`}>{f.label}</Label>
                 {f.textarea ? (

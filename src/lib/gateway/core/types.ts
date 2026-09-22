@@ -143,7 +143,6 @@ export interface ProviderAdapter {
   doDailyCheckin?: () => Promise<unknown>;
   refreshAccessToken?: (account?: unknown) => Promise<unknown>;
   /** 上游模型目录拉取（可选）：失败时调用方降级 derived 推导目录 */
-  listUpstreamModels?: () => Promise<UpstreamModelsResult>;
 }
 
 // ---- 出站代理作用域 ----

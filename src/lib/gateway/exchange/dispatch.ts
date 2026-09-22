@@ -289,7 +289,7 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
         //   - JSON 响应：缓冲解析顶层 usage（精确）或按正文字符估算（与转译路径口径一致）
         //   - 其他 content-type（罕见）：维持旧行为直接落库
         // 分支以响应实际 content-type 判定（而非客户端 stream 意图）：
-        // forceStream 提供商（workbuddy/qwenweb）与上游默认流式的场景下，非流式请求也会收到 SSE。
+        // forceStream 提供商（workbuddy）与上游默认流式的场景下，非流式请求也会收到 SSE。
         const contentType = (upstreamRes.headers.get("content-type") || "").toLowerCase();
         const passthroughHeaders = {
           ...corsHeadersFor(request),

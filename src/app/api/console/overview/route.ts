@@ -372,13 +372,8 @@ export async function GET(request: NextRequest) {
   }
   const trend24h = buckets;
 
-  // 可用模型列表（路由配置 + opencode 免费池）
-  const opencode = fleet.getProvider("opencode");
-  const opencodeFreeModels =
-    typeof (opencode as unknown as { getFreeModels?: () => string[] })?.getFreeModels === "function"
-      ? (opencode as unknown as { getFreeModels: () => string[] }).getFreeModels()
-      : [];
-  const availableModels = Array.from(new Set([...Object.keys(config.routes || {}), ...opencodeFreeModels]));
+  // 可用模型列表（当前路由配置）
+  const availableModels = Array.from(new Set(Object.keys(config.routes || {})));
 
   // 各账号最近签到明细（聚合展示）
   const accountsWithState = accounts.map((a) => ({

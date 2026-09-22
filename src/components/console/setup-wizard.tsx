@@ -41,8 +41,6 @@ interface ProviderDraft {
   accessToken: string;
   refreshToken: string;
   apiKey: string;
-  token: string;
-  cookie: string;
 }
 
 const EMPTY_DRAFT: ProviderDraft = {
@@ -54,12 +52,10 @@ const EMPTY_DRAFT: ProviderDraft = {
   accessToken: "",
   refreshToken: "",
   apiKey: "",
-  token: "",
-  cookie: "",
 };
 
 function draftHasCredential(d: ProviderDraft): boolean {
-  return !!(d.apiKey || d.accessToken || d.token || d.cookie);
+  return !!(d.apiKey || d.accessToken);
 }
 
 function buildSetupProvider(d: ProviderDraft): Record<string, string> {
@@ -73,9 +69,6 @@ function buildSetupProvider(d: ProviderDraft): Record<string, string> {
     p.userId = d.userId.trim();
     p.accessToken = d.accessToken.trim();
     p.refreshToken = d.refreshToken.trim();
-  } else if (d.type === "qwenweb") {
-    p.token = d.token.trim();
-    p.cookie = d.cookie.trim();
   } else if (d.type === "openai" || d.type === "anthropic") {
     p.apiKey = d.apiKey.trim();
   }
@@ -287,32 +280,6 @@ export function SetupWizard({ onCompleted }: { onCompleted: () => void }) {
                         mono
                       />
                       <FieldInput label="API Key" value={draft.apiKey} onChange={(v) => setD({ apiKey: v })} placeholder="sk-…" mono />
-                    </div>
-                  )}
-
-                  {draft.type === "opencode" && (
-                    <div className="space-y-3">
-                      <FieldInput
-                        label="Base URL"
-                        value={draft.baseUrl}
-                        onChange={(v) => setD({ baseUrl: v })}
-                        placeholder="https://opencode.ai/zen/v1"
-                        mono
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        OpenCode Zen 免费模型池无需凭据。注意：由于无凭据字段，初始化向导不会创建该提供商，请初始化完成后在控制台「API 中转管理」中添加。
-                      </p>
-                    </div>
-                  )}
-
-                  {draft.type === "qwenweb" && (
-                    <div className="space-y-3">
-                      <FieldInput label="Base URL" value={draft.baseUrl} onChange={(v) => setD({ baseUrl: v })} placeholder="https://chat.qwen.ai" mono />
-                      <FieldInput label="Token" value={draft.token} onChange={(v) => setD({ token: v })} placeholder="Web 端 Token" mono />
-                      <div className="space-y-1.5">
-                        <Label htmlFor="su-p-cookie">Cookie</Label>
-                        <Textarea id="su-p-cookie" value={draft.cookie} onChange={(e) => setD({ cookie: e.target.value })} placeholder="浏览器 Cookie 字符串（可选）" className="font-mono text-xs" rows={3} />
-                      </div>
                     </div>
                   )}
 

@@ -1356,7 +1356,7 @@ export async function formatOpenAIToAnthropicJson(
   );
 }
 
-// v3.2.1：非流式聚合 —— forceStream 提供商（workbuddy/qwenweb）对 stream:false 请求也返回 SSE，
+// v3.2.1：非流式聚合 —— forceStream 提供商（workbuddy）对 stream:false 请求也返回 SSE，
 // 旧逻辑原样透传导致标准 OpenAI 客户端（openai-python / openai-node / CC-Switch 非流式模式）
 // 解析失败。本函数把上游 OpenAI 形 SSE 帧聚合成一份标准 chat.completion JSON：
 //   - content / reasoning_content 全量拼接

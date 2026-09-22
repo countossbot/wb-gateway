@@ -183,7 +183,7 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 | `/status` | GET | 公开 | 无害存活信息（service / version / storage） |
 | `/v1/messages` | POST | API Key | Anthropic Messages 协议（Claude Code 主路径） |
 | `/v1/chat/completions` | POST | API Key | OpenAI Chat Completions 协议 |
-| `/v1/models` `/models` | GET | API Key | OpenAI 兼容模型目录（含 OpenCode 免费池，`owned_by: opencode-zen-free`） |
+| `/v1/models` `/models` | GET | API Key | OpenAI 兼容模型目录（当前路由配置） |
 | `/v1/usage` `/usage` | GET | API Key | CC-Switch 兼容余额查询（响应结构不变） |
 | `/checkin` | POST | Master Key 或 Cron Secret | 手动签到（Cron 密钥降权，仅能触发本接口） |
 | `/admin` | GET | 公开 | Agent-Native 自解释 JSON 规范页 |
@@ -257,7 +257,7 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
    ```
 3. 查看迁移报告：新建的 providers / accounts / routes / virtual_keys 数量、跳过项（幂等语义，可重复执行）、警告（如路由候选引用不存在的 provider）。
 
-原 KV 中的运行状态键（`WB_ACCESS_TOKEN_*` / `WB_COOLDOWN_*` / `LAST_CHECKIN` / `OPENCODE_FREE_MODELS` / `QWEN_FP_*`）无需迁移——新版对应数据（账号凭据最新值 / 冷却 / 签到日志 / 免费模型池 / Qwen 指纹）会在首次运行时自动重建或落位于对应表。
+原 KV 中的运行状态键（`WB_ACCESS_TOKEN_*` / `WB_COOLDOWN_*` / `LAST_CHECKIN` / `LEGACY_OPENCODE_FREE_MODELS` / `QWEN_FP_*`）无需迁移——新版对应数据（账号凭据最新值 / 冷却 / 签到日志 / 免费模型池 / Qwen 指纹）会在首次运行时自动重建或落位于对应表。
 
 ---
 

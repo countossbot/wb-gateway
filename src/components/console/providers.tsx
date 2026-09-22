@@ -11,8 +11,6 @@ import {
   ChevronDown,
   CircleAlert,
   Eye,
-  Gift,
-  Globe,
   KeyRound,
   Loader2,
   Pencil,
@@ -69,8 +67,6 @@ const TYPE_ICONS: Record<string, React.ElementType> = {
   workbuddy: Building2,
   openai: Zap,
   anthropic: Sparkles,
-  opencode: Gift,
-  qwenweb: Globe,
 };
 
 interface AccountRowDraft {
@@ -95,9 +91,6 @@ interface ProviderForm {
   balanceUrl: string;
   extraHeaders: Array<{ key: string; value: string }>;
   region: "cn" | "intl";
-  token: string;
-  cookie: string;
-  fingerprintText: string;
   accounts: AccountRowDraft[];
 }
 
@@ -115,9 +108,6 @@ function emptyForm(): ProviderForm {
     balanceUrl: "",
     extraHeaders: [],
     region: "cn",
-    token: "",
-    cookie: "",
-    fingerprintText: "",
     accounts: [],
   };
 }
@@ -129,7 +119,6 @@ function str(v: unknown): string {
 function formFromProvider(p: ConsoleProvider): ProviderForm {
   const cfg = p.config || {};
   const headers = (cfg.defaultHeaders as Record<string, string> | undefined) || {};
-  const fingerprint = cfg.fingerprint;
   const proxyOverride = p.proxyOverride;
   return {
     id: p.id,
@@ -144,9 +133,6 @@ function formFromProvider(p: ConsoleProvider): ProviderForm {
     balanceUrl: str(cfg.balanceUrl),
     extraHeaders: Object.entries(headers).map(([key, value]) => ({ key, value: String(value) })),
     region: cfg.region === "intl" ? "intl" : "cn",
-    token: str(cfg.token),
-    cookie: str(cfg.cookie),
-    fingerprintText: fingerprint && typeof fingerprint === "object" ? JSON.stringify(fingerprint, null, 2) : "",
     accounts: (p.accounts || []).map((a, i) => ({
       key: `acc-${i}-${a.id}`,
       id: a.id,
@@ -181,22 +167,6 @@ function buildPayload(f: ProviderForm, editing: boolean) {
       if (f.apiKey) config.apiKey = f.apiKey.trim();
       if (f.anthropicVersion.trim()) config.anthropicVersion = f.anthropicVersion.trim();
       break;
-    case "opencode":
-      if (f.baseUrl.trim()) config.baseUrl = f.baseUrl.trim();
-      break;
-    case "qwenweb": {
-      config.baseUrl = f.baseUrl.trim();
-      if (f.token) config.token = f.token.trim();
-      if (f.cookie) config.cookie = f.cookie.trim();
-      if (f.fingerprintText.trim()) {
-        try {
-          config.fingerprint = JSON.parse(f.fingerprintText);
-        } catch {
-          // 无效 JSON 由前端校验拦住，此处兜底忽略
-        }
-      }
-      break;
-    }
   }
 
   const accounts =
@@ -227,7 +197,7 @@ function buildPayload(f: ProviderForm, editing: boolean) {
 }
 
 function allSecretsMasked(f: ProviderForm): boolean {
-  const secrets: unknown[] = [f.apiKey, f.token, f.cookie];
+  const secrets: unknown[] = [f.apiKey];
   for (const a of f.accounts) secrets.push(a.accessToken, a.refreshToken);
   return secrets.every((v) => isMaskedValue(v));
 }
@@ -381,7 +351,6 @@ export function ProvidersModule({
   const [idCustom, setIdCustom] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [formError, setFormError] = React.useState("");
-  const [fingerprintError, setFingerprintError] = React.useState("");
 
   // 删除
   const [delTarget, setDelTarget] = React.useState<ConsoleProvider | null>(null);
@@ -400,7 +369,6 @@ export function ProvidersModule({
     setForm(f);
     setIdCustom(false);
     setFormError("");
-    setFingerprintError("");
     setDialogOpen(true);
   };
 
@@ -408,7 +376,6 @@ export function ProvidersModule({
     setEditing(p);
     setForm(formFromProvider(p));
     setFormError("");
-    setFingerprintError("");
     setDialogOpen(true);
   };
 
@@ -436,7 +403,6 @@ export function ProvidersModule({
 
   const save = async () => {
     setFormError("");
-    setFingerprintError("");
 
     if (!editing) {
       if (!/^[a-zA-Z0-9_-]{1,64}$/.test(form.id.trim())) {
@@ -449,15 +415,6 @@ export function ProvidersModule({
       }
     }
 
-    let fingerprint: Record<string, unknown> | undefined;
-    if (form.type === "qwenweb" && form.fingerprintText.trim()) {
-      try {
-        fingerprint = JSON.parse(form.fingerprintText) as Record<string, unknown>;
-      } catch (e) {
-        setFingerprintError(`指纹参数不是合法 JSON：${errMessage(e)}`);
-        return;
-      }
-    }
 
     if (form.type === "workbuddy" && form.accounts.length === 0) {
       setFormError("WorkBuddy 提供商至少需要一个账号（账号池）");
@@ -467,7 +424,6 @@ export function ProvidersModule({
     setSaving(true);
     try {
       const payload = buildPayload(form, !!editing);
-      if (fingerprint) payload.config.fingerprint = fingerprint;
       if (editing) {
         await apiPut("/api/console/providers", payload);
         setNotice(`中转「${form.name || form.id}」已更新`);
@@ -930,55 +886,6 @@ export function ProvidersModule({
                   <div className="space-y-1.5">
                     <Label htmlFor="pv-a-version">anthropic-version</Label>
                     <Input id="pv-a-version" value={form.anthropicVersion} onChange={(e) => setF({ anthropicVersion: e.target.value })} placeholder="2023-06-01" className="font-mono text-xs" />
-                  </div>
-                </div>
-              )}
-
-              {form.type === "opencode" && (
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="pv-oc-baseurl">Base URL</Label>
-                    <Input id="pv-oc-baseurl" value={form.baseUrl} onChange={(e) => setF({ baseUrl: e.target.value })} placeholder="https://opencode.ai/zen/v1" className="font-mono text-xs" />
-                    <p className="text-xs text-muted-foreground">
-                      <Gift className="mr-1 inline size-3 text-emerald-600" />
-                      免费模型池：-free 后缀模型免凭据直连，模型列表自动同步并做健康追踪
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {form.type === "qwenweb" && (
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="pv-q-baseurl">Base URL</Label>
-                    <Input id="pv-q-baseurl" value={form.baseUrl} onChange={(e) => setF({ baseUrl: e.target.value })} placeholder="https://chat.qwen.ai" className="font-mono text-xs" />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="pv-q-token">Token</Label>
-                    <Input id="pv-q-token" value={form.token} onChange={(e) => setF({ token: e.target.value })} placeholder="Web 端 Token" className="font-mono text-xs" autoComplete="off" spellCheck={false} />
-                    {form.token.includes("••••") && <p className="text-xs text-muted-foreground">当前为掩码值，保存时沿用原值</p>}
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="pv-q-cookie">Cookie</Label>
-                    <Textarea id="pv-q-cookie" value={form.cookie} onChange={(e) => setF({ cookie: e.target.value })} placeholder="浏览器 Cookie 字符串（可选）" className="font-mono text-xs" rows={3} />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="pv-q-fp">指纹参数 JSON（可选）</Label>
-                    <Textarea
-                      id="pv-q-fp"
-                      value={form.fingerprintText}
-                      onChange={(e) => {
-                        setF({ fingerprintText: e.target.value });
-                        setFingerprintError("");
-                      }}
-                      placeholder='{"userAgent":"…","ssxmod":"…"}'
-                      className="min-h-24 font-mono text-xs"
-                    />
-                    {fingerprintError && <p className="text-xs text-red-600">{fingerprintError}</p>}
-                    <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <Eye className="size-3" />
-                      反爬指纹（LZW / ssxmod / bx-ua）；留空由系统自动生成
-                    </p>
                   </div>
                 </div>
               )}

@@ -403,7 +403,7 @@ export interface ImportResult {
 }
 
 // ---- API 中转（提供商） ----
-export type ProviderType = "workbuddy" | "openai" | "anthropic" | "opencode" | "qwenweb";
+export type ProviderType = "workbuddy" | "openai" | "anthropic";
 
 export interface ProviderAccount {
   id: string;
