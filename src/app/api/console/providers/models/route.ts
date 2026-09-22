@@ -3,7 +3,10 @@
 // - openai      ：GET {baseUrl}/models（Bearer）→ 上游实时（source: "upstream"）
 // - anthropic   ：GET {baseUrl}/models（x-api-key + anthropic-version）→ 上游实时
 // - opencode    ：GET {baseUrl}/models（CLI UA 公开接口）→ 上游实时
-// - workbuddy/qwenweb ：上游无公开列表端点（/v2/models 等路径实测 404）→ derived 推导目录：
+// - workbuddy   ：v4.7.1 真实上游拉取（Task 57：Web 端 /console/enterprises/personal/models，
+//                CLI 凭证 Bearer 可用；CN 实测 200 含元数据）。INTL 同构端点当前上游 500
+//                → 失败自然降级 derived，上游修复后零改动即通。
+// - qwenweb     ：上游无公开列表端点 → derived 推导目录：
 //   DB 路由候选（该 provider 在用）∪ DEFAULT_ROUTES 静态预设（原项目实测基线）
 // 上游拉取失败 / 超时（8s）→ 自动降级 derived，响应带 fallbackReason 透明化。
 // 内存缓存 60s（refresh=1 强制穿透）——表单反复打开不重复打上游。
@@ -11,7 +14,10 @@ import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
-import { DEFAULT_ROUTES } from "@/lib/gateway/config/configService";
+import { DEFAULT_ROUTES, getConfig } from "@/lib/gateway/config/configService";
+import { getProviderFleet } from "@/lib/gateway/core/fleet";
+import { hasUpstreamModels } from "@/lib/gateway/core/contract";
+import type { UpstreamModelDetail } from "@/lib/gateway/core/types";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +28,10 @@ interface ModelsPayload {
   providerId: string;
   source: "upstream" | "derived";
   models: string[];
+  /** v4.7.1：与 models 一一对应的元数据（workbuddy 上游响应；其他类型缺省） */
+  details?: UpstreamModelDetail[];
+  /** 上游全量模型数（含 CLI 白名单外旧模型），仅与 modelsCount 不同时有意义 */
+  allCount?: number;
   modelsCount: number;
   fetchedAt: number;
   cached: boolean;
@@ -119,7 +129,42 @@ export async function GET(request: NextRequest) {
   const cfg = { ...((provider.config as Record<string, unknown>) || {}) };
 
   let payload: ModelsPayload;
-  if (type === "openai" || type === "anthropic" || type === "opencode") {
+  if (type === "workbuddy") {
+    // v4.7.1：WorkBuddy 真实上游拉取（fleet 单例复用 adapter 的 token 热缓存与无感续签）。
+    // CN 实测 200；INTL 上游当前 500 → 抛错自然降级 derived（透明化原因）。
+    try {
+      const config = await getConfig();
+      const fleet = getProviderFleet(config);
+      const provider = fleet.getProvider(providerId);
+      if (!provider) throw new Error("适配器实例不可用（已停用或无账户）");
+      if (!hasUpstreamModels(provider)) throw new Error("适配器无上游模型目录能力");
+      const { models, details, url, allCount } = await provider.listUpstreamModels();
+      payload = {
+        providerId,
+        source: "upstream",
+        models,
+        details,
+        ...(typeof allCount === "number" ? { allCount } : {}),
+        modelsCount: models.length,
+        fetchedAt: Date.now(),
+        cached: false,
+        upstreamUrl: url,
+      };
+    } catch (e) {
+      // 上游失败 → derived 降级（透明化原因，前端仍可下拉/手动输入）
+      const reason = e instanceof Error ? e.message : String(e);
+      const models = await derivedModels(providerId);
+      payload = {
+        providerId,
+        source: "derived",
+        models,
+        modelsCount: models.length,
+        fetchedAt: Date.now(),
+        cached: false,
+        fallbackReason: `上游拉取失败（${reason}），已降级为已知目录`,
+      };
+    }
+  } else if (type === "openai" || type === "anthropic" || type === "opencode") {
     try {
       const { models, url } = await fetchUpstreamModels(type, cfg, providerId, provider.proxyOverride ?? null);
       payload = {
@@ -146,7 +191,7 @@ export async function GET(request: NextRequest) {
       };
     }
   } else {
-    // workbuddy / qwenweb：无上游列表端点，直接 derived
+    // qwenweb：无上游列表端点，直接 derived
     const models = await derivedModels(providerId);
     payload = {
       providerId,

@@ -16,6 +16,7 @@ import type {
   CallOptions,
   BalanceResult,
   AccountConfig,
+  UpstreamModelsResult,
 } from "../../core/types";
 
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
@@ -107,10 +108,18 @@ export interface WorkbuddyEndpoints {
   chat: string;
   billing: string;
   checkin: string;
+  // v4.7.1：上游模型目录（Web 端 /console/enterprises/personal/models，Task 57 逆向实测）。
+  // 鉴权同主链路 Bearer accessToken + X-Client-Platform: web；个人账户 enterpriseId 字面量 "personal"。
+  // CN 实测 200（30 模型 + cli 白名单 16）；INTL 同构端点当前上游 500（拉取失败自然降级 derived）。
+  models: string;
   origin: string;
   referer: string;
   userAgent: string;
 }
+
+// 模型目录拉取用的 Web 端 UA（贴近 Web 端真实请求形态；CLI UA 亦可用，实测均 200）
+const WORKBUDDY_WEB_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
   if (normalizeWorkbuddyRegion(region) === "intl") {
@@ -124,6 +133,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
       chat: "https://www.codebuddy.ai/v2/chat/completions",
       billing: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
       checkin: "https://www.codebuddy.ai/v2/billing/meter/daily-checkin",
+      models: "https://www.codebuddy.ai/console/enterprises/personal/models",
       origin: "https://www.codebuddy.ai",
       referer: "https://www.codebuddy.ai/",
       userAgent: "CLI/2.63.2 CodeBuddy/2.63.2",
@@ -136,6 +146,9 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
     checkin: "https://www.codebuddy.cn/v2/billing/meter/daily-checkin",
+    // 模型目录 host 与 billing 同源（www.codebuddy.cn；实测三 host 等价：
+    // www.workbuddy.cn / www.codebuddy.cn / copilot.tencent.com 均 200）
+    models: "https://www.codebuddy.cn/console/enterprises/personal/models",
     origin: "https://www.codebuddy.cn",
     referer: "https://www.codebuddy.cn/",
     userAgent: "CLI/2.63.2 CodeBuddy/2.63.2",
@@ -306,6 +319,104 @@ export class WorkBuddyProvider implements ProviderAdapter {
     } catch {
       return undefined;
     }
+  }
+
+  // v4.7.1：上游模型目录拉取（Task 57 逆向成果，供 /api/console/providers/models 路由候选下拉）。
+  // 端点：Web 端 GET /console/enterprises/personal/models（个人账户 enterpriseId 字面量 "personal"）。
+  // 鉴权：CLI 凭证 Bearer accessToken 直接可用（实测 2026-09-22，CN 三 host 均 200）。
+  // 响应结构：data.models[]（全量模型 + 元数据）∪ data.agents[]（各端白名单）；
+  //          CLI 通道可用 = agents.name==="cli".models 白名单按序过滤 models[]。
+  // 容错：逐账户尝试（最多 3 个）→ 401 无感续签重试一次 → 全部失败抛错（调用方降级 derived）。
+  // INTL：同构端点当前上游 500（个人账户全变体实测），此处自然抛错降级；上游修复后零改动即通。
+  async listUpstreamModels(): Promise<UpstreamModelsResult> {
+    const ep = this.ep();
+    const accounts = this.getAccounts().slice(0, 3);
+    if (accounts.length === 0) {
+      throw new Error("无可用账户（请先在「API 中转」页为该提供商配置账户凭证）");
+    }
+    let lastErr = "未知错误";
+    for (const acc of accounts) {
+      let token = await this.getActiveToken(acc);
+      // 每账户最多两轮：首轮用现有 token；401 时无感续签后再试一轮
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!token) {
+          lastErr = `账户 ${acc.name || acc.id} 无 accessToken`;
+          break;
+        }
+        try {
+          const resp = await fetchWithProxy(
+            ep.models,
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
+                Accept: "application/json, text/plain, */*",
+                "User-Agent": WORKBUDDY_WEB_UA,
+              },
+              signal: AbortSignal.timeout(8_000),
+            },
+            { providerId: this.id }
+          );
+          if (resp.status === 401 && attempt === 0) {
+            // token 过期 → 无感续签后重试（与主链路同一 refreshAccessToken）
+            const refreshed = await this.refreshAccessToken(acc);
+            token = (typeof refreshed === "string" && refreshed) || "";
+            continue;
+          }
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}${resp.status === 500 ? "（上游服务错误）" : ""}`);
+          }
+          const resJson = (await resp.json().catch(() => ({}))) as {
+            code?: number;
+            msg?: string;
+            data?: {
+              models?: Array<{
+                id?: string;
+                name?: string;
+                credits?: string | null;
+                maxInputTokens?: number | null;
+                maxOutputTokens?: number | null;
+                supportsImages?: boolean;
+                supportsReasoning?: boolean;
+                supportsToolCall?: boolean;
+                isDefault?: boolean;
+              }>;
+              agents?: Array<{ name?: string; models?: string[] }>;
+            };
+          };
+          if (typeof resJson.code === "number" && resJson.code !== 0) {
+            throw new Error(`业务错误 code=${resJson.code} ${resJson.msg || ""}`.trim());
+          }
+          const all = (resJson.data?.models ?? []).filter((m) => typeof m?.id === "string" && m.id);
+          if (all.length === 0) {
+            throw new Error("上游响应无模型数据");
+          }
+          const byId = new Map(all.map((m) => [m.id as string, m]));
+          const allow = (resJson.data?.agents ?? []).find((a) => a?.name === "cli")?.models ?? [];
+          // CLI 白名单有序过滤；上游未配置白名单时回退全量目录
+          const ids = allow.length > 0 ? allow.filter((id) => byId.has(id)) : all.map((m) => m.id as string);
+          const details = ids.map((id) => {
+            const m = byId.get(id);
+            return {
+              id,
+              name: m?.name ?? null,
+              credits: m?.credits ?? null,
+              maxInputTokens: m?.maxInputTokens ?? null,
+              maxOutputTokens: m?.maxOutputTokens ?? null,
+              supportsImages: !!m?.supportsImages,
+              supportsReasoning: !!m?.supportsReasoning,
+              supportsToolCall: !!m?.supportsToolCall,
+              isDefault: !!m?.isDefault,
+            };
+          });
+          return { models: ids, details, url: ep.models, allCount: all.length };
+        } catch (e) {
+          lastErr = e instanceof Error ? e.message : String(e);
+          break; // 该账户失败 → 换下一个账户
+        }
+      }
+    }
+    throw new Error(lastErr);
   }
 
   // 凭据写回（合并语义：只覆盖传入字段；同时记录 lastRefreshAt 供 /admin/api/status 展示）

@@ -2292,3 +2292,27 @@ Stage Summary:
 3. 计费 client 字段验证（顺延）；GET /v1/responses/{id}（顺延）；标准适配器 getBalance 池形态（顺延）
 4. 建议配置变更后 bun .zscripts/db-snapshot.ts export（本轮 DB 已恢复但未再做快照）
 5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+
+---
+Task ID: 58
+Agent: 主会话（Z.ai Code，用户直派任务轮：模型路由新增路由的自动模型拉取 —— WorkBuddy CN 真实上游接入）
+Task: 用户指出「模型路由-新增路由中选择提供商后自动拉取模型」功能不完美（workbuddy 此前只返回 derived 推导目录），要求先把 CN 的实现做出来 —— 基于 Task 57 逆向成果把 WorkBuddy 真实上游模型目录接入该链路；版本 4.7.0 → 4.7.1
+
+Work Log:
+- 【契约层】core/types.ts 新增 UpstreamModelDetail / UpstreamModelsResult 类型（models CLI 白名单有序 + details 元数据一一对应 + url + allCount）；ProviderAdapter 增加可选能力 listUpstreamModels；core/contract.ts 新增 hasUpstreamModels 探针（沿用能力探针模式，调用方不 switch type）
+- 【Provider 层】WorkBuddyProvider：①WorkbuddyEndpoints 增 models 端点（CN www.codebuddy.cn/console/enterprises/personal/models 与 billing 同 host，实测三 host 等价；INTL www.codebuddy.ai 同构，当前上游 500）②新方法 listUpstreamModels()：逐账户尝试（≤3）→ getActiveToken（内存热缓存→DB）→ GET models（Bearer + X-Client-Platform: web + Web UA，8s 超时）→ 401 无感续签重试一轮 → 解析 data.agents[].name==="cli" 白名单有序过滤 data.models[]（白名单空回退全量）→ details 元数据映射（credits 原样透传 "x0.29"/"x0.00 credits"/null）；全部失败抛错由调用方降级
+- 【Route 层】/api/console/providers/models 新增 workbuddy 分支：getConfig → getProviderFleet（单例复用 token 热缓存）→ hasUpstreamModels 探针 → listUpstreamModels；成功 source=upstream + details + allCount；失败（INTL 500 / 无账户 / 超时）降级 derived + fallbackReason 透明化；payload 契约向后兼容（details/allCount 可选）
+- 【前端】routes.tsx：①ProviderModelsData 增 details/allCount 可选字段 ②模型下拉项富展示 —— 倍率徽章（×0.29 灰色 / "x0.00 credits"→绿色「免费」）、默认徽章（teal）、上下文紧凑展示（1M/128k，输入/输出）、能力标注（图像·推理，无工具单独标）、title 悬浮提示 ③derived 降级行内展示 fallbackReason（截断 60 字符）④顺手修复既有 Select uncontrolled→controlled React 警告（value 恒传字符串含空串，两处：提供商/模型下拉）
+- 【验证矩阵】lint 零错误；tsc src/ 零错误（修一处联合类型收窄）；healthz v4.7.1 ok；API 实测：CN workbuddy → source=upstream 16 模型 + allCount 30 + details 元数据完整（auto 默认/hy3 免费/hy4-preview ×0.29 1M/64k）；INTL → source=derived + 「上游拉取失败（HTTP 500（上游服务错误））」透明化；不存在的 provider → 明确报错；无凭证 → 401；缓存 60s 生效（首拉 ~280ms，缓存后 ~12ms，dev.log 实证）
+- 【浏览器 QA】agent-browser 全流程：登录 → 模型路由 → 新增路由 → 选 workbuddy(CN) → 下拉自动显示「上游实时 · 16 个，CLI 可用 16」→ 展开见富展示（auto 默认 256k/32k 图像·推理 / hy3 免费 / deepseek-v4.1-flash ×0.03 1M/128k…）→ 选 INTL 验证降级原因展示 → 切回 CN 选 hy4-preview → 创建路由成功（「路由「hy4-preview」已创建」，表内启用开关正常）→ 第二轮交互 Select 警告零新增（历史 2 条为修复前残留）；截图 download/qa-v471-models-dropdown.png
+- 【附带产物】QA 创建的路由 hy4-preview（客户端模型名 hy4-preview → workbuddy hy4-preview，1M 上下文 ×0.29）保留在 ModelRoute 表 —— 真实可用新模型，用户可自行删除
+
+Stage Summary:
+- 模型路由「新增路由」选提供商自动拉取：WorkBuddy CN 从 derived 推导目录升级为真实上游实时拉取（/console/enterprises/personal/models，CLI 凭证池直用），下拉富展示倍率/免费/默认/上下文/能力徽章；INTL 同构实现已就位（上游修复后零改动即通），当前降级 derived 且原因透明展示
+- 版本 4.7.1；lint/tsc/API/浏览器 QA 全绿；deepseek-v4-flash 死路由问题仍未处理（Task 57 已记录，待用户决策）
+
+未解决问题与风险（下一阶段建议）:
+1. INTL 模型列表仍无解（上游 500）：实现已就位，建议每隔几天在控制台点一次刷新试探（或做成定时探活）
+2. ModelRoute 的 deepseek-v4-flash 路由已下架失效（不在 CLI 白名单）—— 建议删除或改名 deepseek-v4.1-flash（待用户决策）
+3. 顺延项：计费 client 字段验证；GET /v1/responses/{id}；标准适配器 getBalance 池形态
+4. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在

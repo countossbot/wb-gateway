@@ -60,9 +60,26 @@ import type { RouteRow, RoutesData } from "@/lib/console/types";
 
 // ---- 上游模型目录拉取（/api/console/providers/models）----
 // 模块级缓存 60s：同一提供商多行候选/反复打开表单不重复打上游；强制刷新穿透。
+// v4.7.1：workbuddy 接入真实上游拉取（Web 端 /console/enterprises/personal/models），
+// 响应可携带 details 元数据（倍率/上下文/能力），下拉项富展示。
+interface UpstreamModelDetail {
+  id: string;
+  name?: string | null;
+  /** 上游展示文案原样透传："x0.29" / "x0.00 credits" / null（无固定倍率） */
+  credits?: string | null;
+  maxInputTokens?: number | null;
+  maxOutputTokens?: number | null;
+  supportsImages?: boolean;
+  supportsReasoning?: boolean;
+  supportsToolCall?: boolean;
+  isDefault?: boolean;
+}
 interface ProviderModelsData {
   source: "upstream" | "derived";
   models: string[];
+  details?: UpstreamModelDetail[];
+  /** 上游全量模型数（含 CLI 白名单外旧模型），与 models.length 不同时有参考意义 */
+  allCount?: number;
   fallbackReason?: string;
   upstreamUrl?: string;
 }
@@ -80,6 +97,23 @@ async function fetchProviderModels(
   const d = await apiGet<ProviderModelsData>(`/api/console/providers/models?providerId=${encodeURIComponent(providerId)}${force ? "&refresh=1" : ""}`);
   MODEL_FETCH_CACHE.set(providerId, { data: d, at: Date.now() });
   return d;
+}
+
+// token 数值 → 紧凑展示（1000000 → "1M"，256000 → "256k"，128000 → "128k"）
+function compactTokens(n: number | null | undefined): string {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "";
+  if (n >= 1_000_000 && n % 1_000_000 === 0) return `${n / 1_000_000}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+// 倍率徽章文案："x0.00 credits" → 免费（绿色）；"x0.29" → ×0.29；null → 无
+function creditsBadgeLabel(credits: string | null | undefined): { text: string; tone: "free" | "normal" } | null {
+  if (!credits) return null;
+  const v = credits.replace(/\s*credits$/i, "").trim();
+  if (!v) return null;
+  if (/^x?0(?:\.0+)?$/i.test(v.replace("x", ""))) return { text: "免费", tone: "free" };
+  return { text: v.startsWith("x") ? `×${v.slice(1)}` : `×${v}`, tone: "normal" };
 }
 
 interface CandidateDraft {
@@ -131,7 +165,7 @@ function SortableCandidate({
       setModelsError("");
       try {
         const d = await fetchProviderModels(pid, force);
-        setUpstream({ source: d.source, models: d.models || [], fallbackReason: d.fallbackReason, upstreamUrl: d.upstreamUrl });
+        setUpstream({ source: d.source, models: d.models || [], details: d.details, allCount: d.allCount, fallbackReason: d.fallbackReason, upstreamUrl: d.upstreamUrl });
       } catch (e) {
         setModelsError(errMessage(e));
         setUpstream(null);
@@ -150,6 +184,12 @@ function SortableCandidate({
   // 模型下拉数据源：优先上游/推导目录；拉取中或失败时兑底静态目录
   const modelOptions = upstream?.models?.length ? upstream.models : nativeModels;
   const modelInOptions = !!cand.model && modelOptions.includes(cand.model);
+  // 上游元数据（details）：模型 ID → 倍率/上下文/能力（无则朴素渲染）
+  const detailMap = React.useMemo(() => {
+    const m = new Map<string, UpstreamModelDetail>();
+    for (const d of upstream?.details || []) m.set(d.id, d);
+    return m;
+  }, [upstream?.details]);
   // 下拉模式：已选提供商 + 有可用目录 + 未切手动 + （已填值时值在目录内）
   const useModelSelect =
     !!cand.providerId && modelOptions.length > 0 && !cand.modelCustom && (!cand.model || modelInOptions);
@@ -171,7 +211,8 @@ function SortableCandidate({
       </button>
       <span className="w-6 shrink-0 text-center text-xs tabular-nums text-stone-400">{index + 1}</span>
       <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
-        <Select value={cand.providerId || undefined} onValueChange={(v) => onChange({ providerId: v })}>
+        {/* value 恒传字符串（含空串）保持受控：避免首次选择时 uncontrolled→controlled 警告 */}
+        <Select value={cand.providerId} onValueChange={(v) => onChange({ providerId: v })}>
           <SelectTrigger size="sm" className="w-full sm:w-52">
             <SelectValue placeholder="选择提供商" />
           </SelectTrigger>
@@ -185,13 +226,13 @@ function SortableCandidate({
             ))}
           </SelectContent>
         </Select>
-        {/* 模型字段：选提供商后自动从上游拉取模型目录（openai/anthropic/opencode 实时；
-            workbuddy/qwenweb 上游无公开列表端点 → 推导目录），失败降级静态预设；
-            手动输入始终可切（保留任意上游模型能力，模型 ID 原样透传零改写） */}
+        {/* 模型字段：选提供商后自动从上游拉取模型目录（openai/anthropic/opencode/workbuddy(CN) 实时；
+            qwenweb 或拉取失败 → 推导目录降级），workbuddy 上游响应含元数据 → 下拉富展示
+            （倍率/上下文/能力徽章）；手动输入始终可切（保留任意上游模型能力，模型 ID 原样透传零改写） */}
         {useModelSelect ? (
           <div className="flex w-full min-w-0 flex-1 gap-1.5">
             <Select
-              value={cand.model || undefined}
+              value={cand.model}
               onValueChange={(v) => {
                 if (v === MODEL_MANUAL_SENTINEL) {
                   onChange({ modelCustom: true });
@@ -206,7 +247,7 @@ function SortableCandidate({
                     modelsLoading
                       ? "正在从上游拉取模型…"
                       : upstream?.source === "upstream"
-                        ? `选择模型（上游实时 · ${modelOptions.length} 个）`
+                        ? `选择模型（上游实时 · ${modelOptions.length} 个${upstream?.allCount && upstream.allCount > modelOptions.length ? `，CLI 可用 ${modelOptions.length}` : ""}）`
                         : upstream?.source === "derived"
                           ? `选择模型（已知目录 · ${modelOptions.length} 个）`
                           : `选择模型（${modelOptions.length} 个）`
@@ -219,18 +260,43 @@ function SortableCandidate({
                     {upstream.source === "upstream" ? (
                       <><span className="size-1.5 rounded-full bg-teal-500" />已从上游实时拉取（可点右侧刷新）</>
                     ) : (
-                      <><span className="size-1.5 rounded-full bg-amber-500" />已知目录 · 来自当前路由配置与内置预设（该类型上游无公开模型列表接口，或暂时不可用）</>
+                      <><span className="size-1.5 rounded-full bg-amber-500" />已知目录 · 来自当前路由配置与内置预设{upstream.fallbackReason ? `（${upstream.fallbackReason.slice(0, 60)}）` : "（该类型上游无公开模型列表接口，或暂时不可用）"}</>
                     )}
                   </div>
                 )}
                 {modelsError && !upstream && (
                   <div className="px-2 py-1.5 text-[10px] text-red-500">模型目录拉取失败——已降级静态目录，可点右侧刷新重试</div>
                 )}
-                {modelOptions.map((m) => (
-                  <SelectItem key={m} value={m}>
-                    <code className="font-mono text-xs">{m}</code>
-                  </SelectItem>
-                ))}
+                {modelOptions.map((m) => {
+                  const det = detailMap.get(m);
+                  const cred = creditsBadgeLabel(det?.credits);
+                  const ctxIn = compactTokens(det?.maxInputTokens);
+                  const ctxOut = compactTokens(det?.maxOutputTokens);
+                  const ctxText = ctxIn && ctxOut ? `${ctxIn}/${ctxOut}` : ctxIn || "";
+                  const caps = [
+                    det?.supportsImages ? "图像" : "",
+                    det?.supportsReasoning ? "推理" : "",
+                    det?.supportsToolCall ? "" : "无工具",
+                  ].filter(Boolean).join("·");
+                  return (
+                    <SelectItem key={m} value={m}>
+                      <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                        <code className="truncate font-mono text-xs">{m}</code>
+                        {det?.isDefault ? <Badge variant="secondary" className="h-4 shrink-0 bg-teal-50 px-1 text-[9px] text-teal-700">默认</Badge> : null}
+                        {cred ? (
+                          <Badge
+                            variant="secondary"
+                            className={`h-4 shrink-0 px-1 text-[9px] ${cred.tone === "free" ? "bg-emerald-50 text-emerald-700" : "text-stone-500"}`}
+                          >
+                            {cred.text}
+                          </Badge>
+                        ) : null}
+                        {ctxText ? <span className="shrink-0 text-[9px] text-stone-400" title="上下文输入/输出">{ctxText}</span> : null}
+                        {caps ? <span className="shrink-0 text-[9px] text-stone-400" title={`能力：${caps}`}>{caps}</span> : null}
+                      </span>
+                    </SelectItem>
+                  );
+                })}
                 <SelectItem value={MODEL_MANUAL_SENTINEL}>
                   <span className="text-xs text-muted-foreground">手动输入其他模型…</span>
                 </SelectItem>
