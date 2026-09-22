@@ -2342,3 +2342,23 @@ Stage Summary:
 3. 模型目录含 hy3/hy4-preview x0.00 免费（INTL 也有）—— 免费额度通道值得纳入路由规划
 4. 顺延项：计费 client 字段验证；GET /v1/responses/{id}；标准适配器 getBalance 池形态；建议配置变更后 bun .zscripts/db-snapshot.ts export
 5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+---
+Task ID: 60
+Agent: 主会话（Z.ai Code，用户直派任务轮：模型下拉项展示精简）
+Task: 用户要求「将所有拉取模型后面的上下文和能力都去除，只保留模型名称和倍率」—— 模型路由新增/编辑路由的模型下拉项去除上下文（176k/24k）与能力（图像·推理·无工具）标注及默认徽章，仅保留模型名 + 倍率/免费徽章；版本 4.7.2 → 4.7.3
+
+Work Log:
+- 【前端精简】routes.tsx SelectItem 渲染：去除 ctxText（上下文输入/输出紧凑展示）、caps（图像·推理·无工具能力标注）、isDefault 默认徽章三项 —— 仅保留 <code> 模型名 + 倍率徽章（×0.29 / 免费绿色）；selected 后 trigger 回显同步精简（如「gpt-5.6-luna ×0.14」）
+- 【清理】compactTokens 辅助函数（1000000→1M/256000→256k）仅服务上下文展示，随之删除；creditsBadgeLabel 保留（倍率徽章）；UpstreamModelDetail 接口字段保留（API 契约文档化，元数据仍完整透传，仅展示层精简）
+- 【注释同步】头部模块注释与模型字段注释更新为「下拉项精简展示（仅模型名 + 倍率/免费徽章）」
+- 【验证矩阵】lint 零错误；tsc src/ 零错误；healthz v4.7.3；agent-browser QA：INTL 下拉（default-model ×0.79 / hy3 免费 / gpt-5.6-sol ×3.47 / gpt-5.6-luna ×0.14 —— 无上下文/能力/默认标注）、CN 下拉（auto 无徽章 / hy4-preview ×0.29 / deepseek-v4.1-flash ×0.03）均精简生效；console 零错误零警告；截图 download/qa-v473-dropdown-simplified.png
+
+Stage Summary:
+- 模型下拉项展示形态定稿：模型名 + 倍率徽章（免费绿色高亮），其余元数据标注全部去除；两区一致
+- 版本 4.7.3；lint/tsc/浏览器 QA 全绿；后端 API 元数据透传不变（details 仍含全量字段，前端仅展示精简）
+
+未解决问题与风险（下一阶段建议）:
+1. QA 路由 gpt-5.6-luna-test 与 hy4-preview 留存 ModelRoute 表（真实可用模型，用户可自行删除）；deepseek-v4-flash 死路由问题仍未处理（Task 57 记录，待用户决策）
+2. INTL 槽位模型（default-model/fast-model 等）语义待验证（智能路由 or 固定别名）
+3. 顺延项：计费 client 字段验证；GET /v1/responses/{id}；标准适配器 getBalance 池形态；建议配置变更后 bun .zscripts/db-snapshot.ts export
+4. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
