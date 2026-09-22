@@ -134,6 +134,7 @@ export default function Home() {
     <ConsoleShell
       version={version}
       username={username || "admin"}
+      role={userRole}
       authVia={authVia}
       active={tab}
       onSelect={(t) => {
