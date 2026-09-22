@@ -19,6 +19,12 @@ export interface RuntimeSettingsShape {
   keepaliveTz: string;
   usageProviderId: string; // 默认 workbuddy
   maxContextTurns: number; // 0 = 不限
+  // v4.9.2：账号池调度模式。
+  //   "load-balance"（默认）—— 会话粘性优先：同一会话固定打同一账号（上游按账号隔离的
+  //     前缀缓存保持热，命中率不随账号数稀释）；无粘性键时退化为轮转。
+  //   "sequential" —— 顺序调度：完全按 round-robin 轮转，忽略会话粘性键。
+  // 两者共用 orderAccounts()，仅「是否传 affinityKey」不同，无独立算法分支。
+  accountSchedulingMode: "load-balance" | "sequential";
   auditRetentionDays: number; // v3.2.2：操作审计保留天数（默认 90，0 = 永久保留，每小时节流清扫）
   balanceRetentionDays: number; // v3.7.0：余额快照保留天数（默认 365，0 = 永久保留，每小时节流清扫）
   // ---- v4.2.0：SSE 流式保活与上游超时（Task 33 诊断 R1/R2/R6 修复，可热调） ----
@@ -41,6 +47,7 @@ const DEFAULTS: RuntimeSettingsShape = {
   keepaliveTz: "Asia/Shanghai",
   usageProviderId: "workbuddy",
   maxContextTurns: 0,
+  accountSchedulingMode: "load-balance",
   auditRetentionDays: 90,
   balanceRetentionDays: 365,
   streamStallMs: 180_000,
@@ -143,6 +150,13 @@ function applyRows(rows: Array<{ key: string; value: unknown }>): void {
           break;
         case "maxContextTurns":
           merged.maxContextTurns = Number(row.value) || 0;
+          break;
+        case "accountSchedulingMode":
+          // 白名单收窄：非法/历史脏值一律回落默认（load-balance），不留未知态给调度器
+          merged.accountSchedulingMode =
+            row.value === "sequential" || row.value === "load-balance"
+              ? row.value
+              : DEFAULTS.accountSchedulingMode;
           break;
         case "auditRetentionDays": {
           const n = Math.floor(Number(row.value));

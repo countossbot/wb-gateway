@@ -106,6 +106,7 @@ export async function consoleSettingsSnapshot(): Promise<Record<string, unknown>
     keepaliveCron: settings.keepaliveCron,
     keepaliveTz: settings.keepaliveTz,
     maxContextTurns: settings.maxContextTurns,
+    accountSchedulingMode: settings.accountSchedulingMode, // v4.9.2
     usageProviderId: settings.usageProviderId,
     auditRetentionDays: settings.auditRetentionDays,
     balanceRetentionDays: settings.balanceRetentionDays, // v3.7.0

@@ -129,6 +129,8 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
   const [maxTurns, setMaxTurns] = React.useState("0");
   const [logLevel, setLogLevel] = React.useState("info");
   const [usageProvider, setUsageProvider] = React.useState("");
+  // v4.9.2：账号池调度模式（默认负载均衡，与历史行为一致）
+  const [schedulingMode, setSchedulingMode] = React.useState<"load-balance" | "sequential">("load-balance");
   const [auditRetention, setAuditRetention] = React.useState("90");
   // v3.7.0：余额快照保留期（字符串态供 Select；保存时归一为整数）
   const [balanceRetention, setBalanceRetention] = React.useState("365");
@@ -198,6 +200,8 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
       setHeadersTimeoutSec(String(Math.round((s.upstreamHeadersTimeoutMs ?? 300_000) / 1000)));
       setBodyTimeoutSec(String(Math.round((s.upstreamBodyTimeoutMs ?? 600_000) / 1000)));
       setUsageProvider(s.usageProviderId || "");
+      // v4.9.2：旧库无此键时回落默认（负载均衡），与后端 DEFAULTS 一致
+      setSchedulingMode(s.accountSchedulingMode === "sequential" ? "sequential" : "load-balance");
       setAuditRetention(String(s.auditRetentionDays ?? 90));
       setBalanceRetention(String(s.balanceRetentionDays ?? 365));
     } catch (e) {
@@ -373,6 +377,7 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
         streamStallMs: stall * 1000,
         upstreamHeadersTimeoutMs: headersT * 1000,
         upstreamBodyTimeoutMs: bodyT * 1000,
+        accountSchedulingMode: schedulingMode,
         ...(usageProvider ? { usageProviderId: usageProvider } : {}),
       });
       setNotice("系统设置已保存（热生效）");
@@ -842,6 +847,26 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>账号调度</Label>
+              <Select
+                value={schedulingMode}
+                onValueChange={(v) => setSchedulingMode(v as "load-balance" | "sequential")}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="load-balance">负载均衡</SelectItem>
+                  <SelectItem value="sequential">顺序调度</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {schedulingMode === "sequential"
+                  ? "按账号顺序轮转，忽略会话粘性"
+                  : "同一会话固定同一账号（保上游前缀缓存）"}
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label>用量统计提供商</Label>

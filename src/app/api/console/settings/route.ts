@@ -38,6 +38,8 @@ interface SettingsPayload {
   listenLan?: boolean;
   logLevel?: "debug" | "info" | "warn" | "error";
   maxContextTurns?: number;
+  // v4.9.2：账号池调度模式（load-balance = 会话粘性优先；sequential = 纯轮转）
+  accountSchedulingMode?: "load-balance" | "sequential";
   usageProviderId?: string;
   auditRetentionDays?: number;
   balanceRetentionDays?: number;
@@ -89,6 +91,13 @@ export async function PUT(request: NextRequest) {
       return fail("maxContextTurns 必须为 >= 0 的数字（0 = 不限）");
     }
     updates.maxContextTurns = Math.floor(body.maxContextTurns);
+  }
+  if (body.accountSchedulingMode !== undefined) {
+    // 值域白名单：只接受两个字面量，拒绝未知值（防手调 API 写入调度器无法识别的模式）
+    if (body.accountSchedulingMode !== "load-balance" && body.accountSchedulingMode !== "sequential") {
+      return fail('accountSchedulingMode 必须为 "load-balance" 或 "sequential"');
+    }
+    updates.accountSchedulingMode = body.accountSchedulingMode;
   }
   if (body.usageProviderId) {
     const provider = await db.provider.findUnique({ where: { id: body.usageProviderId } });
