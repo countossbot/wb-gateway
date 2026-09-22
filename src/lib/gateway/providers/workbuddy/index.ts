@@ -236,6 +236,70 @@ export class WorkBuddyProvider implements ProviderAdapter {
     return this.endpoints;
   }
 
+  // v4.9.1：chat 头的唯一构造点。callChat 与 INTL 会话签到共用，防止两处头集漂移。
+  buildChatHeaders(token: string, userId: string): Record<string, string> {
+    const ep = this.ep();
+    return {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/plain, */*",
+      Connection: "keep-alive",
+      "X-Requested-With": "XMLHttpRequest",
+      Origin: ep.origin,
+      Referer: ep.referer,
+      "User-Agent": ep.userAgent,
+      Authorization: `Bearer ${token}`,
+      "X-User-Id": userId,
+      ...workbuddyDesktopAttributionHeaders(),
+      "X-CodeBuddy-Request": "1",
+      "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
+      ...(this.region === "intl"
+        ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
+        : {}),
+    };
+  }
+
+  // v4.9.1：INTL 签到方式开关。默认 "hy3"（会话签到，用户指定）；
+  // 置 "legacy" 可切回 billing/meter/daily-checkin（上游若恢复签到活动时用）。
+  // 注：.workbuddy 目录外无 UI 入口，改 provider.config.intlCheckinMode 即可（控制台账号页保存会保留该字段）。
+  private intlCheckinMode(): "hy3" | "legacy" {
+    return this.config.intlCheckinMode === "legacy" ? "legacy" : "hy3";
+  }
+
+  // v4.9.1：INTL 站签到改用「发一次 hy3 会话」。
+  // 背景（2026-09-22 实测）: INTL 域 *全部* 签到端点 (www.workbuddy.ai / www.codebuddy.ai,
+  // 带/不带 /v2 前缀) 均返回 400 code=10001「签到活动未开启或已过期」——INTL 无签到活动，
+  // 原路径必然失败。故 INTL 以一次 hy3 会话置为签到成功判据（用户指定方式）。
+  // 只读首块即 cancel：会话已被上游受理（200 text/event-stream）即达成目的，不耗生成额度。
+  private async checkinViaHy3Chat(account: WorkbuddyAccount, token: string): Promise<Record<string, unknown>> {
+    const resp = await fetchWithProxy(
+      this.ep().chat,
+      {
+        method: "POST",
+        headers: this.buildChatHeaders(token, String(account.userId)),
+        body: JSON.stringify({
+          model: "hy3",
+          stream: true,
+          max_tokens: 1,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+        signal: AbortSignal.timeout(30_000),
+      },
+      { providerId: this.id }
+    );
+    if (!resp.ok) {
+      const text = (await resp.text()).slice(0, 200);
+      return { success: false, mode: "hy3-chat", status: resp.status, error: text };
+    }
+    try {
+      // 读到首块即认定会话已建立并断开（释放上游连接）
+      await resp.body?.getReader().read();
+      await resp.body?.cancel();
+    } catch {
+      /* 读流失败不影响判定：HTTP 200 已说明会话被受理 */
+    }
+    return { success: true, mode: "hy3-chat", model: "hy3", status: 200 };
+  }
+
   // 获取所有启用的账号列表（支持单账号与账号池双重兼容）
   getAccounts(): WorkbuddyAccount[] {
     const accounts = this.config.accounts as WorkbuddyAccount[] | undefined;
@@ -552,26 +616,9 @@ export class WorkBuddyProvider implements ProviderAdapter {
     if (!token || !userId) return null;
 
     const makeRequest = async (tk: string): Promise<Response> => {
-      const ep = this.ep();
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        Accept: "application/json, text/plain, */*",
-        Connection: "keep-alive",
-        "X-Requested-With": "XMLHttpRequest",
-        Origin: ep.origin,
-        Referer: ep.referer,
-        "User-Agent": ep.userAgent,
-        Authorization: `Bearer ${tk}`,
-        "X-User-Id": userId,
-        ...workbuddyDesktopAttributionHeaders(),
-        "X-CodeBuddy-Request": "1",
-        "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
-        ...(this.region === "intl"
-          ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
-          : {}),
-      };
+      const headers = this.buildChatHeaders(tk, String(userId));
       return await fetchWithProxy(
-        ep.chat,
+        this.ep().chat,
         {
           method: "POST",
           headers,
@@ -881,6 +928,8 @@ export class WorkBuddyProvider implements ProviderAdapter {
   }
 
   // 每日签到：并发对账号池内所有账号自动签到领积分
+  // v4.9.1：按 region 分流 —— CN 走原 billing/meter/daily-checkin（实测有效）；
+  //         INTL 无签到活动，改走「每账户发一次 hy3 会话」（见 checkinViaHy3Chat）。
   async doDailyCheckin(): Promise<{
     success: boolean;
     accounts_count: number;
@@ -895,6 +944,16 @@ export class WorkBuddyProvider implements ProviderAdapter {
       if (!token || !userId)
         return { id: account.id, name: account.name, success: false, msg: "missing credentials" };
 
+      // INTL：无签到活动 → 默认发一次 hy3 会话即为签到（可配 intlCheckinMode:"legacy" 走回原端点）
+      if (this.region === "intl" && this.intlCheckinMode() === "hy3") {
+        try {
+          const res = await this.checkinViaHy3Chat(account, token);
+          return { id: account.id, name: account.name || account.id, ...res };
+        } catch (e) {
+          return { id: account.id, name: account.name, success: false, mode: "hy3-chat", error: (e as Error).message };
+        }
+      }
+
       try {
         const resp = await fetchWithProxy(
           this.ep().checkin,
@@ -905,10 +964,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
               "X-User-Id": userId,
               "User-Agent": workbuddyBillingUserAgent(),
               "X-CodeBuddy-Request": "1",
-              "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
-              ...(this.region === "intl"
-                ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
-                : {}),
+              "Accept-Language": "zh-CN",
               "Content-Type": "application/json",
               Accept: "application/json",
             },
