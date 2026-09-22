@@ -12,6 +12,7 @@ import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
 import { DEFAULT_ROUTES } from "@/lib/gateway/config/configService";
+import { WorkBuddyProvider, type UpstreamModelDetail } from "@/lib/gateway/providers/workbuddy";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,8 @@ interface ModelsPayload {
   cached: boolean;
   fallbackReason?: string;
   upstreamUrl?: string;
+  details: UpstreamModelDetail[];
+  allCount: number;
 }
 
 // providerId → { payload, at }
@@ -119,7 +122,17 @@ export async function GET(request: NextRequest) {
   const cfg = { ...((provider.config as Record<string, unknown>) || {}) };
 
   let payload: ModelsPayload;
-  if (type === "openai" || type === "anthropic" || type === "opencode") {
+  if (type === "workbuddy") {
+    try {
+      const adapter = new WorkBuddyProvider({ id: provider.id, name: provider.name, type: provider.type, config: cfg });
+      const result = await adapter.listUpstreamModels();
+      payload = { providerId, source: "upstream", models: result.models, modelsCount: result.models.length, fetchedAt: Date.now(), cached: false, upstreamUrl: result.url, details: result.details, allCount: result.allCount };
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      const models = await derivedModels(providerId);
+      payload = { providerId, source: "derived", models, modelsCount: models.length, fetchedAt: Date.now(), cached: false, fallbackReason: reason, details: [], allCount: models.length };
+    }
+  } else if (type === "openai" || type === "anthropic" || type === "opencode") {
     try {
       const { models, url } = await fetchUpstreamModels(type, cfg, providerId, provider.proxyOverride ?? null);
       payload = {
@@ -130,6 +143,8 @@ export async function GET(request: NextRequest) {
         fetchedAt: Date.now(),
         cached: false,
         upstreamUrl: url,
+        details: [],
+        allCount: models.length,
       };
     } catch (e) {
       // 上游失败 → derived 降级（透明化原因，前端仍可下拉/手动输入）
@@ -142,7 +157,9 @@ export async function GET(request: NextRequest) {
         modelsCount: models.length,
         fetchedAt: Date.now(),
         cached: false,
-        fallbackReason: `上游拉取失败（${reason}），已降级为已知目录`,
+        fallbackReason: "上游拉取失败（" + reason + "），已降级为已知目录",
+        details: [],
+        allCount: models.length,
       };
     }
   } else {
@@ -156,6 +173,8 @@ export async function GET(request: NextRequest) {
       fetchedAt: Date.now(),
       cached: false,
       fallbackReason: "该提供商类型上游无公开模型列表端点，目录来自当前路由配置与内置预设",
+      details: [],
+      allCount: models.length,
     };
   }
 

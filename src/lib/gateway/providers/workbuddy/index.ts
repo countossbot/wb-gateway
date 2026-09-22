@@ -103,6 +103,7 @@ export function normalizeWorkbuddyRegion(value: unknown): "cn" | "intl" {
 export interface WorkbuddyEndpoints {
   region: "cn" | "intl";
   probed: boolean;
+  models: string;
   refresh: string;
   chat: string;
   billing: string;
@@ -120,6 +121,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
     return {
       region: "intl",
       probed: true,
+      models: "https://www.codebuddy.ai/v2/enterprises/personal/models",
       refresh: "https://www.codebuddy.ai/v2/plugin/auth/token/refresh",
       chat: "https://www.codebuddy.ai/v2/chat/completions",
       billing: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
@@ -132,6 +134,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
   return {
     region: "cn",
     probed: true,
+    models: "https://www.codebuddy.cn/v2/enterprises/personal/models",
     refresh: "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
@@ -149,6 +152,25 @@ interface WorkbuddyAccount extends AccountConfig {
   accessToken?: string;
   refreshToken?: string;
   [key: string]: unknown;
+}
+
+export interface UpstreamModelDetail {
+  id: string;
+  name: string | null;
+  credits: string | null;
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
+  supportsImages: boolean;
+  supportsReasoning: boolean;
+  supportsToolCall: boolean;
+  isDefault: boolean;
+}
+
+export interface UpstreamModelsResult {
+  models: string[];
+  details: UpstreamModelDetail[];
+  url: string;
+  allCount: number;
 }
 
 export class WorkBuddyProvider implements ProviderAdapter {
@@ -180,6 +202,80 @@ export class WorkBuddyProvider implements ProviderAdapter {
       );
     }
     return this.endpoints;
+  }
+
+  async listUpstreamModels(): Promise<UpstreamModelsResult> {
+    const ep = this.ep();
+    const accounts = this.getAccounts().slice(0, 3);
+    if (accounts.length === 0) throw new Error("无可用账户（请先配置账户凭证）");
+    let lastErr = "未知错误";
+    for (const acc of accounts) {
+      let token = await this.getActiveToken(acc);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!token) {
+          lastErr = "账户 " + (acc.name || acc.id) + " 无 accessToken";
+          break;
+        }
+        try {
+          const resp = await fetchWithProxy(
+            ep.models,
+            {
+              headers: {
+                Authorization: "Bearer " + token,
+                "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
+                Accept: "application/json, text/plain, */*",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+              },
+              signal: AbortSignal.timeout(8_000),
+            },
+            { providerId: this.id }
+          );
+          if (resp.status === 401 && attempt === 0) {
+            token = (await this.refreshAccessToken(acc)) || "";
+            continue;
+          }
+          if (!resp.ok) throw new Error("HTTP " + resp.status + (resp.status === 500 ? "（上游服务错误）" : ""));
+          const resJson = (await resp.json().catch(() => ({}))) as {
+            code?: number;
+            msg?: string;
+            data?: {
+              models?: Array<Record<string, unknown>>;
+              agents?: Array<{ name?: string; models?: unknown }>;
+            };
+          };
+          if (typeof resJson.code === "number" && resJson.code !== 0) {
+            throw new Error(("业务错误 code=" + resJson.code + " " + (resJson.msg || "")).trim());
+          }
+          const all = (resJson.data?.models ?? []).filter(
+            (m): m is Record<string, unknown> => typeof m?.id === "string" && !!m.id
+          );
+          if (all.length === 0) throw new Error("上游响应无模型数据");
+          const byId = new Map(all.map((m) => [m.id as string, m]));
+          const allow = resJson.data?.agents?.find((a) => a?.name === "cli")?.models;
+          const allowIds = Array.isArray(allow) ? allow.filter((id): id is string => typeof id === "string") : [];
+          const ids = allowIds.length > 0 ? allowIds.filter((id) => byId.has(id)) : all.map((m) => m.id as string);
+          const details = ids.map((id) => {
+            const m = byId.get(id);
+            return {
+              id,
+              name: typeof m?.name === "string" ? m.name : null,
+              credits: typeof m?.credits === "string" ? m.credits : null,
+              maxInputTokens: typeof m?.maxInputTokens === "number" ? m.maxInputTokens : null,
+              maxOutputTokens: typeof m?.maxOutputTokens === "number" ? m.maxOutputTokens : null,
+              supportsImages: !!m?.supportsImages,
+              supportsReasoning: !!m?.supportsReasoning,
+              supportsToolCall: !!m?.supportsToolCall,
+              isDefault: !!m?.isDefault,
+            };
+          });
+          return { models: ids, details, url: ep.models, allCount: all.length };
+        } catch (e) {
+          lastErr = e instanceof Error ? e.message : String(e);
+          break;
+        }
+      }
+    }
+    throw new Error(lastErr);
   }
 
   // 获取所有启用的账号列表（支持单账号与账号池双重兼容）

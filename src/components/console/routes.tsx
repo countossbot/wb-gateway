@@ -65,6 +65,8 @@ interface ProviderModelsData {
   models: string[];
   fallbackReason?: string;
   upstreamUrl?: string;
+  details?: Array<{ id: string; name: string | null; credits: string | null; maxInputTokens: number | null; maxOutputTokens: number | null; supportsImages: boolean; supportsReasoning: boolean; supportsToolCall: boolean; isDefault: boolean }>;
+  allCount: number;
 }
 const MODEL_FETCH_CACHE = new Map<string, { data: ProviderModelsData; at: number }>();
 const MODEL_FETCH_TTL = 60_000;
@@ -124,6 +126,8 @@ function SortableCandidate({
   const [upstream, setUpstream] = React.useState<ProviderModelsData | null>(null);
   const [modelsLoading, setModelsLoading] = React.useState(false);
   const [modelsError, setModelsError] = React.useState("");
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const [menuBoundary, setMenuBoundary] = React.useState<HTMLDivElement | null>(null);
   const loadModels = React.useCallback(
     async (pid: string, force = false) => {
       if (!pid) return;
@@ -131,7 +135,7 @@ function SortableCandidate({
       setModelsError("");
       try {
         const d = await fetchProviderModels(pid, force);
-        setUpstream({ source: d.source, models: d.models || [], fallbackReason: d.fallbackReason, upstreamUrl: d.upstreamUrl });
+        setUpstream({ source: d.source, models: d.models || [], fallbackReason: d.fallbackReason, upstreamUrl: d.upstreamUrl, details: d.details || [], allCount: d.allCount ?? (d.models || []).length });
       } catch (e) {
         setModelsError(errMessage(e));
         setUpstream(null);
@@ -149,6 +153,14 @@ function SortableCandidate({
 
   // 模型下拉数据源：优先上游/推导目录；拉取中或失败时兑底静态目录
   const modelOptions = upstream?.models?.length ? upstream.models : nativeModels;
+  const detailMap = React.useMemo(() => new Map((upstream?.details ?? []).map((d) => [d.id, d])), [upstream?.details]);
+  const creditsBadgeLabel = React.useCallback((credits: string | null | undefined): { text: string; tone: "free" | "normal" } | null => {
+    if (!credits) return null;
+    const v = credits.replace(/\s*credits$/i, "").trim();
+    if (!v) return null;
+    if (/^x?0(?:\.0+)?$/i.test(v.replace("x", ""))) return { text: "免费", tone: "free" };
+    return { text: v.startsWith("x") ? "×" + v.slice(1) : "×" + v, tone: "normal" };
+  }, []);
   const modelInOptions = !!cand.model && modelOptions.includes(cand.model);
   // 下拉模式：已选提供商 + 有可用目录 + 未切手动 + （已填值时值在目录内）
   const useModelSelect =
@@ -199,8 +211,11 @@ function SortableCandidate({
                   onChange({ model: v });
                 }
               }}
+              onOpenChange={(open) => {
+                if (open) setMenuBoundary(triggerRef.current?.closest("[role=dialog]") as HTMLDivElement | null ?? null);
+              }}
             >
-              <SelectTrigger size="sm" className="h-8 min-w-0 flex-1 font-mono text-xs">
+              <SelectTrigger ref={triggerRef} size="sm" className="h-8 min-w-0 flex-1 font-mono text-xs">
                 <SelectValue
                   placeholder={
                     modelsLoading
@@ -213,24 +228,41 @@ function SortableCandidate({
                   }
                 />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent
+                collisionBoundary={menuBoundary ?? undefined}
+                collisionPadding={8}
+                style={{ maxHeight: "min(18rem, var(--radix-select-content-available-height))" }}
+              >
                 {upstream && (
                   <div className="flex items-center gap-1.5 px-2 py-1.5 text-[10px] text-stone-400">
                     {upstream.source === "upstream" ? (
                       <><span className="size-1.5 rounded-full bg-teal-500" />已从上游实时拉取（可点右侧刷新）</>
                     ) : (
-                      <><span className="size-1.5 rounded-full bg-amber-500" />已知目录 · 来自当前路由配置与内置预设（该类型上游无公开模型列表接口，或暂时不可用）</>
+                      <><span className="size-1.5 rounded-full bg-amber-500" />已知目录 · {upstream.fallbackReason || "上游不可用"}</>
                     )}
                   </div>
                 )}
                 {modelsError && !upstream && (
                   <div className="px-2 py-1.5 text-[10px] text-red-500">模型目录拉取失败——已降级静态目录，可点右侧刷新重试</div>
                 )}
-                {modelOptions.map((m) => (
-                  <SelectItem key={m} value={m}>
-                    <code className="font-mono text-xs">{m}</code>
-                  </SelectItem>
-                ))}
+                {modelOptions.map((m) => {
+                  const cred = creditsBadgeLabel(detailMap.get(m)?.credits);
+                  return (
+                    <SelectItem key={m} value={m}>
+                      <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                        <code className="truncate font-mono text-xs">{m}</code>
+                        {cred ? (
+                          <Badge
+                            variant="secondary"
+                            className={"h-4 shrink-0 px-1 text-[9px] " + (cred.tone === "free" ? "bg-emerald-50 text-emerald-700" : "text-stone-500")}
+                          >
+                            {cred.text}
+                          </Badge>
+                        ) : null}
+                      </span>
+                    </SelectItem>
+                  );
+                })}
                 <SelectItem value={MODEL_MANUAL_SENTINEL}>
                   <span className="text-xs text-muted-foreground">手动输入其他模型…</span>
                 </SelectItem>
