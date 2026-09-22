@@ -10,10 +10,17 @@ export async function register() {
   // ---- v4.0.0：schema 初始化与默认管理员播种（必须最前：后续 refreshRuntimeSettings /
   // ensureSystemSecrets / startScheduler 均依赖业务表存在；空库/新卷首启即自动就绪） ----
   try {
-    const { ensureDatabaseSchema, seedDefaultAdmin } = await import("@/lib/schemaInit");
+    const { ensureDatabaseSchema, seedDefaultAdmin, migrateAdminUserColumns } = await import("@/lib/schemaInit");
     const schema = await ensureDatabaseSchema();
     if (schema.initialized) {
       console.log(`[Instrumentation] database schema initialized (${schema.reason})`);
+    }
+    // v4.9.0：已有库的 AdminUser 增量列补齐 + 管理员角色回填（幂等）
+    const migrated = await migrateAdminUserColumns();
+    if (migrated.columnsAdded.length > 0 || migrated.promoted > 0 || migrated.reason === "rescued-admin") {
+      console.log(
+        `[Instrumentation] AdminUser migration: reason=${migrated.reason} added=[${migrated.columnsAdded.join(",")}] promoted=${migrated.promoted}`
+      );
     }
     const seeded = await seedDefaultAdmin();
     if (seeded.seeded) {
