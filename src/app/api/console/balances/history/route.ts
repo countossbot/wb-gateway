@@ -5,7 +5,7 @@
 // 天数上限 90（与 UsageDaily 同口径）；无快照时返回空 accounts（前端优雅降级）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission, ok } from "@/lib/gateway/console/consoleHelpers";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
 import type { BalanceHistoryAccount } from "@/lib/console/types";
 
@@ -19,7 +19,7 @@ function shiftDay(day: string, deltaDays: number): string {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "usage.read");
   if (session instanceof Response) return session;
 
   const daysParam = Number(request.nextUrl.searchParams.get("days"));

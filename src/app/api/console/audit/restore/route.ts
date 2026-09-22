@@ -9,7 +9,7 @@
 // 4. 恢复成功后写一条 action=restore 的审计记录（来源审计 id 可追溯）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { invalidateConfigChanged } from "@/lib/gateway/config/configService";
 import { auditRestore } from "@/lib/gateway/console/auditService";
 
@@ -22,7 +22,7 @@ interface RouteSnapshot {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "backup.write");
   if (session instanceof Response) return session;
 
   const body = (await request.json().catch(() => ({}))) as { auditId?: number };

@@ -11,7 +11,7 @@
 // 成本口径：与成本卡/透视/密钥预算完全同源（lib/console/pricing 单点）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
 import { loadPricingMap, estimateRowCost, EMPTY_COST_AGG, type CostAgg } from "@/lib/console/pricing";
 
@@ -71,7 +71,7 @@ interface MonthTotals {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "usage.read");
   if (session instanceof Response) return session;
 
   const month = normalizeMonth(request.nextUrl.searchParams.get("month"));

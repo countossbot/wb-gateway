@@ -6,7 +6,7 @@
 // （≤100,000 防溢出容错），6 位小数舍入；载荷 ≤200 行；载荷内模型名不得重复。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { auditUpdate } from "@/lib/gateway/console/auditService";
 import { unpricedModels } from "@/lib/console/pricing";
 
@@ -30,7 +30,7 @@ function sanitizePrice(raw: unknown): number | null {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "settings.read");
   if (session instanceof Response) return session;
 
   const [rows, suggestions] = await Promise.all([db.modelPricing.findMany({ orderBy: { model: "asc" } }), unpricedModels(30)]);
@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "settings.write");
   if (session instanceof Response) return session;
 
   let body: { rows?: unknown };

@@ -3,7 +3,7 @@
 // 导出全部匹配行（上限 5000，与滚动窗口同量级），响应 text/csv 附件（BOM + RFC 4180 转义）。
 // 响应头 X-Export-Rows / X-Export-Truncated 供前端提示导出行数与截断状态。
 import { NextRequest } from "next/server";
-import { requireSessionOr401 } from "@/lib/gateway/console/consoleHelpers";
+import { requirePermission } from "@/lib/gateway/console/consoleHelpers";
 import { exportRequestLogsCsv } from "@/lib/gateway/config/requestLog";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +26,7 @@ function parseTs(v: string | null): number | undefined {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requireSessionOr401(request);
+  const session = await requirePermission(request, "log.read");
   if (session instanceof Response) return session;
   const params = request.nextUrl.searchParams;
   const { csv, rows, truncated } = await exportRequestLogsCsv({
