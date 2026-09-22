@@ -41,14 +41,6 @@ export function hasTokenRefresh(provider: unknown): provider is ProviderAdapter 
   return !!provider && typeof (provider as ProviderAdapter).refreshAccessToken === "function";
 }
 
-// v4.7.1：上游模型目录拉取能力（WorkBuddy Web 端 /console/enterprises/*/models，Task 57 逆向）。
-// 调用方（路由候选下拉 /api/console/providers/models）探针后调用；
-// 无此能力的 provider（qwenweb 等）直接走 derived 推导目录。
-export function hasUpstreamModels(provider: unknown): provider is ProviderAdapter & {
-  listUpstreamModels(): Promise<UpstreamModelsResult>;
-} {
-  return !!provider && typeof (provider as ProviderAdapter).listUpstreamModels === "function";
-}
 
 export function hasOnSchedule(provider: unknown): provider is ProviderAdapter & {
   onSchedule(): Promise<unknown>;

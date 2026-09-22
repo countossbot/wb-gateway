@@ -272,15 +272,11 @@ const TYPE_BADGE_STYLE: Record<ProviderType, string> = {
   workbuddy: "bg-emerald-50 text-emerald-700 border-emerald-200",
   openai: "bg-teal-50 text-teal-700 border-teal-200",
   anthropic: "bg-amber-50 text-amber-700 border-amber-200",
-  opencode: "bg-stone-100 text-stone-700 border-stone-200",
-  qwenweb: "bg-rose-50 text-rose-700 border-rose-200",
 };
 const TYPE_LABEL: Record<ProviderType, string> = {
   workbuddy: "WorkBuddy",
   openai: "OpenAI 兼容",
   anthropic: "Anthropic 兼容",
-  opencode: "OpenCode Zen",
-  qwenweb: "Qwen Web",
 };
 
 export function TypeBadge({ type, className }: { type: string; className?: string }) {

@@ -181,18 +181,6 @@ export const PROVIDER_TYPE_META: Record<
     defaultBaseUrl: "https://api.anthropic.com",
     icon: "sparkles",
   },
-  opencode: {
-    label: "OpenCode Zen",
-    desc: "免费模型池（-free 后缀模型免凭据直连），自动同步模型列表",
-    defaultBaseUrl: "https://opencode.ai/zen/v1",
-    icon: "gift",
-  },
-  qwenweb: {
-    label: "Qwen Web（逆向）",
-    desc: "通义千问 Web 端逆向通道：Token/Cookie + 反爬指纹，单轮压缩",
-    defaultBaseUrl: "https://chat.qwen.ai",
-    icon: "globe",
-  },
 };
 
 /** 状态码颜色分类 */

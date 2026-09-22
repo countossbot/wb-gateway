@@ -2,22 +2,18 @@
 // 拉取策略按提供商类型：
 // - openai      ：GET {baseUrl}/models（Bearer）→ 上游实时（source: "upstream"）
 // - anthropic   ：GET {baseUrl}/models（x-api-key + anthropic-version）→ 上游实时
-// - opencode    ：GET {baseUrl}/models（CLI UA 公开接口）→ 上游实时
 // - workbuddy   ：v4.7.2 真实上游拉取（GET /v2/enterprises/personal/models，CLI 通道，
 //                CLI 凭证 Bearer 可用；CN 3 账户 × 2 host、INTL 4 账户 × 2 host 实测全 200
-//                含元数据。/console Web 路径仅认网页 cookie 会话，CLI Bearer 调 INTL 会 500）。
+//                含元数据；失败自然降级 derived。
 //                失败自然降级 derived，原因透明展示。
-// - qwenweb     ：上游无公开列表端点 → derived 推导目录：
-//   DB 路由候选（该 provider 在用）∪ DEFAULT_ROUTES 静态预设（原项目实测基线）
 // 上游拉取失败 / 超时（8s）→ 自动降级 derived，响应带 fallbackReason 透明化。
 // 内存缓存 60s（refresh=1 强制穿透）——表单反复打开不重复打上游。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
-import { DEFAULT_ROUTES, getConfig } from "@/lib/gateway/config/configService";
-import { getProviderFleet } from "@/lib/gateway/core/fleet";
-import { hasUpstreamModels } from "@/lib/gateway/core/contract";
+import { DEFAULT_ROUTES } from "@/lib/gateway/config/configService";
+import { WorkBuddyProvider } from "@/lib/gateway/providers/workbuddy";
 import type { UpstreamModelDetail } from "@/lib/gateway/core/types";
 
 export const dynamic = "force-dynamic";
@@ -63,7 +59,7 @@ async function derivedModels(providerId: string): Promise<string[]> {
   return merged;
 }
 
-// ---- 上游实时拉取（openai / anthropic / opencode） ----
+// ---- 上游实时拉取（openai / anthropic） ----
 async function fetchUpstreamModels(
   type: string,
   cfg: Record<string, unknown>,
@@ -89,11 +85,6 @@ async function fetchUpstreamModels(
         "x-api-key": (cfg.apiKey as string) || "",
         "anthropic-version": (cfg.anthropicVersion as string) || "2023-06-01",
       };
-      break;
-    }
-    case "opencode": {
-      url = `${((cfg.baseUrl as string) || "https://opencode.ai/zen/v1").replace(/\/$/, "")}/models`;
-      headers = { ...headers, "User-Agent": "opencode/1.18.30", "x-opencode-client": "cli" };
       break;
     }
     default:
@@ -131,15 +122,10 @@ export async function GET(request: NextRequest) {
 
   let payload: ModelsPayload;
   if (type === "workbuddy") {
-    // v4.7.1：WorkBuddy 真实上游拉取（fleet 单例复用 adapter 的 token 热缓存与无感续签）。
-    // CN 实测 200；INTL 上游当前 500 → 抛错自然降级 derived（透明化原因）。
+    // WorkBuddy 桌面客户端模型目录拉取；失败自然降级 derived。
     try {
-      const config = await getConfig();
-      const fleet = getProviderFleet(config);
-      const provider = fleet.getProvider(providerId);
-      if (!provider) throw new Error("适配器实例不可用（已停用或无账户）");
-      if (!hasUpstreamModels(provider)) throw new Error("适配器无上游模型目录能力");
-      const { models, details, url, allCount } = await provider.listUpstreamModels();
+      const adapter = new WorkBuddyProvider({ id: provider.id, name: provider.name, type: provider.type, config: cfg });
+      const { models, details, url, allCount } = await adapter.listUpstreamModels();
       payload = {
         providerId,
         source: "upstream",
@@ -165,7 +151,7 @@ export async function GET(request: NextRequest) {
         fallbackReason: `上游拉取失败（${reason}），已降级为已知目录`,
       };
     }
-  } else if (type === "openai" || type === "anthropic" || type === "opencode") {
+  } else if (type === "openai" || type === "anthropic") {
     try {
       const { models, url } = await fetchUpstreamModels(type, cfg, providerId, provider.proxyOverride ?? null);
       payload = {
@@ -192,7 +178,6 @@ export async function GET(request: NextRequest) {
       };
     }
   } else {
-    // qwenweb：无上游列表端点，直接 derived
     const models = await derivedModels(providerId);
     payload = {
       providerId,
@@ -201,7 +186,7 @@ export async function GET(request: NextRequest) {
       modelsCount: models.length,
       fetchedAt: Date.now(),
       cached: false,
-      fallbackReason: "该提供商类型上游无公开模型列表端点，目录来自当前路由配置与内置预设",
+      fallbackReason: "该提供商类型不支持上游模型目录，目录来自当前路由配置与内置预设",
     };
   }
 

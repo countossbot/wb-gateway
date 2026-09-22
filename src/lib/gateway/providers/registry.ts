@@ -33,10 +33,9 @@ export function createProvider(providerConfig: ProviderConfig, env?: unknown): P
   if (!providerConfig) return null;
   const ProviderClass = registry.get(providerConfig.type);
   if (!ProviderClass) {
-    throw new Error(
-      `Unknown provider type "${providerConfig.type}". ` +
-        `Supported types: ${supportedProviderTypes().join(", ")}`
-    );
+    // 历史 DB 中可能残留已移除的提供商类型；fleet 构建时跳过，避免整条网关启动失败。
+    console.warn(`Skip unsupported provider type "${providerConfig.type}" (${providerConfig.id}).`);
+    return null;
   }
   return new ProviderClass(providerConfig, env);
 }

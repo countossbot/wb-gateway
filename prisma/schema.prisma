@@ -51,9 +51,9 @@ model LoginAudit {
 
 // ---- 提供商与账号 ----
 model Provider {
-  id             String   @id // 如 workbuddy / workbuddy-intl / opencode
+  id             String   @id // 如 workbuddy / workbuddy-intl
   name           String
-  type           String // workbuddy | openai | anthropic | opencode | qwenweb
+  type           String // workbuddy | openai | anthropic
   enabled        Boolean  @default(true)
   sortOrder      Int      @default(0)
   config         Json // baseUrl / defaultHeaders / region 等非凭据配置

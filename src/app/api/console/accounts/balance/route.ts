@@ -3,7 +3,7 @@
 // INTL 等其它 workbuddy 家族提供商的余额长期不可见。本端点对每个有账号的 workbuddy 家族
 // 提供商并行调 fleet.getBalance(providerId)（内部 60s/10s 短缓存 + 账号级快照落库），
 // 控制台即可展示每提供商余额徽标并手动/自动刷新。
-// 非 workbuddy 家族（openai/anthropic/opencode/qwenweb）无余额概念 → 不查询，前端显示「—」。
+// 非 workbuddy 家族（openai/anthropic）无余额概念 → 不查询，前端显示「—」。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
