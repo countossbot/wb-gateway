@@ -21,6 +21,8 @@ export interface RequestLogEntry {
   error?: string | null;
   /** true=上游精确 usage；false=网关字符估算；null=未知（无用量或旧路径） */
   usageExact?: boolean | null;
+  /** v4.9.0：密钥归属成员 ID（派生自 VirtualKey.ownerUserId；可空） */
+  ownerUserId?: string | null;
 }
 
 /** v3.0.6：本地时区 YYYY-MM-DD（今日消耗/日趋势的日键；与 overview 的本地 0 点口径一致）。 */
@@ -48,6 +50,7 @@ export async function recordRequestLog(entry: RequestLogEntry): Promise<void> {
         apiKeyName: entry.apiKeyName ?? null,
         error: entry.error ? String(entry.error).slice(0, 2000) : null,
         usageExact: entry.usageExact ?? null,
+        ownerUserId: entry.ownerUserId ?? null,
       },
     });
     // v3.9.3：UsageDaily 聚合改为内存累积 + 定时批量 flush（见 bumpUsageDaily / flushUsageDaily）
@@ -70,6 +73,7 @@ interface UsageDailyCell {
   day: string;
   providerId: string;
   apiKeyName: string;
+  ownerUserId: string;
   model: string;
   requests: number;
   okRequests: number;
@@ -94,6 +98,7 @@ function bumpUsageDailyBuffered(entry: RequestLogEntry): void {
   const providerKey = entry.providerId ?? "";
   const keyKey = entry.apiKeyName ?? "";
   const modelKey = entry.model ?? "";
+  const ownerKey = entry.ownerUserId ?? "";
   const key = usageCellKey(day, providerKey, keyKey, modelKey);
   const ok = (entry.status ?? 0) >= 200 && (entry.status ?? 0) < 400;
   const cell = usageDailyBuffer.get(key);
@@ -109,6 +114,7 @@ function bumpUsageDailyBuffered(entry: RequestLogEntry): void {
       providerId: providerKey,
       apiKeyName: keyKey,
       model: modelKey,
+      ownerUserId: ownerKey,
       requests: 1,
       okRequests: ok ? 1 : 0,
       inputTokens: entry.inputTokens ?? 0,
