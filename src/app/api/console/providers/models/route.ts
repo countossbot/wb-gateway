@@ -3,9 +3,10 @@
 // - openai      ：GET {baseUrl}/models（Bearer）→ 上游实时（source: "upstream"）
 // - anthropic   ：GET {baseUrl}/models（x-api-key + anthropic-version）→ 上游实时
 // - opencode    ：GET {baseUrl}/models（CLI UA 公开接口）→ 上游实时
-// - workbuddy   ：v4.7.1 真实上游拉取（Task 57：Web 端 /console/enterprises/personal/models，
-//                CLI 凭证 Bearer 可用；CN 实测 200 含元数据）。INTL 同构端点当前上游 500
-//                → 失败自然降级 derived，上游修复后零改动即通。
+// - workbuddy   ：v4.7.2 真实上游拉取（GET /v2/enterprises/personal/models，CLI 通道，
+//                CLI 凭证 Bearer 可用；CN 3 账户 × 2 host、INTL 4 账户 × 2 host 实测全 200
+//                含元数据。/console Web 路径仅认网页 cookie 会话，CLI Bearer 调 INTL 会 500）。
+//                失败自然降级 derived，原因透明展示。
 // - qwenweb     ：上游无公开列表端点 → derived 推导目录：
 //   DB 路由候选（该 provider 在用）∪ DEFAULT_ROUTES 静态预设（原项目实测基线）
 // 上游拉取失败 / 超时（8s）→ 自动降级 derived，响应带 fallbackReason 透明化。

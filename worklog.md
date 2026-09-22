@@ -2316,3 +2316,29 @@ Stage Summary:
 2. ModelRoute 的 deepseek-v4-flash 路由已下架失效（不在 CLI 白名单）—— 建议删除或改名 deepseek-v4.1-flash（待用户决策）
 3. 顺延项：计费 client 字段验证；GET /v1/responses/{id}；标准适配器 getBalance 池形态
 4. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+---
+Task ID: 59
+Agent: 主会话（Z.ai Code，用户直派任务轮：INTL 模型列表打通 + 前端两处修复）
+Task: 用户上传国际版抓包 www.workbuddy.ai.har 要求重新尝试获取模型列表；并要求①模型拉取显示去除「CLI 可用 16」仅保留「选择模型（上游实时 x 个）」②修复点开模型列表后候选链超出卡片长度的 bug；版本 4.7.1 → 4.7.2
+
+Work Log:
+- 【HAR 分析】INTL 抓包 16 entries：关键请求 GET /console/enterprises/personal/models 竟 200（29648B，2026-09-22 05:06 UTC 网页会话），请求头 x-user-id: d504e0fb…（= DB 中 xiaoyi550w 账户 userId），无可见 Authorization/Cookie（导出清洗）；响应 data.models 18 个（含 GPT-5.6-Sol/Terra/Luna、GPT-5.5/5.4/5.3-Codex、Gemini-3.5-Flash —— INTL 独有 GPT 系）+ data.agents 12 个（cli 白名单 18）
+- 【结构差异确认】INTL/CN 模型条目均有 id（kebab-case 机器名，cli 白名单匹配键）+ name（展示名）双字段；INTL 目录含 5 个槽位模型（default-model/fast-model/balanced-model/primary-model/deep-model = Auto/Fast/Balanced/Primary/Deep），hy3/hy4-preview 免费（x0.00），GPT-5.6-Sol ×3.47 最贵
+- 【CLI Bearer 重试矩阵（全 500）】①4 账户 × 2 host（workbuddy.ai/codebuddy.ai）× x-user-id + Bearer + accept: application/json → 全 500（APISIX 上游错误）②刷新 token 取全新 accessToken → 仍 500 ③curl --http2 精确复刻 HAR 全头集 + Bearer → 500 ④repos[] 参数/尾斜杠变体 → 500/403 ⑤无 Authorization 仅 x-user-id → 302 OIDC —— 对照 /console/enterprises 与 /console/accounts Bearer 均 200：实锤 /console models 端点仅认网页 cookie 会话，CLI Bearer 走不通
+- 【突破口：/v2 CLI 通道】INTL main bundle 枚举发现 GET /v2/enterprises（CLI 通道家族，与 /v2/chat、/v2/billing 同族）→ 试 /v2/enterprises/personal/models + CLI Bearer → **200，29648B 与网页 HAR 响应逐字段完全一致**（18 模型 + cli 白名单 18）；全矩阵验证：INTL 4 账户 × 2 host 全 200；CN 3 账户 × 2 host（codebuddy.cn/copilot.tencent.com）全 200（30 模型/CLI 16，与 /console 响应逐字段一致）；结论：/console 路径是 Web 会话专用，CLI token 必须走 /v2 路径（CN 两路都通纯属巧合）
+- 【后端改动】WorkBuddyProvider endpoints：两 region models 端点统一改 /v2/enterprises/personal/models（INTL www.codebuddy.ai、CN www.codebuddy.cn）；listUpstreamModels 逻辑零改动（Bearer + X-Client-Platform + Web UA 与 /v2 兼容实测通过）；注释全面更新（含 /console 500 实测结论防回归）
+- 【前端改动 ①】模型下拉 placeholder 去除「，CLI 可用 ${n}」后缀 → 仅「选择模型（上游实时 · x 个）」（derived/朴素形态同步保持简洁）；ProviderModelsData.allCount 字段保留（API 仍返回，类型向后兼容）
+- 【前端改动 ②溢出修复】根因：Radix SelectContent 默认以视口为碰撞边界，模型目录 16-18 项（弹层 443px）在触发器（y≈453）下方放不下时向上翻转 → 弹层冲到 y=6，超出对话框卡片顶部（y=221）达 215px。修复：SortableCandidate 模型 Select 增加 collisionBoundary=所在 [role=dialog] 元素（onOpenChange 展开时经 modelTriggerRef.current.closest 捕获，React 19 ref-as-prop 直传）+ collisionPadding=8 + style maxHeight=min(18rem, --radix-select-content-available-height)（内联样式覆盖组件默认 max-h，双保险）→ 弹层始终限制在卡片内且长目录内部滚动
+- 【验证矩阵】lint 零错误；tsc src/ 零错误；healthz v4.7.2；API 实测：CN workbuddy → source=upstream 16 模型 + allCount 30 + 元数据；INTL workbuddy-intl → **source=upstream 18 模型（GPT-5.x 系全量）+ 元数据完整**（此前一直是 derived 降级）；浏览器 QA（agent-browser）：CN/INTL 下拉头均显示「选择模型（上游实时 · x 个）」无 CLI 后缀；弹层测量桌面 1280×800（popup 226-449 vs 卡片 221-579，卡片内✓）+ 移动端 390×700（垂直水平均卡片内✓，高度 288px 封顶）；端到端：选 INTL → gpt-5.6-luna（×0.14 1M/128k 图像·推理）→ 创建路由「gpt-5.6-luna-test」成功；全新流程 console 零警告零错误；截图 qa-v472-intl-dropdown-fixed.png / qa-v472-cn-dropdown-fixed.png / qa-v472-mobile-dropdown.png
+
+Stage Summary:
+- INTL 模型列表彻底打通：正确端点是 /v2/enterprises/personal/models（CLI 通道），非 /console（Web 会话专用）；INTL 18 模型含 GPT-5.6-Sol/Terra/Luna、GPT-5.5/5.4/5.3-Codex、Gemini-3.5-Flash 等独有模型，CLI Bearer 直用零额外凭证
+- 模型下拉显示简化为「选择模型（上游实时 · x 个）」；弹层碰撞边界=对话框卡片，长目录不再冲出卡片（桌面+移动端双验证）
+- 版本 4.7.2；lint/tsc/API/浏览器 QA 全绿；QA 产物路由 gpt-5.6-luna-test（INTL GPT 真实可用新模型路由）保留，用户可一键删除
+
+未解决问题与风险（下一阶段建议）:
+1. QA 路由 gpt-5.6-luna-test 留存 ModelRoute 表（INTL 真实可用模型演示，用户可自行删除）；deepseek-v4-flash 死路由问题仍未处理（Task 57 已记录，待用户决策）
+2. INTL 槽位模型（default-model/fast-model 等 5 个）语义待验证：调用时是「智能路由到具体模型」还是固定别名，建议实际发一条消息验证计费倍率
+3. 模型目录含 hy3/hy4-preview x0.00 免费（INTL 也有）—— 免费额度通道值得纳入路由规划
+4. 顺延项：计费 client 字段验证；GET /v1/responses/{id}；标准适配器 getBalance 池形态；建议配置变更后 bun .zscripts/db-snapshot.ts export
+5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
