@@ -280,7 +280,12 @@ export class WorkBuddyProvider implements ProviderAdapter {
           model: "hy3",
           stream: true,
           max_tokens: 1,
-          messages: [{ role: "user", content: "hi" }],
+          // 必须带 system 首条：INTL WAF 要求（否则 400 11128 "first message is not
+          // system prompt"，实测 2026-09-22 四账户全中）；同 callChat 的 INTL 兜底注入。
+          messages: [
+            { role: "system", content: INTL_FALLBACK_SYSTEM },
+            { role: "user", content: "hi" },
+          ],
         }),
         signal: AbortSignal.timeout(30_000),
       },
