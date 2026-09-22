@@ -447,6 +447,8 @@ export interface RequestLogQuery {
   to?: number;
   /** v3.0.6：按命中账号筛选（accountId 精确；与 provider 组合可防跨提供商同名串扰） */
   accountId?: string;
+  /** v4.9.0：按密钥归属成员筛选（ownerUserId 精确） */
+  ownerUserId?: string;
 }
 
 /** v3.0.5：状态码筛选值 → Prisma Int 过滤器（大类 → 区间；具体码 → 精确匹配） */
@@ -468,6 +470,7 @@ export async function listRequestLogs(opts: RequestLogQuery = {}) {
   else if (opts.usage === "estimated") where.usageExact = false;
   else if (opts.usage === "none") where.usageExact = null;
   if (opts.apiKeyName) where.apiKeyName = opts.apiKeyName;
+  if (opts.ownerUserId) where.ownerUserId = opts.ownerUserId;
   if (opts.accountId) where.accountId = opts.accountId;
   if (opts.status) {
     const f = statusFilterFor(opts.status);

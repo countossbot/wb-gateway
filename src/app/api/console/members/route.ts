@@ -147,9 +147,13 @@ export async function PUT(request: NextRequest) {
     data: patch,
   });
 
-  // 禁用成员 → 立即失效其全部会话
+  // 禁用成员 → 立即失效其全部会话 + 禁用其名下虚拟密钥
   if (patch.enabled === false) {
     await db.session.deleteMany({ where: { userId: body.id } });
+    await db.virtualKey.updateMany({
+      where: { ownerUserId: body.id, enabled: true },
+      data: { enabled: false },
+    });
   }
 
   const actor = await db.adminUser.findUnique({ where: { id: session.userId } });
@@ -189,7 +193,11 @@ export async function PATCH(request: NextRequest) {
     }
     await db.adminUser.update({ where: { id: body.id }, data: { enabled: false } });
     await db.session.deleteMany({ where: { userId: body.id } });
-    await auditUpdate("member", user.id, user.username, { enabled: false, actor: actorName }, request);
+    await db.virtualKey.updateMany({
+      where: { ownerUserId: body.id, enabled: true },
+      data: { enabled: false },
+    });
+    await auditUpdate("member", user.id, user.username, { enabled: false, actor: actorName, keysDisabled: true }, request);
     return ok({ id: user.id, enabled: false });
   }
 
