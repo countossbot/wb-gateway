@@ -8,7 +8,7 @@ import { db } from "@/lib/db";
 import { SECRET_FIELDS } from "./consoleHelpers";
 
 export type AuditAction = "delete" | "create" | "update" | "toggle" | "regenerate" | "restore";
-export type AuditEntity = "provider" | "account" | "route" | "key" | "setting" | "system";
+export type AuditEntity = "provider" | "account" | "route" | "key" | "setting" | "system" | "member";
 
 export interface AuditInput {
   action: AuditAction;
