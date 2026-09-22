@@ -133,6 +133,7 @@ model VirtualKey {
   // v4.5.0：密钥级月度成本预算（本地时区自然月；0 = 不限额）。按模型单价表估算的当月累计
   // 成本 ≥ 预算时网关入口 429（X-Budget-* 头组，下月 1 日 0 点重置）。未配置单价的模型不计成本。
   monthlyCostLimit  Float @default(0)
+  ownerUserId String? // v4.9.0：归属成员（可空；用于日志归属与成员筛选）
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
