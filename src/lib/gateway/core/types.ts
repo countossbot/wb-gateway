@@ -103,6 +103,32 @@ export interface BalanceResult {
   [key: string]: unknown;
 }
 
+// ---- 上游模型目录（v4.7.1：/api/console/providers/models 的真实拉取结果） ----
+// WorkBuddy Web 端 /console/enterprises/{personal|企业ID}/models（Task 57 逆向）：
+// CLI 凭证 Bearer 可直调；响应含全量模型元数据 + 各端白名单（agents[].name==="cli"）。
+export interface UpstreamModelDetail {
+  id: string;
+  name?: string | null;
+  /** 上游展示文案原样透传："x0.29" / "x0.00 credits" / null（无固定倍率） */
+  credits?: string | null;
+  maxInputTokens?: number | null;
+  maxOutputTokens?: number | null;
+  supportsImages?: boolean;
+  supportsReasoning?: boolean;
+  supportsToolCall?: boolean;
+  isDefault?: boolean;
+}
+export interface UpstreamModelsResult {
+  /** CLI 通道可用模型（白名单顺序，网关路由候选可直接使用） */
+  models: string[];
+  /** 与 models 一一对应的元数据（前端下拉富展示） */
+  details: UpstreamModelDetail[];
+  /** 实际调用的上游 URL（透明化） */
+  url: string;
+  /** 上游全量模型数（含白名单外旧模型），无意义时可缺省 */
+  allCount?: number;
+}
+
 // ---- Provider 适配器契约（能力子集，见 contract.ts） ----
 export interface ProviderAdapter {
   id: string;
@@ -115,6 +141,8 @@ export interface ProviderAdapter {
   onSchedule?: () => Promise<unknown>;
   doDailyCheckin?: () => Promise<unknown>;
   refreshAccessToken?: (account?: unknown) => Promise<unknown>;
+  /** 上游模型目录拉取（可选）：失败时调用方降级 derived 推导目录 */
+  listUpstreamModels?: () => Promise<UpstreamModelsResult>;
 }
 
 // ---- 出站代理作用域 ----
