@@ -103,8 +103,7 @@ export function summarizeFailReason(status: number | string | undefined, text: u
   return reason.slice(0, 160);
 }
 
-// Region 端点表（CN / intl 双 region，等价保留原版实测端点）。
-// provider 配置 config.region: "intl" 即切整组端点 + Origin/Referer；默认 "cn" 行为零变化。
+// Region 端点表（CN / intl 双 region）。模型目录必须走 /v2 CLI 通道；不要改成 /console。
 export function normalizeWorkbuddyRegion(value: unknown): "cn" | "intl" {
   return String(value || "").toLowerCase() === "intl" ? "intl" : "cn";
 }
@@ -129,7 +128,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
     return {
       region: "intl",
       probed: true,
-      models: "https://www.workbuddy.ai/v2/enterprises/personal/models",
+      models: "https://www.codebuddy.ai/v2/enterprises/personal/models",
       refresh: "https://www.workbuddy.ai/v2/plugin/auth/token/refresh",
       chat: "https://www.workbuddy.ai/v2/chat/completions",
       billing: "https://www.workbuddy.ai/billing/meter/get-user-resource",
@@ -142,7 +141,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
   return {
     region: "cn",
     probed: true,
-    models: "https://copilot.tencent.com/console/enterprises/personal/models",
+    models: "https://www.codebuddy.cn/v2/enterprises/personal/models",
     refresh: "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
@@ -230,15 +229,9 @@ export class WorkBuddyProvider implements ProviderAdapter {
             {
               headers: {
                 Authorization: "Bearer " + token,
+                "X-Client-Platform": "web",
                 Accept: "application/json, text/plain, */*",
-                "User-Agent": ep.userAgent,
-                Origin: ep.origin,
-                Referer: ep.referer,
-                "X-CodeBuddy-Request": "1",
-                "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
-                ...(this.region === "intl"
-                  ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
-                  : {}),
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
               },
               signal: AbortSignal.timeout(8_000),
             },
