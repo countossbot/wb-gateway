@@ -1,10 +1,16 @@
 // 控制台前端共享类型 —— 与后端 /api/console/* 的响应 data 形状一一对应。
 
 // ---- 认证 ----
+export type AdminRole = "ADMIN" | "OPERATOR" | "VIEWER";
+
 export interface SessionInfo {
   initialized: boolean;
   authenticated: boolean;
   username: string | null;
+  /** v4.9.0：成员显示名（缺省 = username） */
+  displayName?: string | null;
+  /** v4.9.0：角色（ADMIN / OPERATOR / VIEWER） */
+  role?: AdminRole | null;
   /** 当前生效认证通道（v3.0.2：控制台顶栏徽标） */
   authVia?: "cookie" | "bearer" | null;
 }
