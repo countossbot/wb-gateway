@@ -123,12 +123,12 @@ export interface WorkbuddyEndpoints {
 
 export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
   if (normalizeWorkbuddyRegion(region) === "intl") {
-    // 国际版模型目录必须走 CodeBuddy CLI /v2 通道；不要使用 /console/enterprises/personal/models。
+    // 模型目录对齐桌面客户端 ProductManager 的 /v3/config 合并列表。
     // Chat / refresh 使用 /v2，billing / checkin 使用无 /v2 的 billing 路径。
     return {
       region: "intl",
       probed: true,
-      models: "https://www.codebuddy.ai/v2/enterprises/personal/models",
+      models: "https://www.workbuddy.ai/v3/config",
       refresh: "https://www.workbuddy.ai/v2/plugin/auth/token/refresh",
       chat: "https://www.workbuddy.ai/v2/chat/completions",
       billing: "https://www.workbuddy.ai/billing/meter/get-user-resource",
@@ -141,7 +141,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
   return {
     region: "cn",
     probed: true,
-    models: "https://www.codebuddy.cn/v2/enterprises/personal/models",
+    models: "https://copilot.tencent.com/v3/config",
     refresh: "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
