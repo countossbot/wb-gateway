@@ -92,7 +92,19 @@ interface AuditData {
   stats: { total24h: number; deletes24h: number; total7d: number; total?: number; retentionDays?: number };
 }
 
-export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () => void }) {
+export function SettingsModule({
+  onPasswordChanged,
+  canWrite = true,
+}: {
+  onPasswordChanged: () => void;
+  /**
+   * v4.9.3：是否为可写角色（非 VIEWER）。
+   * VIEWER 不具备 member.read / backup.read / settings.write 权限，
+   * 若照常渲染「成员管理」「数据与迁移」区块，会在区块内显示 403 报错横幅。
+   * 后端鉴权本就拦截，此处仅同步界面呈现，避免暴露无权限入口。
+   */
+  canWrite?: boolean;
+}) {
   const [data, setData] = React.useState<SettingsData | null>(null);
   const [providers, setProviders] = React.useState<ProvidersData | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -1007,8 +1019,8 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
       {/* ---------- 模型单价 · 成本估算（v4.4.0）---------- */}
       <PricingSection />
 
-      {/* ---------- v4.9.0：成员管理（轻量 RBAC） ---------- */}
-      <MembersSection />
+      {/* ---------- v4.9.0：成员管理（轻量 RBAC）— v4.9.3：仅可写角色可见 ---------- */}
+      {canWrite && <MembersSection />}
 
       {/* ---------- 操作审计（v3.2.0，v3.2.2 增保留期清理）---------- */}
       <Section
@@ -1228,7 +1240,8 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
         </p>
       </Section>
 
-      {/* ---------- 数据与迁移 ---------- */}
+      {/* ---------- 数据与迁移 — v4.9.3：仅可写角色可见（依赖 backup.write） ---------- */}
+      {canWrite && (
       <Section
         icon={<Database className="size-4.5" />}
         title="数据与迁移"
@@ -1326,11 +1339,12 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
           )}
         </div>
       </Section>
+      )}
 
-      {/* ---------- v4.1.0 备份导入恢复 ---------- */}
+      {/* ---------- v4.1.0 备份导入恢复 — v4.9.3：仅可写角色可见（依赖 backup.write） ---------- */}
       {/* v4.1.1：max-h-[85dvh] + flex 列布局 —— 大备份粘贴/导入时对话框绝不超出视口，底部按钮常驻可点；
           内容区独立滚动（min-h-0 是 flex 子项可收缩的必要条件），替代原 grid 无界增高 */}
-      <Dialog open={importOpen} onOpenChange={(o) => (!o ? closeImport() : setImportOpen(true))}>
+      <Dialog open={canWrite && importOpen} onOpenChange={(o) => (!o ? closeImport() : setImportOpen(true))}>
         <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
