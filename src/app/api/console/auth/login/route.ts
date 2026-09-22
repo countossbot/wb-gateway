@@ -42,15 +42,24 @@ export async function POST(request: NextRequest) {
     await auditLogin(ip, ua, false, user ? "wrong password" : "unknown username");
     return Response.json({ ok: false, error: "用户名或密码错误" }, { status: 401 });
   }
+  // v4.9.0：禁用成员禁止登录
+  if (!user.enabled) {
+    recordLoginFailure(ip);
+    await auditLogin(ip, ua, false, `disabled user (${user.username})`);
+    return Response.json({ ok: false, error: "账号已禁用，请联系管理员" }, { status: 403 });
+  }
 
   clearLoginFailures(ip);
   await auditLogin(ip, ua, true, "login success");
+  await db.adminUser.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } }).catch(() => {});
   const { token, expiresAt } = await createSession(user.id, user.username);
   return Response.json(
     {
       ok: true,
       data: {
         username: user.username,
+        displayName: user.displayName || user.username,
+        role: user.role,
         expiresAt: expiresAt.toISOString(),
         // 会话令牌：仅供刚通过密码验证的客户端本人持有（前端 localStorage 存放、
         // 请求以 Authorization: Bearer 附带）。与 Cookie 指向同一条服务端会话记录，
