@@ -39,21 +39,30 @@ export function retryDelayMs(): number {
 // - 只有「无 system 的简单调用」（curl / SDK 快速验证 / 脚本）原本必然 11128 失败，注入只赚不赔。
 const INTL_FALLBACK_SYSTEM = "You are a helpful assistant.";
 
-// v4.6.2：客户端平台标识 —— 对齐 WorkBuddy Web 端（用户要求：网关全部上游请求携带使用端标识）。
-// 实测证据（www.workbuddy.cn HAR + 用户中心 bundle config-BxH8baql.js 的 axios 请求拦截器
-// `e.headers["X-Client-Platform"]=te()`）：
-//   1) WorkBuddy Web 端所有 API 请求统一携带 X-Client-Platform 头，浏览器取值 "web"
-//（微信小程序内嵌取值 "miniprogram"）；
-//   2) 计费明细 /billing/meter/get-user-request-usage 返回的 client 字段由服务端按调用来源记账：
-//      Web 来源（带该标识）记为 "WorkBuddy"，无标识的 CLI/plugin 通道（copilot.tencent.com）记为 ""。
-// 网关对上游的全部请求（chat / token refresh / billing / checkin，CN 与 INTL 同构）统一携带该标识，
-// 使服务端记账侧可将网关流量归入「使用端 = WorkBuddy」。
-//
-// v4.6.4：回退 v4.6.3 的 INTL 独立标识实验（用户决策）。v4.6.3 曾按用户要求把 INTL 版
-//（www.codebuddy.ai）标识值改为 "workbuddy ai"（自定义值，非 Web 端实测枚举 "web"/"miniprogram"），
-// 用户复核后决策：两 region 统一用 "web" —— 与 Web 端 axios 拦截器实测行为完全一致，
-// 服务端枚举记账把握最大。回退 = 恢复本单一常量形态（CN+INTL 同值）。
-const WORKBUDDY_CLIENT_PLATFORM = "web";
+// WorkBuddy Desktop outbound identity，按 workbuddy2api-panel 当前实现对齐。
+// Chat 的用量归属头使用官方桌面端形态；Web fingerprint 只在确实属于 Web endpoint
+// 的请求上使用，不能再作为全局身份标识。
+const WORKBUDDY_CLIENT_VERSION = "5.5.4";
+const WORKBUDDY_CLI_VERSION = "2.137.1";
+
+function workbuddyUserAgent(region: "cn" | "intl"): string {
+  const platform = region === "intl" ? "WorkBuddy AI" : "WorkBuddy";
+  return `WorkBuddy/${WORKBUDDY_CLIENT_VERSION} ${platform}/${WORKBUDDY_CLIENT_VERSION} CLI/${WORKBUDDY_CLI_VERSION}`;
+}
+
+function workbuddyDesktopAttributionHeaders(): Record<string, string> {
+  return {
+    "X-Agent-Purpose": "conversation",
+    "X-IDE-Name": "WorkBuddy",
+    "X-IDE-Type": "WorkBuddy",
+    "X-IDE-Version": WORKBUDDY_CLIENT_VERSION,
+    "X-Product": "WorkBuddy",
+  };
+}
+
+function workbuddyBillingUserAgent(): string {
+  return `WorkBuddy/${WORKBUDDY_CLIENT_VERSION}`;
+}
 
 // 会话粘性键：优先客户端透传的会话头；回退 system+tools 指纹
 // （同一编码会话内稳定；跨会话碰撞只影响落点、不影响正确性）。
@@ -115,33 +124,32 @@ export interface WorkbuddyEndpoints {
 
 export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
   if (normalizeWorkbuddyRegion(region) === "intl") {
-    // 国际站（实测 2026-09-14）：CLI product.json 默认 endpoint 即 www.codebuddy.ai，
-    // 鉴权同为 cli-external-link + prefixPath /plugin；refresh 空 token 回业务码 10001，
-    // chat/billing/checkin 同 path 在鉴权墙后（401）。与 CN 同构，唯 host 与 Origin 不同。
+    // 国际版：按 workbuddy2api-panel 当前实现使用 www.workbuddy.ai；
+    // Chat / refresh 使用 /v2，billing / checkin 使用无 /v2 的 billing 路径。
     return {
       region: "intl",
       probed: true,
-      models: "https://www.codebuddy.ai/v2/enterprises/personal/models",
-      refresh: "https://www.codebuddy.ai/v2/plugin/auth/token/refresh",
-      chat: "https://www.codebuddy.ai/v2/chat/completions",
-      billing: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
-      checkin: "https://www.codebuddy.ai/v2/billing/meter/daily-checkin",
-      origin: "https://www.codebuddy.ai",
-      referer: "https://www.codebuddy.ai/",
-      userAgent: "CLI/2.63.2 CodeBuddy/2.63.2",
+      models: "https://www.workbuddy.ai/v2/enterprises/personal/models",
+      refresh: "https://www.workbuddy.ai/v2/plugin/auth/token/refresh",
+      chat: "https://www.workbuddy.ai/v2/chat/completions",
+      billing: "https://www.workbuddy.ai/billing/meter/get-user-resource",
+      checkin: "https://www.workbuddy.ai/billing/meter/daily-checkin",
+      origin: "https://www.workbuddy.ai",
+      referer: "https://www.workbuddy.ai/",
+      userAgent: workbuddyUserAgent("intl"),
     };
   }
   return {
     region: "cn",
     probed: true,
-    models: "https://www.codebuddy.cn/v2/enterprises/personal/models",
+    models: "https://copilot.tencent.com/console/enterprises/personal/models",
     refresh: "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
     checkin: "https://www.codebuddy.cn/v2/billing/meter/daily-checkin",
     origin: "https://www.codebuddy.cn",
     referer: "https://www.codebuddy.cn/",
-    userAgent: "CLI/2.63.2 CodeBuddy/2.63.2",
+    userAgent: workbuddyUserAgent("cn"),
   };
 }
 
@@ -222,9 +230,15 @@ export class WorkBuddyProvider implements ProviderAdapter {
             {
               headers: {
                 Authorization: "Bearer " + token,
-                "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
                 Accept: "application/json, text/plain, */*",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "User-Agent": ep.userAgent,
+                Origin: ep.origin,
+                Referer: ep.referer,
+                "X-CodeBuddy-Request": "1",
+                "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
+                ...(this.region === "intl"
+                  ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
+                  : {}),
               },
               signal: AbortSignal.timeout(8_000),
             },
@@ -365,10 +379,14 @@ export class WorkBuddyProvider implements ProviderAdapter {
             Accept: "application/json",
             "X-Refresh-Token": refreshToken,
             "X-Auth-Refresh-Source": "workbuddy",
-            "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
             "User-Agent": ep.userAgent,
             Origin: ep.origin,
             Referer: ep.referer,
+            "X-CodeBuddy-Request": "1",
+            "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
+            ...(this.region === "intl"
+              ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
+              : {}),
           },
         },
         { providerId: this.id }
@@ -524,8 +542,12 @@ export class WorkBuddyProvider implements ProviderAdapter {
         "User-Agent": ep.userAgent,
         Authorization: `Bearer ${tk}`,
         "X-User-Id": userId,
-        "X-Product": "SaaS",
-        "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
+        ...workbuddyDesktopAttributionHeaders(),
+        "X-CodeBuddy-Request": "1",
+        "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
+        ...(this.region === "intl"
+          ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
+          : {}),
       };
       return await fetchWithProxy(
         ep.chat,
@@ -722,10 +744,14 @@ export class WorkBuddyProvider implements ProviderAdapter {
             headers: {
               Authorization: `Bearer ${token}`,
               "X-User-Id": userId,
-              "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
-              "User-Agent": ep.userAgent,
+              "User-Agent": workbuddyBillingUserAgent(),
               Origin: ep.origin,
               Referer: ep.referer,
+              "X-CodeBuddy-Request": "1",
+              "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
+              ...(this.region === "intl"
+                ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
+                : {}),
               "Content-Type": "application/json",
               Accept: "application/json",
             },
@@ -859,7 +885,12 @@ export class WorkBuddyProvider implements ProviderAdapter {
             headers: {
               Authorization: `Bearer ${token}`,
               "X-User-Id": userId,
-              "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
+              "User-Agent": workbuddyBillingUserAgent(),
+              "X-CodeBuddy-Request": "1",
+              "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
+              ...(this.region === "intl"
+                ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
+                : {}),
               "Content-Type": "application/json",
               Accept: "application/json",
             },
