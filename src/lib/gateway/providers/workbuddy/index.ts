@@ -123,7 +123,7 @@ export interface WorkbuddyEndpoints {
 
 export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
   if (normalizeWorkbuddyRegion(region) === "intl") {
-    // 国际版：按 workbuddy2api-panel 当前实现使用 www.workbuddy.ai；
+    // 国际版模型目录必须走 CodeBuddy CLI /v2 通道；不要使用 /console/enterprises/personal/models。
     // Chat / refresh 使用 /v2，billing / checkin 使用无 /v2 的 billing 路径。
     return {
       region: "intl",
