@@ -65,7 +65,7 @@ interface ProviderModelsData {
   models: string[];
   fallbackReason?: string;
   upstreamUrl?: string;
-  details?: Array<{ id: string; name: string | null; credits: string | null; maxInputTokens: number | null; maxOutputTokens: number | null; supportsImages: boolean; supportsReasoning: boolean; supportsToolCall: boolean; isDefault: boolean }>;
+  details?: Array<{ id: string; name: string | null; credits: string | null; maxInputTokens: number | null; maxOutputTokens: number | null; supportsImages: boolean; supportsReasoning: boolean; supportsToolCall: boolean; isDefault: boolean; tags?: string[] }>;
   allCount: number;
 }
 const MODEL_FETCH_CACHE = new Map<string, { data: ProviderModelsData; at: number }>();
@@ -152,7 +152,9 @@ function SortableCandidate({
   }, [cand.providerId, loadModels]);
 
   // 模型下拉数据源：优先上游/推导目录；拉取中或失败时兑底静态目录
-  const modelOptions = upstream?.models?.length ? upstream.models : nativeModels;
+  const upstreamModels = upstream?.models?.length ? upstream.models : [];
+  const hasClientCatalog = upstream?.source === "upstream";
+  const modelOptions = hasClientCatalog ? upstreamModels : nativeModels;
   const detailMap = React.useMemo(() => new Map((upstream?.details ?? []).map((d) => [d.id, d])), [upstream?.details]);
   const creditsBadgeLabel = React.useCallback((credits: string | null | undefined): { text: string; tone: "free" | "normal" } | null => {
     if (!credits) return null;
@@ -221,7 +223,7 @@ function SortableCandidate({
                     modelsLoading
                       ? "正在从上游拉取模型…"
                       : upstream?.source === "upstream"
-                        ? `选择模型（上游实时 · ${modelOptions.length} 个）`
+                        ? `选择模型（客户端实时 · ${modelOptions.length} 个）`
                         : upstream?.source === "derived"
                           ? `选择模型（已知目录 · ${modelOptions.length} 个）`
                           : `选择模型（${modelOptions.length} 个）`
@@ -236,7 +238,7 @@ function SortableCandidate({
                 {upstream && (
                   <div className="flex items-center gap-1.5 px-2 py-1.5 text-[10px] text-stone-400">
                     {upstream.source === "upstream" ? (
-                      <><span className="size-1.5 rounded-full bg-teal-500" />已从上游实时拉取（可点右侧刷新）</>
+                      <><span className="size-1.5 rounded-full bg-teal-500" />已对齐客户端实时列表（{modelOptions.length}/{upstream.allCount}）</>
                     ) : (
                       <><span className="size-1.5 rounded-full bg-amber-500" />已知目录 · {upstream.fallbackReason || "上游不可用"}</>
                     )}

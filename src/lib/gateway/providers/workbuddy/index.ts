@@ -42,7 +42,7 @@ const INTL_FALLBACK_SYSTEM = "You are a helpful assistant.";
 // WorkBuddy Desktop outbound identity，按 workbuddy2api-panel 当前实现对齐。
 // Chat 的用量归属头使用官方桌面端形态；Web fingerprint 只在确实属于 Web endpoint
 // 的请求上使用，不能再作为全局身份标识。
-const WORKBUDDY_CLIENT_VERSION = "5.5.4";
+const WORKBUDDY_CLIENT_VERSION = "5.5.6";
 const WORKBUDDY_CLI_VERSION = "2.137.1";
 
 function workbuddyUserAgent(region: "cn" | "intl"): string {
@@ -171,6 +171,11 @@ export interface UpstreamModelDetail {
   supportsReasoning: boolean;
   supportsToolCall: boolean;
   isDefault: boolean;
+  tags: string[];
+}
+
+function parseModelTags(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((tag): tag is string => typeof tag === "string") : [];
 }
 
 export interface UpstreamModelsResult {
@@ -178,6 +183,28 @@ export interface UpstreamModelsResult {
   details: UpstreamModelDetail[];
   url: string;
   allCount: number;
+}
+
+function parseUpstreamModels(json: unknown): { models: Record<string, unknown>[]; allowIds: string[] } | null {
+  if (!json || typeof json !== "object") return null;
+  const root = json as { code?: unknown; data?: unknown };
+  if (typeof root.code === "number" && root.code !== 0) return null;
+  const data = (root.data && typeof root.data === "object" ? root.data : root) as {
+    models?: unknown;
+    agents?: unknown;
+  };
+  if (!Array.isArray(data.models)) return null;
+  const models = data.models.filter(
+    (m): m is Record<string, unknown> => !!m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string"
+  );
+  if (models.length === 0) return null;
+  const agents = Array.isArray(data.agents) ? data.agents : [];
+  const allowIds = agents
+    .map((agent) => (agent && typeof agent === "object" ? (agent as { name?: unknown; models?: unknown }) : null))
+    .filter((agent): agent is { name?: unknown; models?: unknown } => !!agent && agent.name === "cli")
+    .flatMap((agent) => (Array.isArray(agent.models) ? agent.models : []))
+    .filter((id): id is string => typeof id === "string");
+  return { models, allowIds };
 }
 
 export class WorkBuddyProvider implements ProviderAdapter {
@@ -230,15 +257,20 @@ export class WorkBuddyProvider implements ProviderAdapter {
               headers: {
                 Authorization: "Bearer " + token,
                 "X-Client-Platform": "web",
-                Accept: "application/json, text/plain, */*",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                Accept: "application/json",
+                "Content-Type": "application/json",
+                "X-Product": "SaaS",
+                "X-Requested-With": "XMLHttpRequest",
+                Connection: "close",
+                "User-Agent": ep.userAgent,
               },
               signal: AbortSignal.timeout(8_000),
             },
             { providerId: this.id }
           );
           if (resp.status === 401 && attempt === 0) {
-            token = (await this.refreshAccessToken(acc)) || "";
+            const refreshed = await this.refreshAccessToken(acc);
+            token = typeof refreshed === "string" ? refreshed : "";
             continue;
           }
           if (!resp.ok) throw new Error("HTTP " + resp.status + (resp.status === 500 ? "（上游服务错误）" : ""));
@@ -250,16 +282,11 @@ export class WorkBuddyProvider implements ProviderAdapter {
               agents?: Array<{ name?: string; models?: unknown }>;
             };
           };
-          if (typeof resJson.code === "number" && resJson.code !== 0) {
-            throw new Error(("业务错误 code=" + resJson.code + " " + (resJson.msg || "")).trim());
-          }
-          const all = (resJson.data?.models ?? []).filter(
-            (m): m is Record<string, unknown> => typeof m?.id === "string" && !!m.id
-          );
-          if (all.length === 0) throw new Error("上游响应无模型数据");
+          const parsed = parseUpstreamModels(resJson);
+          if (!parsed) throw new Error("上游响应无模型数据");
+          const all = parsed.models;
+          const allowIds = parsed.allowIds;
           const byId = new Map(all.map((m) => [m.id as string, m]));
-          const allow = resJson.data?.agents?.find((a) => a?.name === "cli")?.models;
-          const allowIds = Array.isArray(allow) ? allow.filter((id): id is string => typeof id === "string") : [];
           const ids = allowIds.length > 0 ? allowIds.filter((id) => byId.has(id)) : all.map((m) => m.id as string);
           const details = ids.map((id) => {
             const m = byId.get(id);
@@ -273,6 +300,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
               supportsReasoning: !!m?.supportsReasoning,
               supportsToolCall: !!m?.supportsToolCall,
               isDefault: !!m?.isDefault,
+              tags: parseModelTags(m?.tags),
             };
           });
           return { models: ids, details, url: ep.models, allCount: all.length };
