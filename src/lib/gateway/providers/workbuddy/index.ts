@@ -126,6 +126,9 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
     // 国际站（实测 2026-09-14）：CLI product.json 默认 endpoint 即 www.codebuddy.ai，
     // 鉴权同为 cli-external-link + prefixPath /plugin；refresh 空 token 回业务码 10001，
     // chat/billing/checkin 同 path 在鉴权墙后（401）。与 CN 同构，唯 host 与 Origin 不同。
+    // 模型目录：v4.7.2 改走 /v2 CLI 通道（Web 端 /console 路径仅认网页 cookie 会话，
+    // CLI Bearer 调用上游 500 全变体实测无解；/v2 路径 4 账户 × 2 host 实测全 200，
+    // 响应与 Web 端完全一致 —— 2026-09-22 用户 HAR 对照验证）。
     return {
       region: "intl",
       probed: true,
@@ -133,7 +136,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
       chat: "https://www.codebuddy.ai/v2/chat/completions",
       billing: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
       checkin: "https://www.codebuddy.ai/v2/billing/meter/daily-checkin",
-      models: "https://www.codebuddy.ai/console/enterprises/personal/models",
+      models: "https://www.codebuddy.ai/v2/enterprises/personal/models",
       origin: "https://www.codebuddy.ai",
       referer: "https://www.codebuddy.ai/",
       userAgent: "CLI/2.63.2 CodeBuddy/2.63.2",
@@ -146,9 +149,10 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
     checkin: "https://www.codebuddy.cn/v2/billing/meter/daily-checkin",
-    // 模型目录 host 与 billing 同源（www.codebuddy.cn；实测三 host 等价：
-    // www.workbuddy.cn / www.codebuddy.cn / copilot.tencent.com 均 200）
-    models: "https://www.codebuddy.cn/console/enterprises/personal/models",
+    // 模型目录 host 与 billing 同源（www.codebuddy.cn）；v4.7.2 与 INTL 统一改走
+    // /v2 CLI 通道（CLI Bearer 直用；/console 路径 Bearer 亦 200 但 INTL 不通，
+    // /v2 两区实测均 200 且响应与 /console 完全一致 —— 2026-09-22）
+    models: "https://www.codebuddy.cn/v2/enterprises/personal/models",
     origin: "https://www.codebuddy.cn",
     referer: "https://www.codebuddy.cn/",
     userAgent: "CLI/2.63.2 CodeBuddy/2.63.2",
@@ -321,13 +325,15 @@ export class WorkBuddyProvider implements ProviderAdapter {
     }
   }
 
-  // v4.7.1：上游模型目录拉取（Task 57 逆向成果，供 /api/console/providers/models 路由候选下拉）。
-  // 端点：Web 端 GET /console/enterprises/personal/models（个人账户 enterpriseId 字面量 "personal"）。
-  // 鉴权：CLI 凭证 Bearer accessToken 直接可用（实测 2026-09-22，CN 三 host 均 200）。
-  // 响应结构：data.models[]（全量模型 + 元数据）∪ data.agents[]（各端白名单）；
-  //          CLI 通道可用 = agents.name==="cli".models 白名单按序过滤 models[]。
+  // v4.7.2：上游模型目录拉取（Task 57 逆向 + Task 59 INTL 打通，供 /api/console/providers/models 路由候选下拉）。
+  // 端点：GET /v2/enterprises/personal/models（个人账户 enterpriseId 字面量 "personal"，CLI 通道）。
+  //   - CN：www.codebuddy.cn /v2/...（3 账户 × 2 host 实测 200，30 模型 / CLI 白名单 16）；
+  //   - INTL：www.codebuddy.ai /v2/...（4 账户 × 2 host 实测 200，18 模型 / CLI 白名单 18，
+  //     与用户 HAR 网页响应逐字段一致；注意 /console Web 路径对 CLI Bearer 上游 500 不可用）。
+  // 鉴权：CLI 凭证 Bearer accessToken 直接可用。
+  // 响应结构：data.models[]（全量模型 + 元数据，id 为机器名）∪ data.agents[]（各端白名单）；
+  //          CLI 通道可用 = agents.name==="cli".models 白名单按序过滤 models[].id。
   // 容错：逐账户尝试（最多 3 个）→ 401 无感续签重试一次 → 全部失败抛错（调用方降级 derived）。
-  // INTL：同构端点当前上游 500（个人账户全变体实测），此处自然抛错降级；上游修复后零改动即通。
   async listUpstreamModels(): Promise<UpstreamModelsResult> {
     const ep = this.ep();
     const accounts = this.getAccounts().slice(0, 3);

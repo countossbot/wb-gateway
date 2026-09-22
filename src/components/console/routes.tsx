@@ -150,6 +150,12 @@ function SortableCandidate({
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: cand.key });
 
+  // v4.7.2 修复：模型下拉弹层超出对话框卡片 —— Radix 默认以视口为碰撞边界，
+  // 长目录（16-30 项）向上翻转时会冲出卡片顶部。改为以所在 Dialog 元素为碰撞边界
+  //（collisionBoundary）+ 高度上限，弹层始终限制在卡片内并内部滚动。
+  const modelTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const [modelMenuBoundary, setModelMenuBoundary] = React.useState<HTMLDivElement | null>(null);
+
   // 当前提供商的静态原生模型目录（兑底）：按适配器类型归组；模型 ID 原样透传
   const provider = providers.find((p) => p.id === cand.providerId);
   const nativeModels = (providerModels && provider && providerModels[provider.type]) || [];
@@ -240,21 +246,30 @@ function SortableCandidate({
                   onChange({ model: v });
                 }
               }}
+              onOpenChange={(open) => {
+                // 展开时捕获所在 Dialog 元素作为弹层碰撞边界（收起时不重置，保持引用稳定）
+                if (open) setModelMenuBoundary(modelTriggerRef.current?.closest("[role=dialog]") as HTMLDivElement | null ?? null);
+              }}
             >
-              <SelectTrigger size="sm" className="h-8 min-w-0 flex-1 font-mono text-xs">
+              <SelectTrigger ref={modelTriggerRef} size="sm" className="h-8 min-w-0 flex-1 font-mono text-xs">
                 <SelectValue
                   placeholder={
                     modelsLoading
                       ? "正在从上游拉取模型…"
                       : upstream?.source === "upstream"
-                        ? `选择模型（上游实时 · ${modelOptions.length} 个${upstream?.allCount && upstream.allCount > modelOptions.length ? `，CLI 可用 ${modelOptions.length}` : ""}）`
+                        ? `选择模型（上游实时 · ${modelOptions.length} 个）`
                         : upstream?.source === "derived"
                           ? `选择模型（已知目录 · ${modelOptions.length} 个）`
                           : `选择模型（${modelOptions.length} 个）`
                   }
                 />
               </SelectTrigger>
-              <SelectContent>
+              {/* collisionBoundary=Dialog + maxHeight 上限：弹层不冲出卡片，长目录内部滚动 */}
+              <SelectContent
+                collisionBoundary={modelMenuBoundary ?? undefined}
+                collisionPadding={8}
+                style={{ maxHeight: "min(18rem, var(--radix-select-content-available-height))" }}
+              >
                 {upstream && (
                   <div className="flex items-center gap-1.5 px-2 py-1.5 text-[10px] text-stone-400">
                     {upstream.source === "upstream" ? (
