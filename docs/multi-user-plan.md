@@ -59,7 +59,7 @@ backup.read / backup.write
 ## Task 1：数据模型与迁移准备
 
 ### 状态
-- [ ] 未开始
+- [x] 已完成
 
 ### 目标
 升级 `AdminUser`，支持多成员与角色字段。
@@ -117,7 +117,7 @@ rollback-multiuser-task1-schema
 ## Task 2：会话主体与权限中间件
 
 ### 状态
-- [ ] 未开始
+- [x] 已完成
 
 ### 目标
 会话主体返回真实角色，并提供统一权限检查函数。
@@ -203,7 +203,7 @@ rollback-multiuser-task2-permissions
 ## Task 3：登录 / 会话状态适配多角色
 
 ### 状态
-- [ ] 未开始
+- [x] 已完成
 
 ### 目标
 登录、会话、修改密码等接口适配多成员模型。
@@ -261,7 +261,7 @@ rollback-multiuser-task3-auth
 ## Task 4：成员管理 API
 
 ### 状态
-- [ ] 未开始
+- [x] 已完成
 
 ### 目标
 提供轻量成员管理能力，仅 `ADMIN` 可写。
@@ -377,7 +377,7 @@ rollback-multiuser-task4-member-api
 
 ### Task 5A：现有 API 权限接入
 
-- [ ] 未开始
+- [x] 已完成
 
 **目标**：把现有控制台写接口从「登录即可用」收紧到权限校验，先于 UI 落地。
 
@@ -404,7 +404,7 @@ rollback-multiuser-task5a-api-permissions
 
 ### Task 5B：成员管理 UI 与角色体验
 
-- [ ] 未开始
+- [x] 已完成
 
 **目标**：前端支持多成员管理，并按角色隐藏/禁用操作。
 
@@ -505,7 +505,7 @@ rollback-multiuser-task5b-member-ui
 
 ### Task 5C：一次性数据迁移与 Phase 1 总验收
 
-- [ ] 未开始
+- [x] 已完成
 
 **目标**：保证已有库升级后至少存在一个启用 `ADMIN`，并完成 Phase 1 端到端验收。
 
