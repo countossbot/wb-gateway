@@ -103,6 +103,7 @@ CREATE TABLE "VirtualKey" (
     "dailyRequestLimit" INTEGER NOT NULL DEFAULT 0,
     "dailyTokenLimit" INTEGER NOT NULL DEFAULT 0,
     "monthlyCostLimit" REAL NOT NULL DEFAULT 0,
+    "ownerUserId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL
 );
