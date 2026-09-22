@@ -2264,3 +2264,31 @@ Stage Summary:
 3. 环境清理机制范围未明（已确认受害者：public/downloads/、db/；疑似周期性）；backups/ 项目内快照同样暴露于风险，依赖 ~/.uag-backups/ 项目外副本兜底；建议每次配置变更后手动 export
 4. 合并后 worklog 的 Task 55 之前部分与上游 fork 的 worklog 出现轻微分叉（上游基线内嵌其本地记录方式），无实质影响
 5. 顺延项持续开放：计费 client 字段验证（CN/INTL A/B 样本随 DB 丢失需重做）；GET /v1/responses/{id}；supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
+---
+Task ID: 57
+Agent: 主会话（Z.ai Code，用户直派任务轮：WorkBuddy 模型列表接口逆向研究）
+Task: 用户要求「联网搜一下 workbuddy 和国际版怎么获取模型列表，已知网址 https://www.workbuddy.cn/app 和 https://www.workbuddy.ai/app.douxuyao，需要带上账号凭证才能访问」——联网搜索 + Web 端 JS bundle 逆向 + 账户凭证实测，得出两区获取模型列表的完整机制
+
+Work Log:
+- 【环境确认】DB 已恢复（用户侧重新配置/导入）：Provider×2（workbuddy CN / workbuddy-intl INTL）+ Account×7（CN 3 / INTL 4，凭证齐全，accessToken 2026-09-21 刷新有效期至 2026-11）；ModelRoute×4（deepseek-v4.1-flash / deepseek-v4-pro / deepseek-v4-flash / glm-5.3-flash）
+- 【联网搜索】workbuddy.cn/ai 官方帮助文档仅有「模型管理」后台说明（企业管理员视角）与自定义模型教程，无公开 API 文档；改走 Web 端逆向路线
+- 【入口修正】用户给的 INTL 网址 /app.douxuyao 实测 404，正确入口是 https://www.workbuddy.ai/app（200）；CN https://www.workbuddy.cn/app（200）
+- 【JS bundle 逆向】两区 /app 均为 React SPA：CN 静态资源 static.workbuddy.cn、INTL download.codebuddy.ai；main bundle（8.1MB）中提取 getModels/getTeamsModels 实现：`GET /console/enterprises/{enterpriseId||"personal"}/models?repos[]=<repo>`（个人账户 enterpriseId="personal"），响应全量即产品配置（productConfigCache），CLI 可用模型 = agents[].name==="cli" 的 models 白名单 ∩ models[] 数组
+- 【鉴权机制】HAR（www.workbuddy.cn）请求头实证 x-client-platform: web；无凭证 302 跳 Keycloak OIDC（/auth/realms/copilot，client_id=invite，授权码流程）；带 Authorization: Bearer 即走 HTTP Bearer 鉴权（假 token 401）——CLI 通道凭证（/v2/plugin/auth/token/refresh 换取的 accessToken，azp=console）与 Web OIDC 凭证同源同权
+- 【CN 实测 ✅】GET https://www.workbuddy.cn/console/enterprises/personal/models + Bearer + X-Client-Platform: web → 200（25952B）；三 host 等价全通（www.workbuddy.cn / www.codebuddy.cn / copilot.tencent.com）；3 个 CN 账户（两种 token 签发方：iss=copilot.tencent.com 与 iss=www.workbuddy.cn）全部 200；模型元数据含 credits 倍率/maxInputTokens/maxOutputTokens/supportsImages/supportsReasoning/supportsToolCall/vendor/isDefault 等
+- 【INTL 实测 ❌】同构端点 GET https://www.workbuddy.ai/console/enterprises/personal/models（及 www.codebuddy.ai host）→ 500（响应头 X-APISIX-Upstream-Status: 500 = 上游服务自身错误，非网关/鉴权）；4 个 INTL 账户全 500；GET/POST/OPTIONS、X-Requested-With/X-Request-ID/Origin/Referer/gzip/HTTP2 全头组合、repos 参数、大小写、uid 变体全 500；对照 /console/accounts 与 /console/enterprises 在 INTL 均 200 → 排除凭证与网络问题，实锤 INTL 上游对 personal 企业模型接口故障/未开放；Web 端 fallback 链 = ACP 会话模型（session/new 响应内嵌 availableModels），但 POST /console/as/conversations 对 CLI token 403（需网页登录会话权限）
+- 【CN 模型清单快照 2026-09-22】总 30 模型，CLI 白名单 16：auto(默认,1M输入/32k输出) / hy4-preview(x0.29,1M/64k) / hy3(x0.00 免费,192k/64k) / hy3-x(x0.05) / deepseek-v4.1-flash(x0.03,1M/128k) / glm-5.3(x0.79,1M/64k) / glm-5.3-flash(x0.06,1M/32k) / glm-5.2(x0.79) / glm-5.1(x0.79,200k/48k,无图像) / glm-5v-turbo(x0.71) / kimi-k3-1(x1.62 最贵,1M/32k) / kimi-k2.8-preview(x0.77) / kimi-k2.7(x0.57) / kimi-k2.6(x0.52) / minimax-m3(x0.25,512k/64k) / deepseek-v4-pro(x0.51,1M/128k)；白名单外旧模型 14 个（含 deepseek-v4-flash x0.17、glm-5.0/4.7/4.6、kimi-k2.5/k2-thinking、hunyuan 系、default x2.20、hunyuan-image-alpha 文生图）
+- 【⚠️ 路由风险】ModelRoute 现有 deepseek-v4-flash 不在当前 CLI 白名单（仅有 deepseek-v4.1-flash）→ 该路由上游大概率已下架，调用会 404/业务错；hy3 为 x0.00 免费模型（潜在白嫖通道）；hy4-preview 1M 上下文值得关注
+- 【产物】/tmp/wb-probe/cn-model-list-clean.json（清单快照）；/tmp/wb-probe/cn-models-full.json（原始响应）
+
+Stage Summary:
+- 模型列表获取方式定论：CN `GET {workbuddy.cn|codebuddy.cn|copilot.tencent.com}/console/enterprises/personal/models`，头 `Authorization: Bearer <accessToken>` + `X-Client-Platform: web`，CLI 凭证即可（网关现有账户凭证池直接可用）；INTL 同构端点当前上游 500（4 账户 × 全变体实测），Web 端同样会失败并走 ACP 会话 fallback —— INTL 需等服务端修复或改用会话内模型（需网页登录态）
+- 响应结构：data.models[]（全量模型+元数据）+ data.agents[]（各端白名单，cli agent 即网关所走通道的可用模型）
+- 网关可行动项：①修 ModelRoute 的 deepseek-v4-flash（已下架）②新增高价值模型路由候选（hy3 免费 / deepseek-v4.1-flash x0.03 / hy4-preview 1M ctx）③可把该接口封装为网关的模型清单刷新功能（CN 区）
+
+未解决问题与风险（下一阶段建议）:
+1. INTL 模型列表无解（上游 500）：建议间隔性重试（服务端修复后即恢复）；期间 INTL 可用模型只能沿用静态清单
+2. deepseek-v4-flash 路由失效风险待处理（可实测一发确认，或直接改路由）
+3. 计费 client 字段验证（顺延）；GET /v1/responses/{id}（顺延）；标准适配器 getBalance 池形态（顺延）
+4. 建议配置变更后 bun .zscripts/db-snapshot.ts export（本轮 DB 已恢复但未再做快照）
+5. supervisor 与 mock-upstream（3040）保持运行；4GB 内存 OOM 风险常在
