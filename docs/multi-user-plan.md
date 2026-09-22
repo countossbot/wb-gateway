@@ -370,10 +370,43 @@ rollback-multiuser-task4-member-api
 
 ---
 
-## Task 5：控制台 UI 与现有 API 权限接入
+## Task 5：Phase 1 收口（拆为 5A / 5B / 5C 三个子任务）
 
-### 状态
+> Task 5 原设计同时包含成员管理 UI、全量 API 权限接入与一次性数据迁移，
+> 粒度过大，拆为 5A / 5B / 5C，各自独立验收与回退点。
+
+### Task 5A：现有 API 权限接入
+
 - [ ] 未开始
+
+**目标**：把现有控制台写接口从「登录即可用」收紧到权限校验，先于 UI 落地。
+
+**修改范围**
+- 所有控制台 API 路由中现使用 `requireSessionOr401()` 的位置
+- `src/lib/gateway/console/consoleHelpers.ts`
+
+**权限映射**（同下表）
+
+**验收用例（必须逐条执行）**
+1. `VIEWER` 调 `POST /api/console/routes` → 期望 `403`
+2. `VIEWER` 调 `POST /api/console/providers` → 期望 `403`
+3. `VIEWER` 调 `POST /api/console/keys` → 期望 `403`
+4. `VIEWER` 调 `PUT /api/console/settings` → 期望 `403`
+5. `OPERATOR` 调 `POST /api/console/routes` → 期望 `2xx`
+6. `OPERATOR` 调 `POST /api/console/providers` → 期望 `403`
+7. `OPERATOR` 调 `GET /api/console/members` → 期望 `403`（`member.read` 仅 ADMIN）
+8. `ADMIN` 调上述全部 → 期望通过
+
+**回退点**
+```bash
+rollback-multiuser-task5a-api-permissions
+```
+
+### Task 5B：成员管理 UI 与角色体验
+
+- [ ] 未开始
+
+**目标**：前端支持多成员管理，并按角色隐藏/禁用操作。
 
 ### 目标
 前端支持多成员管理，并对管理操作按角色隐藏/禁用。
@@ -464,6 +497,30 @@ if (adminCount > 0 && adminWithRoleCount === 0) {
 1. 查询所有 `role is null or role not in (...)` 的用户。
 2. 全部设为 `ADMIN`。
 3. 保证至少一个启用 `ADMIN`。
+
+**回退点**
+```bash
+rollback-multiuser-task5b-member-ui
+```
+
+### Task 5C：一次性数据迁移与 Phase 1 总验收
+
+- [ ] 未开始
+
+**目标**：保证已有库升级后至少存在一个启用 `ADMIN`，并完成 Phase 1 端到端验收。
+
+**迁移规则（按顺序，幂等）**
+1. 查询 `role` 不在 `('ADMIN','OPERATOR','VIEWER')` 内的全部用户（含历史库默认值）。
+2. 将这些用户全部置为 `ADMIN`。
+3. 若不存在任何 `enabled = true` 的 `ADMIN`，把最早创建的启用用户提升为 `ADMIN`。
+4. 迁移必须可重复执行且无副作用（第二次执行为空操作）。
+
+**Phase 1 端到端验收**
+1. 新库首次初始化 → 创建的管理员角色为 `ADMIN`。
+2. 旧库升级 → 原单管理员仍可登录，角色为 `ADMIN`。
+3. 新增 `OPERATOR` / `VIEWER` 成员后，按 5A 用例逐条验证通过。
+4. 禁用成员后其会话立即失效（下一个请求返回 `401`）。
+5. 控制台各页面在三种角色下无控制台报错。
 
 ### 验证
 ```bash
@@ -572,12 +629,18 @@ model UsageDaily {
 }
 ```
 
-注意：
+**最终决策（不再留待实施时判断）**
 
 - `RequestLog.ownerUserId` 可空，旧数据为 `null`。
-- `UsageDaily.ownerUserId` 建议默认 `""`，避免破坏现有复合唯一键。
-- 若现有 `UsageDaily` 唯一键包含 `day/providerId/apiKeyName/model`，不要贸然把 `ownerUserId` 放进唯一键，否则旧数据会出现重复维度。
-- 推荐先作为展示维度，不参与唯一键；`ownerUserId` 由 `apiKeyName → VirtualKey.ownerUserId` 解析。
+- `UsageDaily.ownerUserId` 使用 `String @default("")`，历史数据回填为 `""`。
+- **`ownerUserId` 不参与 `UsageDaily` 唯一键**。唯一键保持现有
+  `(day, providerId, apiKeyName, model)` 不变。
+- 理由：同一 `apiKeyName` 的 owner 可能被管理员改派，若把 `ownerUserId` 并入唯一键，
+  同一维度会分裂成多行，历史统计与配额对账口径全部错位。
+- 因此 `ownerUserId` 仅作为**展示/筛选维度**：写入时由 `apiKeyName → VirtualKey.ownerUserId`
+  解析得到，属于派生字段，允许随 Key 改派而更新。
+- 若后续确有「按当时归属固化」的需求，应新增独立表（如 `UsageOwnerHistory`），
+  而不是修改现有唯一键。
 
 ### 写入链路
 `dispatch.ts` 已有 `apiKeyName`。
@@ -648,7 +711,11 @@ rollback-multiuser-key-owner
 
 ---
 
-# Phase 3：可选增强，不作为本期目标
+# Phase 3：可选增强（本期明确不做）
+
+> 取舍说明：Phase 3 的所有任务**不在本期交付范围**，仅作为后续候选记录在案。
+> 本期以 Phase 1 + Phase 2 为完整交付口径；Phase 3 不占用当前排期，也不阻塞推送。
+> 若实施中发现 Phase 1/2 已满足使用需求，可无限期推迟 Phase 3。
 
 ## Task 9：TOTP 两步验证
 
@@ -707,10 +774,14 @@ rollback-multiuser-key-owner
 2. Task 2：权限核心
 3. Task 3：登录/会话
 4. Task 4：成员 API
-5. Task 5：UI + API 权限接入 + Phase 1 总验收
-6. Task 6：Key 归属
-7. Task 7：日志归属
-8. Task 8：筛选与禁用联动 + Phase 2 总验收
+5. Task 5A：现有 API 权限接入
+6. Task 5B：成员管理 UI 与角色体验
+7. Task 5C：一次性数据迁移 + Phase 1 总验收
+8. Task 6：Key 归属
+9. Task 7：日志归属
+10. Task 8：筛选与禁用联动 + Phase 2 总验收
+
+Phase 3（Task 9-11）本期不实施。
 
 ## 每个任务完成标准
 
@@ -733,15 +804,18 @@ npm run build
 按顺序创建：
 
 ```text
+rollback-pre-multiuser-plan-refine
 rollback-multiuser-plan
 rollback-multiuser-task1-schema
 rollback-multiuser-task2-permissions
 rollback-multiuser-task3-auth
 rollback-multiuser-task4-member-api
-rollback-multiuser-rbac
+rollback-multiuser-task5a-api-permissions
+rollback-multiuser-task5b-member-ui
+rollback-multiuser-rbac            # = Task 5C 完成，Phase 1 收口
 rollback-multiuser-task6-key-owner
 rollback-multiuser-task7-log-owner
-rollback-multiuser-key-owner
+rollback-multiuser-key-owner       # = Task 8 完成，Phase 2 收口
 ```
 
 每个 tag 使用中文说明，例如：
