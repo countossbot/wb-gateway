@@ -117,6 +117,7 @@ export interface UpstreamModelDetail {
   supportsReasoning?: boolean;
   supportsToolCall?: boolean;
   isDefault?: boolean;
+  tags?: string[];
 }
 export interface UpstreamModelsResult {
   /** CLI 通道可用模型（白名单顺序，网关路由候选可直接使用） */

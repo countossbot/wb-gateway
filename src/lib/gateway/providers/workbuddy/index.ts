@@ -43,7 +43,7 @@ const INTL_FALLBACK_SYSTEM = "You are a helpful assistant.";
 // v4.8.0：WorkBuddy Desktop outbound identity（合入 wb-gateway 06e9ade，Task 62 修复方案 A 落地）。
 // Chat 的用量归属头使用官方桌面端形态；Web fingerprint 只在确实属于 Web endpoint
 // 的请求上使用，不能再作为全局身份标识。
-const WORKBUDDY_CLIENT_VERSION = "5.5.4";
+const WORKBUDDY_CLIENT_VERSION = "5.5.6";
 const WORKBUDDY_CLI_VERSION = "2.137.1";
 
 function workbuddyUserAgent(region: "cn" | "intl"): string {
@@ -133,27 +133,16 @@ export interface WorkbuddyEndpoints {
   chat: string;
   billing: string;
   checkin: string;
-  // v4.7.1：上游模型目录（Web 端 /console/enterprises/personal/models，Task 57 逆向实测）。
-  // 鉴权：Bearer accessToken + X-Client-Platform: web（Web 端点保留 web 标识，实测 200）。
-  // CN 实测 200（30 模型 + cli 白名单 16）；INTL 同构端点当前上游 500（拉取失败自然降级 derived）。
+  // 模型目录端点：对齐桌面客户端 ProductManager 的 /v3/config 合并列表。
   models: string;
   origin: string;
   referer: string;
   userAgent: string;
 }
 
-// 模型目录拉取用的 Web 端 UA（贴近 Web 端真实请求形态；CLI UA 亦可用，实测均 200）
-const WORKBUDDY_WEB_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
-
 export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
   if (normalizeWorkbuddyRegion(region) === "intl") {
-    // 国际站（实测 2026-09-14）：CLI product.json 默认 endpoint 即 www.codebuddy.ai，
-    // 鉴权同为 cli-external-link + prefixPath /plugin；refresh 空 token 回业务码 10001，
-    // chat/billing/checkin 同 path 在鉴权墙后（401）。与 CN 同构，唯 host 与 Origin 不同。
-    // 模型目录：v4.7.2 改走 /v2 CLI 通道（Web 端 /console 路径仅认网页 cookie 会话，
-    // CLI Bearer 调用上游 500 全变体实测无解；/v2 路径 4 账户 × 2 host 实测全 200，
-    // 响应与 Web 端完全一致 —— 2026-09-22 用户 HAR 对照验证）。
+    // 模型目录走桌面端 /v3/config；refresh/chat/billing/checkin 仍走原有 /v2 与 billing 路径。
     return {
       region: "intl",
       probed: true,
@@ -161,7 +150,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
       chat: "https://www.workbuddy.ai/v2/chat/completions",
       billing: "https://www.workbuddy.ai/billing/meter/get-user-resource",
       checkin: "https://www.workbuddy.ai/billing/meter/daily-checkin",
-      models: "https://www.codebuddy.ai/v2/enterprises/personal/models",
+      models: "https://www.workbuddy.ai/v3/config",
       origin: "https://www.workbuddy.ai",
       referer: "https://www.workbuddy.ai/",
       userAgent: workbuddyUserAgent("intl"),
@@ -174,10 +163,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
     checkin: "https://www.codebuddy.cn/v2/billing/meter/daily-checkin",
-    // 模型目录 host 与 billing 同源（www.codebuddy.cn）；v4.7.2 与 INTL 统一改走
-    // /v2 CLI 通道（CLI Bearer 直用；/console 路径 Bearer 亦 200 但 INTL 不通，
-    // /v2 两区实测均 200 且响应与 /console 完全一致 —— 2026-09-22）
-    models: "https://www.codebuddy.cn/v2/enterprises/personal/models",
+    models: "https://copilot.tencent.com/v3/config",
     origin: "https://www.codebuddy.cn",
     referer: "https://www.codebuddy.cn/",
     userAgent: workbuddyUserAgent("cn"),
@@ -191,6 +177,32 @@ interface WorkbuddyAccount extends AccountConfig {
   accessToken?: string;
   refreshToken?: string;
   [key: string]: unknown;
+}
+
+function parseModelTags(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((tag): tag is string => typeof tag === "string") : [];
+}
+
+function parseUpstreamModels(json: unknown): { models: Record<string, unknown>[]; allowIds: string[] } | null {
+  if (!json || typeof json !== "object") return null;
+  const root = json as { code?: unknown; data?: unknown };
+  if (typeof root.code === "number" && root.code !== 0) return null;
+  const data = (root.data && typeof root.data === "object" ? root.data : root) as {
+    models?: unknown;
+    agents?: unknown;
+  };
+  if (!Array.isArray(data.models)) return null;
+  const models = data.models.filter(
+    (m): m is Record<string, unknown> => !!m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string"
+  );
+  if (models.length === 0) return null;
+  const agents = Array.isArray(data.agents) ? data.agents : [];
+  const allowIds = agents
+    .map((agent) => (agent && typeof agent === "object" ? (agent as { name?: unknown; models?: unknown }) : null))
+    .filter((agent): agent is { name?: unknown; models?: unknown } => !!agent && agent.name === "cli")
+    .flatMap((agent) => (Array.isArray(agent.models) ? agent.models : []))
+    .filter((id): id is string => typeof id === "string");
+  return { models, allowIds };
 }
 
 export class WorkBuddyProvider implements ProviderAdapter {
@@ -354,14 +366,8 @@ export class WorkBuddyProvider implements ProviderAdapter {
     }
   }
 
-  // v4.7.2：上游模型目录拉取（Task 57 逆向 + Task 59 INTL 打通，供 /api/console/providers/models 路由候选下拉）。
-  // 端点：GET /v2/enterprises/personal/models（个人账户 enterpriseId 字面量 "personal"，CLI 通道）。
-  //   - CN：www.codebuddy.cn /v2/...（3 账户 × 2 host 实测 200，30 模型 / CLI 白名单 16）；
-  //   - INTL：www.codebuddy.ai /v2/...（4 账户 × 2 host 实测 200，18 模型 / CLI 白名单 18，
-  //     与用户 HAR 网页响应逐字段一致；注意 /console Web 路径对 CLI Bearer 上游 500 不可用）。
-  // 鉴权：CLI 凭证 Bearer accessToken 直接可用。
-  // 响应结构：data.models[]（全量模型 + 元数据，id 为机器名）∪ data.agents[]（各端白名单）；
-  //          CLI 通道可用 = agents.name==="cli".models 白名单按序过滤 models[].id。
+  // 模型目录拉取：对齐桌面客户端 ProductManager 的 /v3/config 合并列表。
+  // 请求使用桌面端形态（X-Product / X-Requested-With / 桌面端 UA），并按 agents[name="cli"].models 过滤。
   // 容错：逐账户尝试（最多 3 个）→ 401 无感续签重试一次 → 全部失败抛错（调用方降级 derived）。
   async listUpstreamModels(): Promise<UpstreamModelsResult> {
     const ep = this.ep();
@@ -385,15 +391,18 @@ export class WorkBuddyProvider implements ProviderAdapter {
               headers: {
                 Authorization: `Bearer ${token}`,
                 "X-Client-Platform": WORKBUDDY_CLIENT_PLATFORM,
-                Accept: "application/json, text/plain, */*",
-                "User-Agent": WORKBUDDY_WEB_UA,
+                Accept: "application/json",
+                "Content-Type": "application/json",
+                "X-Product": "SaaS",
+                "X-Requested-With": "XMLHttpRequest",
+                Connection: "close",
+                "User-Agent": ep.userAgent,
               },
               signal: AbortSignal.timeout(8_000),
             },
             { providerId: this.id }
           );
           if (resp.status === 401 && attempt === 0) {
-            // token 过期 → 无感续签后重试（与主链路同一 refreshAccessToken）
             const refreshed = await this.refreshAccessToken(acc);
             token = (typeof refreshed === "string" && refreshed) || "";
             continue;
@@ -401,47 +410,27 @@ export class WorkBuddyProvider implements ProviderAdapter {
           if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}${resp.status === 500 ? "（上游服务错误）" : ""}`);
           }
-          const resJson = (await resp.json().catch(() => ({}))) as {
-            code?: number;
-            msg?: string;
-            data?: {
-              models?: Array<{
-                id?: string;
-                name?: string;
-                credits?: string | null;
-                maxInputTokens?: number | null;
-                maxOutputTokens?: number | null;
-                supportsImages?: boolean;
-                supportsReasoning?: boolean;
-                supportsToolCall?: boolean;
-                isDefault?: boolean;
-              }>;
-              agents?: Array<{ name?: string; models?: string[] }>;
-            };
-          };
-          if (typeof resJson.code === "number" && resJson.code !== 0) {
-            throw new Error(`业务错误 code=${resJson.code} ${resJson.msg || ""}`.trim());
-          }
-          const all = (resJson.data?.models ?? []).filter((m) => typeof m?.id === "string" && m.id);
-          if (all.length === 0) {
-            throw new Error("上游响应无模型数据");
-          }
+          const resJson = (await resp.json().catch(() => ({}))) as unknown;
+          const parsed = parseUpstreamModels(resJson);
+          if (!parsed) throw new Error("上游响应无模型数据");
+          const all = parsed.models;
+          const allowIds = parsed.allowIds;
           const byId = new Map(all.map((m) => [m.id as string, m]));
-          const allow = (resJson.data?.agents ?? []).find((a) => a?.name === "cli")?.models ?? [];
-          // CLI 白名单有序过滤；上游未配置白名单时回退全量目录
-          const ids = allow.length > 0 ? allow.filter((id) => byId.has(id)) : all.map((m) => m.id as string);
+          // 桌面端 cli agent 白名单有序过滤；上游未配置时回退全量目录
+          const ids = allowIds.length > 0 ? allowIds.filter((id) => byId.has(id)) : all.map((m) => m.id as string);
           const details = ids.map((id) => {
             const m = byId.get(id);
             return {
               id,
-              name: m?.name ?? null,
-              credits: m?.credits ?? null,
-              maxInputTokens: m?.maxInputTokens ?? null,
-              maxOutputTokens: m?.maxOutputTokens ?? null,
+              name: typeof m?.name === "string" ? m.name : null,
+              credits: typeof m?.credits === "string" ? m.credits : null,
+              maxInputTokens: typeof m?.maxInputTokens === "number" ? m.maxInputTokens : null,
+              maxOutputTokens: typeof m?.maxOutputTokens === "number" ? m.maxOutputTokens : null,
               supportsImages: !!m?.supportsImages,
               supportsReasoning: !!m?.supportsReasoning,
               supportsToolCall: !!m?.supportsToolCall,
               isDefault: !!m?.isDefault,
+              tags: parseModelTags(m?.tags),
             };
           });
           return { models: ids, details, url: ep.models, allCount: all.length };

@@ -60,8 +60,8 @@ import type { RouteRow, RoutesData } from "@/lib/console/types";
 
 // ---- 上游模型目录拉取（/api/console/providers/models）----
 // 模块级缓存 60s：同一提供商多行候选/反复打开表单不重复打上游；强制刷新穿透。
-// v4.7.2：workbuddy 两区接入真实上游拉取（/v2/enterprises/personal/models CLI 通道），
-// 响应可携带 details 元数据；下拉项精简展示（仅模型名 + 倍率/免费徽章，v4.7.3 去除上下文/能力/默认标注）。
+// v4.7.2：workbuddy 两区接入真实上游拉取；v4.8.1 改为对齐桌面端 /v3/config 合并列表。
+// 响应可携带 details 元数据；下拉项精简展示（仅模型名 + 倍率/免费徽章）。
 interface UpstreamModelDetail {
   id: string;
   name?: string | null;
@@ -73,6 +73,7 @@ interface UpstreamModelDetail {
   supportsReasoning?: boolean;
   supportsToolCall?: boolean;
   isDefault?: boolean;
+  tags?: string[];
 }
 interface ProviderModelsData {
   source: "upstream" | "derived";
@@ -180,7 +181,9 @@ function SortableCandidate({
   }, [cand.providerId, loadModels]);
 
   // 模型下拉数据源：优先上游/推导目录；拉取中或失败时兑底静态目录
-  const modelOptions = upstream?.models?.length ? upstream.models : nativeModels;
+  const upstreamModels = upstream?.models?.length ? upstream.models : [];
+  const hasClientCatalog = upstream?.source === "upstream";
+  const modelOptions = hasClientCatalog ? upstreamModels : nativeModels;
   const modelInOptions = !!cand.model && modelOptions.includes(cand.model);
   // 上游元数据（details）：模型 ID → 倍率/上下文/能力（无则朴素渲染）
   const detailMap = React.useMemo(() => {
@@ -249,7 +252,7 @@ function SortableCandidate({
                     modelsLoading
                       ? "正在从上游拉取模型…"
                       : upstream?.source === "upstream"
-                        ? `选择模型（上游实时 · ${modelOptions.length} 个）`
+                        ? `选择模型（客户端实时 · ${modelOptions.length} 个）`
                         : upstream?.source === "derived"
                           ? `选择模型（已知目录 · ${modelOptions.length} 个）`
                           : `选择模型（${modelOptions.length} 个）`
@@ -265,7 +268,7 @@ function SortableCandidate({
                 {upstream && (
                   <div className="flex items-center gap-1.5 px-2 py-1.5 text-[10px] text-stone-400">
                     {upstream.source === "upstream" ? (
-                      <><span className="size-1.5 rounded-full bg-teal-500" />已从上游实时拉取（可点右侧刷新）</>
+                      <><span className="size-1.5 rounded-full bg-teal-500" />已对齐客户端实时列表（{modelOptions.length}/{upstream.allCount}）</>
                     ) : (
                       <><span className="size-1.5 rounded-full bg-amber-500" />已知目录 · 来自当前路由配置与内置预设{upstream.fallbackReason ? `（${upstream.fallbackReason.slice(0, 60)}）` : "（该类型上游无公开模型列表接口，或暂时不可用）"}</>
                     )}
