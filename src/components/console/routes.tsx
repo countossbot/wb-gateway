@@ -60,8 +60,8 @@ import type { RouteRow, RoutesData } from "@/lib/console/types";
 
 // ---- 上游模型目录拉取（/api/console/providers/models）----
 // 模块级缓存 60s：同一提供商多行候选/反复打开表单不重复打上游；强制刷新穿透。
-// v4.7.1：workbuddy 接入真实上游拉取（Web 端 /console/enterprises/personal/models），
-// 响应可携带 details 元数据（倍率/上下文/能力），下拉项富展示。
+// v4.7.2：workbuddy 两区接入真实上游拉取（/v2/enterprises/personal/models CLI 通道），
+// 响应可携带 details 元数据；下拉项精简展示（仅模型名 + 倍率/免费徽章，v4.7.3 去除上下文/能力/默认标注）。
 interface UpstreamModelDetail {
   id: string;
   name?: string | null;
@@ -97,14 +97,6 @@ async function fetchProviderModels(
   const d = await apiGet<ProviderModelsData>(`/api/console/providers/models?providerId=${encodeURIComponent(providerId)}${force ? "&refresh=1" : ""}`);
   MODEL_FETCH_CACHE.set(providerId, { data: d, at: Date.now() });
   return d;
-}
-
-// token 数值 → 紧凑展示（1000000 → "1M"，256000 → "256k"，128000 → "128k"）
-function compactTokens(n: number | null | undefined): string {
-  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "";
-  if (n >= 1_000_000 && n % 1_000_000 === 0) return `${n / 1_000_000}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
-  return String(n);
 }
 
 // 倍率徽章文案："x0.00 credits" → 免费（绿色）；"x0.29" → ×0.29；null → 无
@@ -232,9 +224,9 @@ function SortableCandidate({
             ))}
           </SelectContent>
         </Select>
-        {/* 模型字段：选提供商后自动从上游拉取模型目录（openai/anthropic/opencode/workbuddy(CN) 实时；
-            qwenweb 或拉取失败 → 推导目录降级），workbuddy 上游响应含元数据 → 下拉富展示
-            （倍率/上下文/能力徽章）；手动输入始终可切（保留任意上游模型能力，模型 ID 原样透传零改写） */}
+        {/* 模型字段：选提供商后自动从上游拉取模型目录（openai/anthropic/opencode/workbuddy 两区实时；
+            qwenweb 或拉取失败 → 推导目录降级），workbuddy 上游响应含元数据 → 下拉项精简展示
+            （仅模型名 + 倍率/免费徽章）；手动输入始终可切（保留任意上游模型能力，模型 ID 原样透传零改写） */}
         {useModelSelect ? (
           <div className="flex w-full min-w-0 flex-1 gap-1.5">
             <Select
@@ -285,19 +277,10 @@ function SortableCandidate({
                 {modelOptions.map((m) => {
                   const det = detailMap.get(m);
                   const cred = creditsBadgeLabel(det?.credits);
-                  const ctxIn = compactTokens(det?.maxInputTokens);
-                  const ctxOut = compactTokens(det?.maxOutputTokens);
-                  const ctxText = ctxIn && ctxOut ? `${ctxIn}/${ctxOut}` : ctxIn || "";
-                  const caps = [
-                    det?.supportsImages ? "图像" : "",
-                    det?.supportsReasoning ? "推理" : "",
-                    det?.supportsToolCall ? "" : "无工具",
-                  ].filter(Boolean).join("·");
                   return (
                     <SelectItem key={m} value={m}>
                       <span className="flex min-w-0 flex-1 items-center gap-1.5">
                         <code className="truncate font-mono text-xs">{m}</code>
-                        {det?.isDefault ? <Badge variant="secondary" className="h-4 shrink-0 bg-teal-50 px-1 text-[9px] text-teal-700">默认</Badge> : null}
                         {cred ? (
                           <Badge
                             variant="secondary"
@@ -306,8 +289,6 @@ function SortableCandidate({
                             {cred.text}
                           </Badge>
                         ) : null}
-                        {ctxText ? <span className="shrink-0 text-[9px] text-stone-400" title="上下文输入/输出">{ctxText}</span> : null}
-                        {caps ? <span className="shrink-0 text-[9px] text-stone-400" title={`能力：${caps}`}>{caps}</span> : null}
                       </span>
                     </SelectItem>
                   );
