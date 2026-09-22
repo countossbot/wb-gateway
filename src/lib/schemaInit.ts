@@ -20,6 +20,7 @@ import { db } from "@/lib/db";
 // ---- 进程内幂等标记（防 instrumentation 与并发 route 双重执行；HMR 重载沿用同一 globalThis） ----
 const SCHEMA_INIT_KEY = "__uag_schema_init_promise__";
 const SEED_ADMIN_KEY = "__uag_seed_admin_promise__";
+const MIGRATE_ADMIN_USER_KEY = "__uag_migrate_admin_user_promise__";
 
 /** 解析 DATABASE_URL 中的 SQLite 文件路径（剥离 file: 前缀与 query 串） */
 function resolveDbFilePath(): string | null {
@@ -171,7 +172,7 @@ export async function seedDefaultAdmin(): Promise<SeedAdminResult> {
     const username = (process.env.UAG_DEFAULT_ADMIN_USERNAME || "admin").trim().slice(0, 64) || "admin";
     const password = process.env.UAG_DEFAULT_ADMIN_PASSWORD || "gateway-admin-2026";
     const passwordHash = await hashPassword(password);
-    await db.adminUser.create({ data: { username, passwordHash } });
+    await db.adminUser.create({ data: { username, passwordHash, role: "ADMIN" } });
     console.log(
       `[SchemaInit] default admin seeded: username="${username}"（默认口令仅首次启动生效；生产环境请用 UAG_DEFAULT_ADMIN_PASSWORD 覆盖为强口令，并尽快在控制台修改）`
     );
@@ -182,5 +183,103 @@ export async function seedDefaultAdmin(): Promise<SeedAdminResult> {
   });
 
   g[SEED_ADMIN_KEY] = run;
+  return run;
+}
+
+
+// ---- v4.9.0：AdminUser 多成员改造的幂等列迁移与角色回填 ----
+// 背景：已有库（v4.9.0 之前创建）的 AdminUser 表没有 displayName / role / enabled / lastLoginAt 列，
+// 且历史管理员没有角色。直接跑 Prisma 查询会因缺列报错，必须先补列再回填。
+//
+// 与 ensureDatabaseSchema 的分工：
+//   - ensureDatabaseSchema：仅空库建表（执行 init.sql）
+//   - migrateAdminUserColumns：已有库的增量列补齐 + 角色回填（幂等，可重复执行）
+export interface AdminUserMigrationResult {
+  columnsAdded: string[];
+  promoted: number;
+  reason: string;
+}
+
+const ADMIN_USER_COLUMNS: Array<{ name: string; ddl: string }> = [
+  { name: "displayName", ddl: `ALTER TABLE "AdminUser" ADD COLUMN "displayName" TEXT` },
+  { name: "role", ddl: `ALTER TABLE "AdminUser" ADD COLUMN "role" TEXT NOT NULL DEFAULT 'VIEWER'` },
+  { name: "enabled", ddl: `ALTER TABLE "AdminUser" ADD COLUMN "enabled" BOOLEAN NOT NULL DEFAULT true` },
+  { name: "lastLoginAt", ddl: `ALTER TABLE "AdminUser" ADD COLUMN "lastLoginAt" DATETIME` },
+];
+
+/**
+ * 幂等迁移 AdminUser 表：
+ *   1. 逐列探测，缺失则 ADD COLUMN（SQLite 无 IF NOT EXISTS for ADD COLUMN，需先读 PRAGMA）。
+ *   2. 把角色非法（历史库空值/未知值）的用户回填为 ADMIN —— 保证升级后原管理员仍可管理。
+ *   3. 兜底：若不存在启用的 ADMIN，则把最早创建的启用用户提升为 ADMIN。
+ * 空库场景由 ensureDatabaseSchema 处理，这里遇到表不存在时直接跳过。
+ */
+export async function migrateAdminUserColumns(): Promise<AdminUserMigrationResult> {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const pending = g[MIGRATE_ADMIN_USER_KEY] as Promise<AdminUserMigrationResult> | undefined;
+  if (pending) return pending;
+
+  const run = (async (): Promise<AdminUserMigrationResult> => {
+    const tables = (await db.$queryRawUnsafe(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='AdminUser'`
+    )) as Array<{ name: string }>;
+    if (tables.length === 0) {
+      return { columnsAdded: [], promoted: 0, reason: "table-missing" };
+    }
+
+    const existing = (await db.$queryRawUnsafe(`PRAGMA table_info("AdminUser")`)) as Array<{ name: string }>;
+    const existingNames = new Set(existing.map((c) => c.name));
+    const columnsAdded: string[] = [];
+    for (const col of ADMIN_USER_COLUMNS) {
+      if (existingNames.has(col.name)) continue;
+      await db.$executeRawUnsafe(col.ddl);
+      columnsAdded.push(col.name);
+    }
+    if (columnsAdded.length > 0) {
+      console.log(`[SchemaInit] AdminUser migrated: added columns ${columnsAdded.join(", ")}`);
+    }
+
+    // 角色回填逻辑（v4.9.0）：
+    //   1. 首次加 role 列 → 该库此前从未有多角色概念，所有用户都是历史管理员，全部升 ADMIN。
+    //   2. role 列已存在但值非法（NULL 或非三态枚举）→ 回填为 ADMIN。
+    // 两种情况互不重叠：首次加列时新列默认值就是合法的 VIEWER，不满足条件 2。
+    let promoted = 0;
+    if (columnsAdded.includes("role")) {
+      promoted = await db.$executeRawUnsafe(`UPDATE "AdminUser" SET "role" = 'ADMIN'`);
+    } else {
+      promoted = await db.$executeRawUnsafe(
+        `UPDATE "AdminUser" SET "role" = 'ADMIN' WHERE "role" IS NULL OR "role" NOT IN ('ADMIN','OPERATOR','VIEWER')`
+      );
+    }
+
+    // 兜底：不存在启用的 ADMIN 时，提升最早创建的启用用户。
+    const adminCount = (await db.$queryRawUnsafe(
+      `SELECT count(*) as n FROM "AdminUser" WHERE "role" = 'ADMIN' AND "enabled" = true`
+    )) as Array<{ n: number | bigint }>;
+    const hasActiveAdmin = Number(adminCount[0]?.n ?? 0) > 0;
+    let rescued = 0;
+    if (!hasActiveAdmin) {
+      const rescue = await db.$executeRawUnsafe(
+        `UPDATE "AdminUser" SET "role" = 'ADMIN', "enabled" = true WHERE "id" = (
+           SELECT "id" FROM "AdminUser" WHERE "enabled" = true ORDER BY "createdAt" ASC, "id" ASC LIMIT 1
+         )`
+      );
+      rescued = Number(rescue ?? 0);
+      if (rescued > 0) {
+        console.warn("[SchemaInit] AdminUser migrated: no active ADMIN found, promoted the earliest enabled user");
+      }
+    }
+
+    return {
+      columnsAdded,
+      promoted: Number(promoted ?? 0),
+      reason: columnsAdded.length > 0 ? "columns-added" : hasActiveAdmin ? "already-migrated" : "rescued-admin",
+    };
+  })().catch((err) => {
+    g[MIGRATE_ADMIN_USER_KEY] = undefined;
+    throw err;
+  });
+
+  g[MIGRATE_ADMIN_USER_KEY] = run;
   return run;
 }

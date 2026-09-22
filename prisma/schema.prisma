@@ -20,11 +20,15 @@ model SchemaVersion {
 
 // ---- 管理员与会话 ----
 model AdminUser {
-  id           String   @id @default(cuid())
-  username     String   @unique
+  id           String    @id @default(cuid())
+  username     String    @unique
   passwordHash String // scrypt: salt:hex
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  displayName  String?
+  role         String    @default("VIEWER") // ADMIN | OPERATOR | VIEWER
+  enabled      Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 }
 
 model Session {

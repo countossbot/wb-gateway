@@ -10,6 +10,10 @@ CREATE TABLE "AdminUser" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "username" TEXT NOT NULL,
     "passwordHash" TEXT NOT NULL,
+    "displayName" TEXT,
+    "role" TEXT NOT NULL DEFAULT 'VIEWER',
+    "enabled" BOOLEAN NOT NULL DEFAULT true,
+    "lastLoginAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL
 );
