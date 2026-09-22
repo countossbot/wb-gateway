@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import type { AdminRole } from "@/lib/console/types";
 
 export type ConsoleTab =
   | "overview"
@@ -44,13 +45,15 @@ export const TAB_ITEMS: Array<{ id: ConsoleTab; label: string; icon: React.Eleme
 function NavList({
   active,
   onSelect,
+  items = TAB_ITEMS,
 }: {
   active: ConsoleTab;
   onSelect: (t: ConsoleTab) => void;
+  items?: typeof TAB_ITEMS;
 }) {
   return (
     <nav aria-label="控制台导航" className="space-y-1">
-      {TAB_ITEMS.map((item) => {
+      {items.map((item) => {
         const Icon = item.icon;
         const isActive = active === item.id;
         return (
@@ -92,6 +95,7 @@ function BrandBlock() {
 export function ConsoleShell({
   version,
   username,
+  role,
   authVia,
   active,
   onSelect,
@@ -100,12 +104,22 @@ export function ConsoleShell({
 }: {
   version: string;
   username: string;
+  /** v4.9.0：当前用户角色（用于导航过滤与角色徽标） */
+  role?: AdminRole | null;
   authVia?: "cookie" | "bearer" | null;
   active: ConsoleTab;
   onSelect: (t: ConsoleTab) => void;
   onLogout: () => void;
   children: React.ReactNode;
 }) {
+  // v4.9.0：VIEWER 隐藏写操作导航（providers / keys / routes / jobs）
+  const canWrite = role !== "VIEWER";
+  const visibleTabs = TAB_ITEMS.filter((item) => {
+    if (canWrite) return true;
+    return item.id === "overview" || item.id === "logs" || item.id === "settings";
+  });
+  // 防呆：当前 active tab 对 VIEWER 不可见时回退到总览
+  const effectiveActive = canWrite ? active : (visibleTabs.find((t) => t.id === active) ? active : "overview");
   const [mobileOpen, setMobileOpen] = React.useState(false);
 
   const select = (t: ConsoleTab) => {
@@ -119,7 +133,7 @@ export function ConsoleShell({
         {/* 桌面侧边栏 */}
         <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-stone-200 bg-white px-3 py-5 lg:flex">
           <BrandBlock />
-          <NavList active={active} onSelect={select} />
+          <NavList active={effectiveActive} onSelect={select} items={visibleTabs} />
           <div className="mt-auto px-2 pt-4">
             <p className="text-[11px] text-muted-foreground">
               Universal AI Gateway
@@ -142,7 +156,7 @@ export function ConsoleShell({
                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
                 <div className="pt-1">
                   <BrandBlock />
-                  <NavList active={active} onSelect={select} />
+                  <NavList active={effectiveActive} onSelect={select} items={visibleTabs} />
                 </div>
               </SheetContent>
             </Sheet>
@@ -172,7 +186,12 @@ export function ConsoleShell({
 
             <div className="ml-auto flex items-center gap-2 sm:gap-3">
               <span className="hidden text-sm text-muted-foreground sm:inline">
-                管理员 <span className="font-medium text-stone-800">{username}</span>
+                <span className="font-medium text-stone-800">{username}</span>
+                {role && (
+                  <Badge variant={role === "ADMIN" ? "default" : "secondary"} className="ml-1.5 text-[10px]">
+                    {role === "ADMIN" ? "管理员" : role === "OPERATOR" ? "操作员" : "观察者"}
+                  </Badge>
+                )}
               </span>
               <Button variant="outline" size="sm" onClick={onLogout}>
                 <LogOut /> <span className="hidden sm:inline">登出</span>

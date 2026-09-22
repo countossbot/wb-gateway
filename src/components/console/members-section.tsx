@@ -25,7 +25,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut, errMessage } from "@/lib/console/api";
 import { Section } from "@/components/console/settings-sections";
 import { ErrorAlert } from "@/components/console/ui";
 import { TypeBadge } from "@/components/console/ui";
@@ -138,7 +138,7 @@ export function MembersSection() {
   const toggleEnabled = async (m: Member) => {
     const action = m.enabled ? "disable" : "enable";
     try {
-      await apiPost("/api/console/members/action", { action, id: m.id });
+      await apiPatch("/api/console/members", { action, id: m.id });
       setNotice(`成员「${m.username}」已${m.enabled ? "禁用" : "启用"}`);
       await load();
     } catch (e) {
@@ -148,7 +148,7 @@ export function MembersSection() {
 
   const resetPassword = async (m: Member) => {
     try {
-      const d = await apiPost<{ newPassword: string }>("/api/console/members/action", { action: "reset-password", id: m.id });
+      const d = await apiPatch<{ newPassword: string }>("/api/console/members", { action: "reset-password", id: m.id });
       setResetPasswordResult({ username: m.username, newPassword: d.newPassword });
       await load();
     } catch (e) {
