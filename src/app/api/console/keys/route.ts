@@ -98,20 +98,8 @@ export async function GET(request: NextRequest) {
     monthCostMap.set(r.apiKeyName, (monthCostMap.get(r.apiKeyName) || 0) + c);
   }
 
-  // v4.9.0：ownerUserId → owner display info
-  const members = await db.adminUser.findMany({
-    select: { id: true, username: true, displayName: true },
-  });
-  const memberMap = new Map(members.map((m) => [m.id, m]));
-
   return ok({
     keys: keys.map((k) => ({
-      ownerUserId: k.ownerUserId || null,
-      owner: k.ownerUserId ? {
-        id: k.ownerUserId,
-        username: memberMap.get(k.ownerUserId)?.username || "",
-        displayName: memberMap.get(k.ownerUserId)?.displayName || memberMap.get(k.ownerUserId)?.username || "",
-      } : null,
       id: k.id,
       name: k.name,
       keyMasked: maskSecret(k.keyValue),
@@ -145,15 +133,7 @@ export async function POST(request: NextRequest) {
     dailyRequestLimit?: number; // v4.3.0：日请求配额（0 = 不限额）
     dailyTokenLimit?: number; // v4.3.0：日 token 配额（0 = 不限额）
     monthlyCostLimit?: number; // v4.5.0：月度成本预算（$/估算；0 = 不限）
-    ownerUserId?: string | null; // v4.9.0：归属成员（可选）
   };
-  // v4.9.0：ownerUserId 校验（传了必须是有效成员）
-  let ownerUserId: string | null = null;
-  if (body.ownerUserId) {
-    const owner = await db.adminUser.findUnique({ where: { id: body.ownerUserId } });
-    if (!owner || !owner.enabled) return fail("归属成员不存在或已禁用");
-    ownerUserId = owner.id;
-  }
   const keyValue = body.keyValue?.trim() || "sk-uag-" + randomBytes(20).toString("base64url");
   if (keyValue.length < 16) return fail("密钥长度至少 16 位");
   const exists = await db.virtualKey.findUnique({ where: { keyValue } });
@@ -170,7 +150,6 @@ export async function POST(request: NextRequest) {
       dailyRequestLimit: sanitizeLimit(body.dailyRequestLimit),
       dailyTokenLimit: sanitizeLimit(body.dailyTokenLimit),
       monthlyCostLimit: sanitizeBudget(body.monthlyCostLimit),
-      ownerUserId,
     },
   });
   await invalidateConfigChanged();
@@ -198,7 +177,6 @@ export async function PUT(request: NextRequest) {
     dailyRequestLimit?: number; // v4.3.0：日请求配额（0 = 不限额；缺省保留现值）
     dailyTokenLimit?: number; // v4.3.0：日 token 配额（0 = 不限额；缺省保留现值）
     monthlyCostLimit?: number; // v4.5.0：月度成本预算（$/估算；0 = 不限；缺省保留现值）
-    ownerUserId?: string | null; // v4.9.0：归属成员（null = 清除归属；缺省保留现值）
   };
   if (!body.id) return fail("缺少 key id");
   const existing = await db.virtualKey.findUnique({ where: { id: body.id } });
@@ -220,7 +198,6 @@ export async function PUT(request: NextRequest) {
       dailyRequestLimit: nextReqLimit,
       dailyTokenLimit: nextTokLimit,
       monthlyCostLimit: nextMonthlyBudget,
-      ownerUserId: body.ownerUserId !== undefined ? body.ownerUserId : existing.ownerUserId,
     },
   });
   await invalidateConfigChanged();
