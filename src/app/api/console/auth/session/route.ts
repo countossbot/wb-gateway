@@ -10,14 +10,10 @@ export async function GET(request: NextRequest) {
   const adminCount = await db.adminUser.count();
   const session = await resolveSession(request);
   let username: string | null = null;
-  let displayName: string | null = null;
-  let role: string | null = null;
   let authVia: "cookie" | "bearer" | null = null;
   if (session) {
     const user = await db.adminUser.findUnique({ where: { id: session.userId } });
-    username = user?.username || null;
-    displayName = user?.displayName || user?.username || null;
-    role = user?.role || null;
+    username = user?.username || "admin";
     authVia = await detectAuthVia(request);
   }
   return Response.json({
@@ -26,8 +22,6 @@ export async function GET(request: NextRequest) {
       initialized: adminCount > 0,
       authenticated: !!session,
       username,
-      displayName,
-      role,
       authVia,
     },
   });
