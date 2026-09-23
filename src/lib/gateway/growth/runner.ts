@@ -21,6 +21,9 @@ import type {
 } from "./types";
 import { acquireLock, releaseLock, settleRun } from "./state";
 
+
+/** 开学季活动 id（对应 codebuddy.cn 的 school_open_day_2026 活动） */
+const SCHOOL_ACTIVITY_ID = "school_open_day_2026";
 /** 日志同时落库（append-only）并回调给调用方（SSE 推送） */
 async function emit(
   ctx: { accountId: string; accountName: string; runId: string; sink?: (e: GrowthRunEvent) => void },
@@ -45,19 +48,28 @@ async function emit(
   ctx.sink?.(ev);
 }
 
-/** 读取上游进度：普通口径 + 小程序口径合并（小程序任务只在小程序口径下发） */
+/**
+ * 读取上游进度，合并三份口径（缺一份会导致任务被误判为 0/N，使 done 永不可达）：
+ *   1. 普通口径      —— 成长中心组任务
+ *   2. 小程序口径    —— 小程序组任务（必须带 X-Client-Platform: miniprogram 才下发）
+ *   3. 开学季口径    —— 开学季组任务（走 codebuddy.cn + activity_id=school_open_day_2026）
+ */
 export async function readProgress(
   client: GrowthClient,
   groups: GrowthGroup[],
 ): Promise<{ progress: GrowthProgress; raw: GrowthTaskProgress[] }> {
-  const [normal, mp] = await Promise.all([
+  const wantSchool = groups.includes("school");
+  const [normal, mp, school] = await Promise.all([
     client.getTasks().catch(() => null),
     client.getTasks({ miniprogram: true }).catch(() => null),
+    wantSchool
+      ? client.getTasks({ activityId: SCHOOL_ACTIVITY_ID }).catch(() => null)
+      : Promise.resolve(null),
   ]);
   const merged = new Map<string, GrowthTaskProgress>();
-  for (const p of [...parseTasks(normal), ...parseTasks(mp)]) {
+  for (const p of [...parseTasks(normal), ...parseTasks(mp), ...parseTasks(school)]) {
     const prev = merged.get(p.code);
-    // 同一 code 两份口径都出现时，取进度更靠前的一份
+    // 同一 code 多份口径都出现时，取进度更靠前的一份
     if (!prev || p.current > prev.current || (p.completed && !prev.completed)) merged.set(p.code, p);
   }
   const all = [...merged.values()];

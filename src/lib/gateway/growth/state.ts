@@ -18,19 +18,28 @@ import type { GrowthGroup } from "./types";
 /** 全局互斥锁：同一进程内同时只允许一个成长任务批次 */
 let inFlight: { accountId: string; runId: string; startedAt: number } | null = null;
 
+/** running 行存活上限：超过则视为进程异常中断的遗留状态并强制回收 */
+const RUNNING_STALE_MS = 30 * 60 * 1000;
+
 export function currentRun(): { accountId: string; runId: string; startedAt: number } | null {
   return inFlight;
 }
 
 /**
- * 尝试获取全局互斥锁。
- * 内存锁 + DB 状态双保险：DB 中存在 status='running' 且非本批次的行时也拒绝
- * （覆盖进程重启后内存锁丢失、但上一批实际已中断的情况）。
+ * 尝试获取全局互斥锁（方案 a：全站同时只允许一个账号执行）。
+ *
+ * 三层防护（缺一不可）：
+ *   1. 同步占位：在任何 await 之前先置 inFlight —— 否则两个并发请求都会
+ *      通过内存检查（await 期间 inFlight 仍为 null），导致两个账号同时跑。
+ *   2. DB running 行：覆盖进程重启后内存锁丢失的情况；仅在未见行才拒绝。
+ *   3. 陈旧 running 回收：进程被 kill 时会留下永久 running 行，使所有账号
+ *      永久不可执行。超过 RUNNING_STALE_MS 的 running 行视为陈旧，强制回收。
  */
 export async function acquireLock(
   accountId: string,
   runId: string,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // 1) 同步占位（必须在第一个 await 之前，防同进程并发穿透）
   if (inFlight) {
     const who = inFlight.accountId;
     return {
@@ -38,20 +47,41 @@ export async function acquireLock(
       reason: who === accountId ? "该账号正在执行中" : `已有其他账号正在执行（${who}），请等待完成`,
     };
   }
-  const stuck = await db.growthAccountState.findFirst({
-    where: { status: "running" },
-    select: { accountId: true },
-  });
-  if (stuck && stuck.accountId !== accountId) {
-    return { ok: false, reason: `已有其他账号正在执行（${stuck.accountId}），请等待完成` };
-  }
   inFlight = { accountId, runId, startedAt: Date.now() };
-  await db.growthAccountState.upsert({
-    where: { accountId },
-    create: { accountId, providerId: "workbuddy", status: "running" },
-    update: { status: "running", lastError: "", lastRunAt: new Date() },
-  });
-  return { ok: true };
+
+  try {
+    // 3) 陈旧 running 回收：超过阈值仍为 running 的视为异常中断
+    const stuck = await db.growthAccountState.findMany({
+      where: { status: "running" },
+      select: { accountId: true, lastRunAt: true },
+    });
+    const now = Date.now();
+    for (const row of stuck) {
+      if (row.accountId === accountId) continue;
+      const startedAt = row.lastRunAt ? new Date(row.lastRunAt).getTime() : 0;
+      if (now - startedAt > RUNNING_STALE_MS) {
+        // 陈旧：强制作废，避免永久卡死
+        await db.growthAccountState.update({
+          where: { accountId: row.accountId },
+          data: { status: "partial", lastError: "执行中断（超时回收）" },
+        });
+        console.warn(`[Growth] reclaimed stale running state for ${row.accountId}`);
+        continue;
+      }
+      // 2) 真正在跑：回滚占位并拒绝
+      inFlight = null;
+      return { ok: false, reason: `已有其他账号正在执行（${row.accountId}），请等待完成` };
+    }
+    await db.growthAccountState.upsert({
+      where: { accountId },
+      create: { accountId, providerId: "workbuddy", status: "running" },
+      update: { status: "running", lastError: "", lastRunAt: new Date() },
+    });
+    return { ok: true };
+  } catch (e) {
+    inFlight = null; // 取锁失败必须回滚占位，否则永久自锁
+    throw e;
+  }
 }
 
 /** 释放互斥锁（幂等，finally 中调用） */
