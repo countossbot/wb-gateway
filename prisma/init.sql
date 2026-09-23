@@ -168,7 +168,6 @@ CREATE TABLE "UsageDaily" (
     "inputTokens" INTEGER NOT NULL DEFAULT 0,
     "outputTokens" INTEGER NOT NULL DEFAULT 0,
     "cachedTokens" INTEGER NOT NULL DEFAULT 0,
-    "ownerUserId" TEXT NOT NULL DEFAULT '',
     "updatedAt" DATETIME NOT NULL
 );
 
