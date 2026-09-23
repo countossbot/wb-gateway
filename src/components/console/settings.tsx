@@ -53,7 +53,6 @@ import {
 } from "@/components/console/ui";
 import { Section } from "@/components/console/settings-sections";
 import { PricingSection } from "@/components/console/pricing-section";
-import { MembersSection } from "@/components/console/members-section";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
 import { relativeTime } from "@/lib/console/format";
 import type {
@@ -1006,9 +1005,6 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
 
       {/* ---------- 模型单价 · 成本估算（v4.4.0）---------- */}
       <PricingSection />
-
-      {/* ---------- v4.9.0：成员管理（轻量 RBAC） ---------- */}
-      <MembersSection />
 
       {/* ---------- 操作审计（v3.2.0，v3.2.2 增保留期清理）---------- */}
       <Section
