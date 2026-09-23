@@ -30,9 +30,6 @@ export interface DispatchParams {
 export async function dispatchExchange(params: DispatchParams): Promise<Response> {
   const { protocol, model, body, fleet, config, request, apiKeyName } = params;
   const startedAt = Date.now();
-  // v4.9.0：apiKeyName → VirtualKey.ownerUserId 派生（轻量查询，缓存可后续优化）
-  const keyEntry = apiKeyName ? Object.values(config.virtual_keys || {}).find((k) => k.name === apiKeyName) : null;
-  const ownerUserId = (keyEntry as { ownerUserId?: string } | undefined)?.ownerUserId ?? null;
   const isAnthropic = protocol === "anthropic";
   const routes = config.routes || {};
 
@@ -68,7 +65,6 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
       cachedTokens: usage && usage.cachedTokens > 0 ? usage.cachedTokens : null,
       // v3.0.4：调用方密钥名（密钥维度统计/审计）
       apiKeyName: apiKeyName ?? null,
-      ownerUserId,
       // v3.0.3/v3.9.3：usage 来源标记 —— 优先 source（upstreamUsageFrame/estimated/unknown），
       // 映射到 usageExact 布尔列（true=上游精确 / false=估算 / null=未记录），旧列向后兼容不删除；
       // 旧调用方未带 source 时回退 upstreamExact 布尔（兼容过渡）。

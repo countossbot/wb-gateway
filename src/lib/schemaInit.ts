@@ -272,20 +272,6 @@ export async function migrateAdminUserColumns(): Promise<AdminUserMigrationResul
       }
     }
 
-    // v4.9.0 Task 7：RequestLog / UsageDaily ownerUserId 列补齐（幂等）
-    for (const table of ["RequestLog", "UsageDaily"]) {
-      const cols = (await db.$queryRawUnsafe(`PRAGMA table_info("${table}")`)) as Array<{ name: string }>;
-      const names = new Set(cols.map((c) => c.name));
-      if (!names.has("ownerUserId")) {
-        const ddl = table === "UsageDaily"
-          ? `ALTER TABLE "${table}" ADD COLUMN "ownerUserId" TEXT NOT NULL DEFAULT ''`
-          : `ALTER TABLE "${table}" ADD COLUMN "ownerUserId" TEXT`;
-        await db.$executeRawUnsafe(ddl);
-        columnsAdded.push(`${table}.ownerUserId`);
-        console.log(`[SchemaInit] ${table} migrated: added column ownerUserId`);
-      }
-    }
-
     // v4.9.0 Task 6：VirtualKey.ownerUserId 列补齐（幂等）
     const vkColumns = (await db.$queryRawUnsafe(`PRAGMA table_info("VirtualKey")`)) as Array<{ name: string }>;
     const vkNames = new Set(vkColumns.map((c) => c.name));

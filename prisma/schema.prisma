@@ -176,7 +176,6 @@ model RequestLog {
   apiKeyName   String?
   error        String?
   usageExact   Boolean? // true=上游精确 usage；false=网关字符估算；null=未知/未记录（旧数据或无用量）
-  ownerUserId  String? // v4.9.0：密钥归属成员（派生自 VirtualKey.ownerUserId，仅展示/筛选维度）
 
   @@index([createdAt])
   @@index([model])
@@ -216,7 +215,6 @@ model UsageDaily {
   inputTokens  Int      @default(0)
   outputTokens Int      @default(0)
   cachedTokens Int      @default(0)
-  ownerUserId  String   @default("") // v4.9.0：密钥归属成员（派生字段，不参与唯一键）
   updatedAt    DateTime @updatedAt
 
   @@unique([day, providerId, apiKeyName, model])
