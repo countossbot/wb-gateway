@@ -541,7 +541,7 @@ rollback-multiuser-rbac
 ## Task 6：VirtualKey 增加成员归属
 
 ### 状态
-- [x] 已完成
+- [ ] 未开始
 
 ### 目标
 每把虚拟密钥可归属到成员，便于责任追踪与成员级统计。
@@ -604,7 +604,7 @@ rollback-multiuser-task6-key-owner
 ## Task 7：RequestLog / UsageDaily 增加成员维度
 
 ### 状态
-- [x] 已完成
+- [ ] 未开始
 
 ### 目标
 网关调用日志能归到密钥负责人。
@@ -671,7 +671,7 @@ rollback-multiuser-task7-log-owner
 ## Task 8：成员筛选与成员禁用联动
 
 ### 状态
-- [x] 已完成
+- [ ] 未开始
 
 ### 目标
 控制台可按成员查看用量/日志；禁用成员时同步处理其密钥。
