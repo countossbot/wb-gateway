@@ -2,17 +2,14 @@
 // 拉取策略按提供商类型：
 // - openai      ：GET {baseUrl}/models（Bearer）→ 上游实时（source: "upstream"）
 // - anthropic   ：GET {baseUrl}/models（x-api-key + anthropic-version）→ 上游实时
-// - workbuddy   ：v4.7.2 真实上游拉取（GET /v2/enterprises/personal/models，CLI 通道，
-//                CLI 凭证 Bearer 可用；CN 3 账户 × 2 host、INTL 4 账户 × 2 host 实测全 200
-//                含元数据；失败自然降级 derived。
-//                失败自然降级 derived，原因透明展示。
-// 上游拉取失败 / 超时（8s）→ 自动降级 derived，响应带 fallbackReason 透明化。
+// - workbuddy   ：GET /v3/config 实时拉取（CN www.workbuddy.ai / INTL copilot.tencent.com，
+//                 CLI 凭证 Bearer；失败如实报错，不降级内置预设）
+// 上游拉取失败 / 超时（8s）→ 返回错误响应（不再降级内置目录）。
 // 内存缓存 60s（refresh=1 强制穿透）——表单反复打开不重复打上游。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
-import { DEFAULT_ROUTES } from "@/lib/gateway/config/configService";
 import { WorkBuddyProvider } from "@/lib/gateway/providers/workbuddy";
 import type { UpstreamModelDetail } from "@/lib/gateway/core/types";
 
@@ -23,7 +20,7 @@ const CACHE_TTL_MS = 60_000;
 
 interface ModelsPayload {
   providerId: string;
-  source: "upstream" | "derived";
+  source: "upstream";
   models: string[];
   /** v4.7.1：与 models 一一对应的元数据（workbuddy 上游响应；其他类型缺省） */
   details?: UpstreamModelDetail[];
@@ -32,31 +29,16 @@ interface ModelsPayload {
   modelsCount: number;
   fetchedAt: number;
   cached: boolean;
-  fallbackReason?: string;
   upstreamUrl?: string;
 }
 
 // providerId → { payload, at }
 const cache = new Map<string, { payload: ModelsPayload; at: number }>();
 
-// ---- derived：DB 路由候选 ∪ DEFAULT_ROUTES 预设 ----
-async function derivedModels(providerId: string): Promise<string[]> {
-  const fromDb = await db.routeCandidate.findMany({
-    where: { providerId },
-    select: { model: true, enabled: true, sortOrder: true },
-    orderBy: { sortOrder: "asc" },
-  });
-  const preset: string[] = [];
-  for (const cands of Object.values(DEFAULT_ROUTES)) {
-    for (const c of cands) {
-      if (c.provider === providerId && !preset.includes(c.model)) preset.push(c.model);
-    }
-  }
-  const merged: string[] = [];
-  for (const m of [...fromDb.map((r) => r.model), ...preset]) {
-    if (m && !merged.includes(m)) merged.push(m);
-  }
-  return merged;
+// ---- 不支持上游目录的类型：明确失败（不再回退内置预设） ----
+// v4.8.x：模型目录只来自上游实时拉取；内置 DEFAULT_ROUTES 预设不再作为下拉数据源。
+function unsupportedType(type: string): never {
+  throw new Error(`provider type "${type}" 无上游模型目录端点（模型列表仅来自实时拉取）`);
 }
 
 // ---- 上游实时拉取（openai / anthropic） ----
@@ -121,8 +103,9 @@ export async function GET(request: NextRequest) {
   const cfg = { ...((provider.config as Record<string, unknown>) || {}) };
 
   let payload: ModelsPayload;
+  try {
   if (type === "workbuddy") {
-    // WorkBuddy 桌面客户端模型目录拉取；失败自然降级 derived。
+    // WorkBuddy：/v3/config 实时拉取；失败如实报错（不再降级内置目录）。
     try {
       const adapter = new WorkBuddyProvider({ id: provider.id, name: provider.name, type: provider.type, config: cfg });
       const { models, details, url, allCount } = await adapter.listUpstreamModels();
@@ -138,18 +121,8 @@ export async function GET(request: NextRequest) {
         upstreamUrl: url,
       };
     } catch (e) {
-      // 上游失败 → derived 降级（透明化原因，前端仍可下拉/手动输入）
-      const reason = e instanceof Error ? e.message : String(e);
-      const models = await derivedModels(providerId);
-      payload = {
-        providerId,
-        source: "derived",
-        models,
-        modelsCount: models.length,
-        fetchedAt: Date.now(),
-        cached: false,
-        fallbackReason: `上游拉取失败（${reason}），已降级为已知目录`,
-      };
+      // 上游失败 → 如实抛出，由下方统一转为错误响应（不降级内置目录）
+      throw new Error(`WorkBuddy 模型目录拉取失败：${e instanceof Error ? e.message : String(e)}`);
     }
   } else if (type === "openai" || type === "anthropic") {
     try {
@@ -164,30 +137,16 @@ export async function GET(request: NextRequest) {
         upstreamUrl: url,
       };
     } catch (e) {
-      // 上游失败 → derived 降级（透明化原因，前端仍可下拉/手动输入）
-      const reason = e instanceof Error ? e.message : String(e);
-      const models = await derivedModels(providerId);
-      payload = {
-        providerId,
-        source: "derived",
-        models,
-        modelsCount: models.length,
-        fetchedAt: Date.now(),
-        cached: false,
-        fallbackReason: `上游拉取失败（${reason}），已降级为已知目录`,
-      };
+      // 上游失败 → 如实抛出，由下方统一转为错误响应（不降级内置目录）
+      throw new Error(`上游模型目录拉取失败：${e instanceof Error ? e.message : String(e)}`);
     }
   } else {
-    const models = await derivedModels(providerId);
-    payload = {
-      providerId,
-      source: "derived",
-      models,
-      modelsCount: models.length,
-      fetchedAt: Date.now(),
-      cached: false,
-      fallbackReason: "该提供商类型不支持上游模型目录，目录来自当前路由配置与内置预设",
-    };
+    unsupportedType(type);
+  }
+
+  } catch (e) {
+    // 上游不可用 / 类型不支持 → 明确失败，不回退内置目录
+    return fail(e instanceof Error ? e.message : String(e), 502);
   }
 
   cache.set(providerId, { payload, at: Date.now() });
