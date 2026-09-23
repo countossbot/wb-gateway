@@ -531,8 +531,6 @@ export interface RouteRow {
 export interface RoutesData {
   routes: RouteRow[];
   providers: Array<{ id: string; name: string; type: string; enabled: boolean }>;
-  /** 原生模型目录（按适配器类型归组；模型 ID 原样透传，候选项「模型」下拉框数据源） */
-  providerModels?: Record<string, string[]>;
 }
 
 // ---- 定时任务 ----

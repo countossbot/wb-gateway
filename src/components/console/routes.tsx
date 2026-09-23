@@ -76,12 +76,11 @@ interface UpstreamModelDetail {
   tags?: string[];
 }
 interface ProviderModelsData {
-  source: "upstream" | "derived";
+  source: "upstream";
   models: string[];
   details?: UpstreamModelDetail[];
   /** 上游全量模型数（含 CLI 白名单外旧模型），与 models.length 不同时有参考意义 */
   allCount?: number;
-  fallbackReason?: string;
   upstreamUrl?: string;
 }
 const MODEL_FETCH_CACHE = new Map<string, { data: ProviderModelsData; at: number }>();
@@ -130,14 +129,12 @@ function SortableCandidate({
   cand,
   index,
   providers,
-  providerModels,
   onChange,
   onRemove,
 }: {
   cand: CandidateDraft;
   index: number;
   providers: Array<{ id: string; name: string; type: string; enabled: boolean }>;
-  providerModels?: Record<string, string[]>;
   onChange: (patch: Partial<CandidateDraft>) => void;
   onRemove: () => void;
 }) {
@@ -149,11 +146,10 @@ function SortableCandidate({
   const modelTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [modelMenuBoundary, setModelMenuBoundary] = React.useState<HTMLDivElement | null>(null);
 
-  // 当前提供商的静态原生模型目录（兑底）：按适配器类型归组；模型 ID 原样透传
+  // 当前选中的提供商（模型目录来自其上游实时拉取）
   const provider = providers.find((p) => p.id === cand.providerId);
-  const nativeModels = (providerModels && provider && providerModels[provider.type]) || [];
 
-  // 上游实时模型目录：选提供商后自动拉取（失败/超时自动降级静态目录，手动输入始终可用）
+  // 上游实时模型目录：选提供商后自动拉取（失败/超时如实提示，可手动输入；不再降级内置目录）
   const [upstream, setUpstream] = React.useState<ProviderModelsData | null>(null);
   const [modelsLoading, setModelsLoading] = React.useState(false);
   const [modelsError, setModelsError] = React.useState("");
@@ -164,7 +160,7 @@ function SortableCandidate({
       setModelsError("");
       try {
         const d = await fetchProviderModels(pid, force);
-        setUpstream({ source: d.source, models: d.models || [], details: d.details, allCount: d.allCount, fallbackReason: d.fallbackReason, upstreamUrl: d.upstreamUrl });
+        setUpstream({ source: d.source, models: d.models || [], details: d.details, allCount: d.allCount, upstreamUrl: d.upstreamUrl });
       } catch (e) {
         setModelsError(errMessage(e));
         setUpstream(null);
@@ -180,10 +176,8 @@ function SortableCandidate({
     if (cand.providerId) void loadModels(cand.providerId);
   }, [cand.providerId, loadModels]);
 
-  // 模型下拉数据源：优先上游/推导目录；拉取中或失败时兑底静态目录
-  const upstreamModels = upstream?.models?.length ? upstream.models : [];
-  const hasClientCatalog = upstream?.source === "upstream";
-  const modelOptions = hasClientCatalog ? upstreamModels : nativeModels;
+  // 模型下拉数据源：仅上游实时目录（/v3/config）。失败/无数据时不展示下拉，可手动输入。
+  const modelOptions = upstream?.models?.length ? upstream.models : [];
   const modelInOptions = !!cand.model && modelOptions.includes(cand.model);
   // 上游元数据（details）：模型 ID → 倍率/上下文/能力（无则朴素渲染）
   const detailMap = React.useMemo(() => {
@@ -251,11 +245,7 @@ function SortableCandidate({
                   placeholder={
                     modelsLoading
                       ? "正在从上游拉取模型…"
-                      : upstream?.source === "upstream"
-                        ? `选择模型（客户端实时 · ${modelOptions.length} 个）`
-                        : upstream?.source === "derived"
-                          ? `选择模型（已知目录 · ${modelOptions.length} 个）`
-                          : `选择模型（${modelOptions.length} 个）`
+                      : `选择模型（客户端实时 · ${modelOptions.length} 个）`
                   }
                 />
               </SelectTrigger>
@@ -267,15 +257,11 @@ function SortableCandidate({
               >
                 {upstream && (
                   <div className="flex items-center gap-1.5 px-2 py-1.5 text-[10px] text-stone-400">
-                    {upstream.source === "upstream" ? (
-                      <><span className="size-1.5 rounded-full bg-teal-500" />已对齐客户端实时列表（{modelOptions.length}/{upstream.allCount}）</>
-                    ) : (
-                      <><span className="size-1.5 rounded-full bg-amber-500" />已知目录 · 来自当前路由配置与内置预设{upstream.fallbackReason ? `（${upstream.fallbackReason.slice(0, 60)}）` : "（该类型上游无公开模型列表接口，或暂时不可用）"}</>
-                    )}
+                    <span className="size-1.5 rounded-full bg-teal-500" />已对齐客户端实时列表（{modelOptions.length}/{upstream.allCount}）
                   </div>
                 )}
                 {modelsError && !upstream && (
-                  <div className="px-2 py-1.5 text-[10px] text-red-500">模型目录拉取失败——已降级静态目录，可点右侧刷新重试</div>
+                  <div className="px-2 py-1.5 text-[10px] text-red-500">模型目录拉取失败——请检查该提供商账户凭证，或点右侧刷新重试</div>
                 )}
                 {modelOptions.map((m) => {
                   const det = detailMap.get(m);
@@ -488,7 +474,6 @@ export function RoutesModule() {
   };
 
   const providers = data?.providers ?? [];
-  const providerModels = data?.providerModels;
   const providerName = (id: string) => providers.find((p) => p.id === id)?.name || id;
   const routes = data?.routes ?? [];
 
@@ -639,7 +624,6 @@ export function RoutesModule() {
                           cand={c}
                           index={i}
                           providers={providers}
-                          providerModels={providerModels}
                           onChange={(patch) => setCandidates((cs) => cs.map((x) => (x.key === c.key ? { ...x, ...patch } : x)))}
                           onRemove={() => setCandidates((cs) => cs.filter((x) => x.key !== c.key))}
                         />

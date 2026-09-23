@@ -4,7 +4,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
-import { invalidateConfigChanged, nativeProviderModels } from "@/lib/gateway/config/configService";
+import { invalidateConfigChanged } from "@/lib/gateway/config/configService";
 import { auditCreate, auditDelete, auditUpdate } from "@/lib/gateway/console/auditService";
 
 export const dynamic = "force-dynamic";
@@ -34,8 +34,6 @@ export async function GET(request: NextRequest) {
       })),
     })),
     providers,
-    // 原生模型目录（按适配器类型归组，模型 ID 原样透传）——候选项「模型」下拉框数据源
-    providerModels: nativeProviderModels(),
   });
 }
 
