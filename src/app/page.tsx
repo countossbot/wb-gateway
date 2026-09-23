@@ -6,7 +6,7 @@ import * as React from "react";
 import { Network } from "lucide-react";
 import { setUnauthorizedHandler, authHeaders, clearSessionToken } from "@/lib/console/api";
 import { parseTabParam, syncTabToUrl } from "@/lib/console/urlState";
-import type { AdminRole, SessionInfo } from "@/lib/console/types";
+import type { SessionInfo } from "@/lib/console/types";
 import { LoginPage } from "@/components/console/login";
 import { SetupWizard } from "@/components/console/setup-wizard";
 import { ConsoleShell, type ConsoleTab } from "@/components/console/sidebar";
@@ -24,7 +24,6 @@ type Phase = "loading" | "setup" | "login" | "console";
 export default function Home() {
   const [phase, setPhase] = React.useState<Phase>("loading");
   const [username, setUsername] = React.useState("");
-  const [userRole, setUserRole] = React.useState<AdminRole | null>(null);
   const [authVia, setAuthVia] = React.useState<"cookie" | "bearer" | null>(null);
   const [version, setVersion] = React.useState("—");
   // v3.4.0：初始 tab 支持 URL 深链（如 /?tab=logs 直接落到运行日志页）
@@ -57,8 +56,7 @@ export default function Home() {
       const body = (await res.json()) as { ok?: boolean; data?: SessionInfo };
       const s = body.data;
       if (!s) throw new Error("会话接口异常");
-      setUsername(s.displayName || s.username || "");
-      setUserRole(s.role || null);
+      setUsername(s.username || "");
       setAuthVia(s.authVia ?? null);
       if (!s.initialized) setPhase("setup");
       else if (!s.authenticated) setPhase("login");
