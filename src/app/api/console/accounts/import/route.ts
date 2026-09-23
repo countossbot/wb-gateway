@@ -10,7 +10,7 @@
 //   - 完整导出 → 再导入形成闭环
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { supportedProviderTypes } from "@/lib/gateway/providers";
 import { invalidateConfigChanged } from "@/lib/gateway/config/configService";
 
@@ -57,7 +57,7 @@ interface LineResult {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await requirePermission(request, "provider.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const body = (await request.json().catch(() => ({}))) as {

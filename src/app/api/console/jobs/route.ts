@@ -3,7 +3,7 @@
 // PUT：更新开关 / cron / 时区 / 签到提供商白名单（热生效，写 SystemSetting 后调度器下个 tick 重读）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { saveRuntimeSettings, getRuntimeSettingsAsync } from "@/lib/gateway/config/runtimeSettings";
 import { parseCron, checkinCapableProviderTypes } from "@/lib/gateway/jobs/scheduler";
 
@@ -82,7 +82,7 @@ export function classifyCheckinResult(v: unknown): CheckinCategory {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "settings.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const settings = await getRuntimeSettingsAsync();
@@ -134,7 +134,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const session = await requirePermission(request, "settings.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     checkinEnabled?: boolean;

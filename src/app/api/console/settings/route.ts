@@ -3,7 +3,7 @@
 // 管理员密码修改走 /api/console/auth/password；数据备份走 /api/console/backup。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail, consoleSettingsSnapshot } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail, consoleSettingsSnapshot } from "@/lib/gateway/console/consoleHelpers";
 import { saveRuntimeSettings } from "@/lib/gateway/config/runtimeSettings";
 import { invalidateProxyDispatchers, parseProxyList } from "@/lib/gateway/proxy/proxyAgent";
 import { recordAudit, sanitizeAuditValues } from "@/lib/gateway/console/auditService";
@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "settings.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const snapshot = await consoleSettingsSnapshot();
   // 代理池脱敏展示（不含凭据）
@@ -52,7 +52,7 @@ interface SettingsPayload {
 }
 
 export async function PUT(request: NextRequest) {
-  const session = await requirePermission(request, "settings.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as SettingsPayload;
 

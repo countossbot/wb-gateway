@@ -4,7 +4,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import {
-  requirePermission,
+  requireSessionOr401,
   ok,
   fail,
   maskAccountCredentials,
@@ -30,7 +30,7 @@ function maskProviderConfig(config: Record<string, unknown>): Record<string, unk
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "provider.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const providers = await db.provider.findMany({ orderBy: { sortOrder: "asc" } });
@@ -157,7 +157,7 @@ interface ProviderPayload {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await requirePermission(request, "provider.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as ProviderPayload;
 
@@ -212,7 +212,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const session = await requirePermission(request, "provider.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as ProviderPayload;
   if (!body.id) return fail("缺少 provider id");
@@ -296,7 +296,7 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const session = await requirePermission(request, "provider.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const id = request.nextUrl.searchParams.get("id");
   if (!id) return fail("缺少 provider id");

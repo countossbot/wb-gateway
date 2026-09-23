@@ -14,7 +14,7 @@
 import { NextRequest } from "next/server";
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { recordAudit } from "@/lib/gateway/console/auditService";
 import { VERSION, invalidateConfigChanged } from "@/lib/gateway/config/configService";
 import { refreshRuntimeSettings } from "@/lib/gateway/config/runtimeSettings";
@@ -25,7 +25,7 @@ import { localDayKey } from "@/lib/gateway/config/requestLog";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "backup.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const [
@@ -166,7 +166,7 @@ const toDate = (v: string | null | undefined): Date | null => {
 const toDateOrThrow = (v: string | null | undefined): Date | undefined => toDate(v) ?? undefined;
 
 export async function POST(request: NextRequest) {
-  const session = await requirePermission(request, "backup.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const body = (await request.json().catch(() => ({}))) as { text?: string; mode?: string };

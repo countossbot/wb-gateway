@@ -5,7 +5,7 @@
 // v3.0.6：支持 ?account=（命中账号精确筛选，与 provider 组合防跨提供商同名串扰）；
 // 响应附带 providers / keys / accounts / models（日志中出现过的提供商、密钥主体、账号组合与对外模型去重清单，供筛选下拉/自动补全）。
 import { NextRequest } from "next/server";
-import { requirePermission, ok } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
 import { distinctLogAccounts, distinctLogKeys, distinctLogModels, distinctLogProviders, listRequestLogs } from "@/lib/gateway/config/requestLog";
 import { loadPricingMap, estimateRowCost } from "@/lib/console/pricing";
 
@@ -31,7 +31,7 @@ function parseTs(v: string | null): number | undefined {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "log.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const params = request.nextUrl.searchParams;
   const [result, providers, keys, accounts, models] = await Promise.all([

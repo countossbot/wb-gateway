@@ -3,14 +3,14 @@
 // PUT：更新（含候选拖拽后的新顺序）；DELETE ?model=：删除路由。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { invalidateConfigChanged, nativeProviderModels } from "@/lib/gateway/config/configService";
 import { auditCreate, auditDelete, auditUpdate } from "@/lib/gateway/console/auditService";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "route.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const [routes, providers] = await Promise.all([
     db.modelRoute.findMany({
@@ -40,7 +40,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await requirePermission(request, "route.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     model?: string;
@@ -75,7 +75,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const session = await requirePermission(request, "route.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     id?: number;
@@ -144,7 +144,7 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const session = await requirePermission(request, "route.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const id = request.nextUrl.searchParams.get("id");
   const model = request.nextUrl.searchParams.get("model");

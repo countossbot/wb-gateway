@@ -6,7 +6,7 @@
 // 安全：仅迁移，不删除任何已有数据；重复执行按「已存在 → 跳过」处理（幂等）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { invalidateConfigChanged } from "@/lib/gateway/config/configService";
 import { supportedProviderTypes } from "@/lib/gateway/providers";
 
@@ -30,7 +30,7 @@ interface KVConfig {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await requirePermission(request, "provider.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as { text?: string; mode?: "merge" | "replace" };
   const text = (body.text || "").trim();

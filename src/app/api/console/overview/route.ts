@@ -3,7 +3,7 @@
 // 上游前缀缓存命中率、最近一次签到与最近一次 Token 刷新时间、当前可用模型列表。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
 import { getConfig } from "@/lib/gateway/config/configService";
 import { getProviderFleet } from "@/lib/gateway/core/fleet";
 import { VERSION } from "@/lib/gateway/config/configService";
@@ -41,7 +41,7 @@ interface TopProviderRowShape {
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "usage.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const [config, accounts, providers, routes] = await Promise.all([

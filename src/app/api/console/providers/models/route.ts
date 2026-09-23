@@ -10,7 +10,7 @@
 // 内存缓存 60s（refresh=1 强制穿透）——表单反复打开不重复打上游。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
 import { DEFAULT_ROUTES } from "@/lib/gateway/config/configService";
 import { WorkBuddyProvider } from "@/lib/gateway/providers/workbuddy";
@@ -102,7 +102,7 @@ async function fetchUpstreamModels(
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "provider.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const providerId = request.nextUrl.searchParams.get("providerId");

@@ -24,7 +24,7 @@
 // 桶级计价请求数 0）；桶级成本由模型维度逐行累加后再汇总（不能由聚合后的 token 直接乘单价）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
 import { loadPricingMap, estimateRowCost, EMPTY_COST_AGG, type CostAgg } from "@/lib/console/pricing";
 
@@ -46,7 +46,7 @@ interface AggBucket {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "usage.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const params = request.nextUrl.searchParams;
