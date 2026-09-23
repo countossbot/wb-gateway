@@ -222,7 +222,7 @@ function SortableCandidate({
           </SelectContent>
         </Select>
         {/* 模型字段：选提供商后自动从上游拉取模型目录（openai/anthropic/workbuddy 两区实时；
-            拉取失败 → 推导目录降级），workbuddy 上游响应含元数据 → 下拉项精简展示
+            （失败如实提示，可手动输入），workbuddy 上游响应含元数据 → 下拉项精简展示
             （仅模型名 + 倍率/免费徽章）；手动输入始终可切（保留任意上游模型能力，模型 ID 原样透传零改写） */}
         {useModelSelect ? (
           <div className="flex w-full min-w-0 flex-1 gap-1.5">
