@@ -335,6 +335,7 @@ export function chatSseToResponsesStream(
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let pingTimer: ReturnType<typeof setInterval> | null = null;
+  let abortListener: (() => void) | null = null;
   let ended = false; // 任一路径已收尾（幂等护栏）
   let clientAborted = false;
   let upstreamError: string | null = null;
@@ -507,6 +508,12 @@ export function chatSseToResponsesStream(
     if (ended) return;
     ended = true;
     stopPing();
+    // 断连监听需显式摘除：signal 的生命周期长于本流（HTTP keep-alive 连接复用同一
+    // signal），不移除会随请求数线性累积闭包（controller/reader 无法回收）。
+    if (abortListener && options.signal) {
+      options.signal.removeEventListener("abort", abortListener);
+      abortListener = null;
+    }
     if (reader) {
       try {
         void reader.cancel(new Error("Responses stream ended")).catch(() => {});
@@ -727,14 +734,11 @@ export function chatSseToResponsesStream(
 
       // ---- 客户端断连：不发终点（对端不可达），拆除上游读取并记录 ----
       if (options.signal) {
-        options.signal.addEventListener(
-          "abort",
-          () => {
-            clientAborted = true;
-            endStream();
-          },
-          { once: true }
-        );
+        abortListener = (): void => {
+          clientAborted = true;
+          endStream();
+        };
+        options.signal.addEventListener("abort", abortListener, { once: true });
       }
 
       pump().catch(onPumpError);
