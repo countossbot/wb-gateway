@@ -13,7 +13,6 @@ import {
   Play,
   RefreshCw,
   Save,
-  Sparkles,
   Timer,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -343,11 +342,6 @@ export function JobsModule() {
   const [running, setRunning] = React.useState<string | null>(null);
   const [runResult, setRunResult] = React.useState<{ job: string; rows: RunDetailRow[]; error: string; scope?: string } | null>(null);
 
-  // 成长中心 —— 表面卡片本地草稿态（暂不落库、不参与调度；后端接入后改为读写 JobsConfig）
-  const [activityEnabled, setActivityEnabled] = React.useState(true);
-  const [activityCron, setActivityCron] = React.useState("0 10 * * *");
-  const [activityTz, setActivityTz] = React.useState("Asia/Shanghai");
-
   const load = React.useCallback(async () => {
     setLoading(true);
     setError("");
@@ -466,8 +460,8 @@ export function JobsModule() {
       <ErrorAlert message={error} onRetry={load} />
       {configError && <ErrorAlert message={configError} />}
 
-      {/* 三张任务卡：每日签到 / 成长中心 / Token 保活 */}
-      <div className="grid gap-4 lg:grid-cols-3">
+      {/* 两张任务卡 */}
+      <div className="grid gap-4 lg:grid-cols-2">
         <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
@@ -518,49 +512,6 @@ export function JobsModule() {
           </div>
         </section>
 
-
-        {/* 成长中心 —— 表面卡片（纯 UI 占位）：开关/cron/时区为本地草稿态，暂不落库、不参与调度。
-            后端接入（activityEnabled/activityCron/activityTz + runNow("activity") + JobRun 记录）待后续实现。 */}
-        <section className="space-y-4 rounded-xl border border-dashed border-stone-300 bg-white p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <span className="flex size-9 items-center justify-center rounded-lg bg-violet-50 text-violet-600">
-                <Sparkles className="size-4.5" />
-              </span>
-              <div>
-                <h2 className="flex items-center gap-1.5 text-sm font-semibold text-stone-900">
-                  成长中心
-                  <span className="rounded bg-stone-100 px-1.5 py-0.5 text-[10px] font-normal text-stone-500">
-                    待接入
-                  </span>
-                </h2>
-                <p className="text-xs text-muted-foreground">自动任务活动（定时执行）</p>
-              </div>
-            </div>
-            <Switch
-              checked={activityEnabled}
-              onCheckedChange={setActivityEnabled}
-              aria-label="启用成长中心"
-            />
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <CronField
-              id="activity-cron"
-              label="Cron 表达式"
-              value={activityCron}
-              onChange={setActivityCron}
-            />
-            <TzField
-              id="activity-tz"
-              label="时区"
-              value={activityTz}
-              onChange={setActivityTz}
-            />
-          </div>
-          <p className="rounded-lg bg-amber-50 px-2.5 py-2 text-[11px] text-amber-700">
-            表面卡片：配置暂不保存、不参与调度。后端任务体与执行历史待后续接入。
-          </p>
-        </section>
         <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
