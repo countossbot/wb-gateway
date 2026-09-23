@@ -18,9 +18,12 @@
 //     lastChatRequest 回显：最近一次 chat 请求的 {model, messages, tools, tool_choice, stream}（字节级断言网关转译产物）
 //     用户文本含 USE_CUSTOM_TOOL → 返回 apply_patch 工具调用（custom 工具回译验证）
 //   v4.6.1 Responses 严格 SSE 生命周期验证支撑：
-//     用户文本含 ABORT_STREAM → 流式发 2 帧后 ctrl.error() 中断。⚠️ 实测 Bun 会把
-//       流错误转为干净的 chunked 终止（客户端看到 clean EOF）—— 用于验证网关「无 finish
-//       帧也保证 response.completed」的流尾兜底，而非真断流
+//     用户文本含 ABORT_STREAM → 流式发 2 帧后 ctrl.error() 中断。⚠️ 实测 Bun 会把流错误
+//       转为干净的 chunked 终止（客户端看到 clean EOF），但 passthrough 层仍会补
+//       `: uag-upstream-error` 标记 → 转译层判为「截断内容不可信」→ response.failed 终点。
+//       这是**刻意**语义：截断内容不伪装成 completed（截断前的部分文本仍照常流出）。
+//     用户文本含 CLEAN_EOF_NO_FINISH → 发 1 帧内容后直接关流：无 finish 帧、无 [DONE]、
+//       无错误标记 → 转译层流尾兜底 response.completed（与 ABORT_STREAM 的对照用例）
 //     RAW TCP 3041（请求体含 ABORT_RAW）→ node:net 直写 HTTP chunked 帧，发 2 帧后
 //       不写终止块直接 destroy socket —— undici 读侧将 reject（"terminated"），复刻
 //       真实上游连接重置 → passthrough 层 uag-upstream-error 标记 → response.failed 全链
@@ -297,6 +300,9 @@ const server = Bun.serve({
       // v4.6.1：终点生命周期注入（ABORT_STREAM 断流 / INBAND_ERROR 流内错误帧 / length·content_filter 截断）
       const abortMid = userText.includes("ABORT_STREAM");
       const inbandError = userText.includes("INBAND_ERROR");
+      // v4.6.1：干净 EOF 无 finish 帧 —— 正常发完内容后直接 close()，不补 finish 帧、不补 [DONE]。
+      // 与 ABORT_STREAM 的区别：无错误、无 `: uag-upstream-error` 标记 → 应兜底 response.completed。
+      const cleanEof = userText.includes("CLEAN_EOF_NO_FINISH");
       const finishOverride = userText.includes("USE_LENGTH_TRUNCATE")
         ? "length"
         : userText.includes("USE_CONTENT_FILTER")
@@ -347,6 +353,11 @@ const server = Bun.serve({
           return;
         }
         sendFrame(JSON.stringify(chunks[i]));
+        if (cleanEof && i === 2) {
+          // 干净 EOF：内容帧（index 2）之后直接关流 —— 不发 finish 帧、不发 [DONE]、不报错。
+          finishStream();
+          return;
+        }
         // 首帧后注入可控静默（上游字节间隔模拟）；其余帧 30ms 间隔保持节奏
         const gap = stallMs > 0 && i === 0 ? stallMs : 30;
         frameTimer = setTimeout(() => pump(i + 1), gap);

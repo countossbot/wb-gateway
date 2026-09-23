@@ -480,17 +480,36 @@ try {
       check("E5 error.code 透传（mock_inband）", failed?.response?.error?.code === "mock_inband", JSON.stringify(failed?.response?.error));
     }
 
-    // E6 优雅截断无 finish 帧（ABORT_STREAM：Bun 将流错误转为干净 chunked 终止 → 客户端 clean EOF）
-    //    → 流尾兜底：无 finish 帧也保证 response.completed 终点（永不裸 EOF）
+    // E6 上游中途断流（ABORT_STREAM：Bun 将流错误转为干净 chunked 终止 → 客户端 clean EOF）
+    //   → 语义：截断内容不伪装成 completed。passthrough 层补 `: uag-upstream-error` 标记，
+    //     转译层据此走 response.failed 终点（绝不裸 EOF）；截断前的部分文本仍已流出。
+    //   对照：真「干净 EOF 且无错误标记」由 E7 钉住，那条仍兜底 response.completed。
     {
       const r = await postResponses({ model: "qa-resp-model", input: [userMsg("ABORT_STREAM please")], stream: true }, KEY);
       const raw = await r.text();
       const { events, payloads } = parseSse(raw);
-      check("E6 终点为 response.completed（无 finish 帧的流尾兜底）", events[events.length - 1] === "response.completed", events.join(","));
+      check("E6 终点为 response.failed（截断不伪装成 completed）", events[events.length - 1] === "response.failed", events.join(","));
       const deltas = (payloads.get("response.output_text.delta") || []).map((d: any) => String(d.delta || "")).join("");
       check("E6 截断前的部分文本已流出", deltas.includes("Hello from mock upstream stream"), deltas.slice(0, 80));
-      const completed = (payloads.get("response.completed") || [])[0];
-      check("E6 completed 事件含部分文本与 usage", completed?.response?.output_text === deltas && typeof completed?.response?.usage?.input_tokens === "number", JSON.stringify(completed?.response?.usage));
+      const failedE6 = (payloads.get("response.failed") || [])[0];
+      check(
+        "E6 failed 事件带上游截断语义",
+        !!failedE6?.response?.error && /abort|截断|upstream/i.test(String(failedE6.response.error.message || "")),
+        JSON.stringify(failedE6?.response?.error)
+      );
+    }
+
+    // E7 干净 EOF 但无 finish 帧（正常读完、无 [DONE]、无错误标记）→ 流尾兜底 completed
+    //   与 E6 的关键区别：无 `: uag-upstream-error` 标记，必须仍以 response.completed 收尾。
+    {
+      const r = await postResponses({ model: "qa-resp-model", input: [userMsg("CLEAN_EOF_NO_FINISH please")], stream: true }, KEY);
+      const raw = await r.text();
+      const { events, payloads } = parseSse(raw);
+      check("E7 干净 EOF 无 finish 帧 → 终点 response.completed", events[events.length - 1] === "response.completed", events.join(","));
+      const deltas = (payloads.get("response.output_text.delta") || []).map((d: any) => String(d.delta || "")).join("");
+      check("E7 截断前文本已流出", deltas.includes("Hello from mock upstream stream"), deltas.slice(0, 80));
+      const completedE7 = (payloads.get("response.completed") || [])[0];
+      check("E7 completed 含已累积文本与 usage", completedE7?.response?.output_text === deltas && typeof completedE7?.response?.usage?.input_tokens === "number", JSON.stringify(completedE7?.response?.usage));
     }
   }
 } finally {
