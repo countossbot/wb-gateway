@@ -78,22 +78,6 @@ const NATIVE_PRESET_TYPE: Record<string, string> = {
   openrouter: "openai",
 };
 
-// ---- 原生模型目录（路由候选「模型」下拉框数据源） ----
-// 把 DEFAULT_ROUTES 折叠为 { [适配器类型]: 模型 ID[] }。模型 ID 原样透传
-// （沿用原始标识符，不做任何改写 / 转换 / 重新映射），顺序保持原生出现顺序。
-export function nativeProviderModels(): Record<string, string[]> {
-  const out: Record<string, string[]> = {};
-  for (const cands of Object.values(DEFAULT_ROUTES)) {
-    for (const c of cands) {
-      const t = NATIVE_PRESET_TYPE[c.provider];
-      if (!t) continue;
-      const list = out[t] || (out[t] = []);
-      if (!list.includes(c.model)) list.push(c.model);
-    }
-  }
-  return out;
-}
-
 // ---- 脱敏契约 ----
 // 敏感字段清单：这些值永不通过 API 返回给客户端
 const SECRET_FIELDS = ["accessToken", "refreshToken", "apiKey", "cookie", "token", "jwtToken"];
