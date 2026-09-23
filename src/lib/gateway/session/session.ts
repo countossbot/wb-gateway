@@ -48,42 +48,12 @@ export function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-export type AdminRole = "ADMIN" | "OPERATOR" | "VIEWER";
-
 export interface SessionPrincipal {
-  isMaster: boolean;
-  role: AdminRole;
+  isMaster: true;
+  role: "admin";
   name: string;
   sessionId: string;
   userId: string;
-}
-
-// ---- v4.9.0：轻量 RBAC 权限映射（固定三角色，不做自定义权限编辑器） ----
-export const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
-  ADMIN: ["*"],
-  OPERATOR: [
-    "provider.read",
-    "route.read", "route.write",
-    "key.read", "key.write",
-    "log.read",
-    "usage.read",
-    "settings.read",
-  ],
-  VIEWER: [
-    "provider.read",
-    "route.read",
-    "key.read",
-    "log.read",
-    "usage.read",
-    "settings.read",
-  ],
-};
-
-export function hasPermission(role: string | null | undefined, permission: string): boolean {
-  if (!role) return false;
-  const perms = ROLE_PERMISSIONS[role as AdminRole];
-  if (!perms) return false;
-  return perms.includes("*") || perms.includes(permission);
 }
 
 export async function createSession(userId: string, username: string): Promise<{ token: string; expiresAt: Date }> {
@@ -123,12 +93,6 @@ export async function resolveSessionFromToken(token: string): Promise<SessionPri
     await db.session.delete({ where: { id: session.id } }).catch(() => {});
     return null;
   }
-  const user = await db.adminUser.findUnique({ where: { id: session.userId } });
-  if (!user || !user.enabled) {
-    // 禁用成员立即失效全部会话（这里顺手清掉当前记录；全量清理由成员管理接口处理）
-    await db.session.delete({ where: { id: session.id } }).catch(() => {});
-    return null;
-  }
   // 滑动续期：剩余 < 1h → 顺延至满 12h（活跃用户永不过期；不活跃用户到期自然失效）
   if (expiresAtMs - now < SESSION_SLIDING_MS) {
     const renewedAt = new Date(now + SESSION_TTL_MS);
@@ -139,11 +103,11 @@ export async function resolveSessionFromToken(token: string): Promise<SessionPri
     await db.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date(now) } }).catch(() => {});
   }
   return {
-    isMaster: user.role === "ADMIN",
-    role: (user.role as AdminRole) || "VIEWER",
-    name: user.displayName || user.username,
+    isMaster: true,
+    role: "admin",
+    name: "Console Admin",
     sessionId: session.id,
-    userId: user.id,
+    userId: session.userId,
   };
 }
 
