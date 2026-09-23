@@ -43,6 +43,8 @@ interface SettingsPayload {
   usageProviderId?: string;
   auditRetentionDays?: number;
   balanceRetentionDays?: number;
+  /** v4.9.0：成长中心执行日志保留天数（全局；7/30/90，0 = 永久） */
+  growthLogRetentionDays?: number;
   // v4.2.0：SSE 流式保活与上游超时（热生效；超时变更后重建出站 dispatcher）
   streamStallMs?: number;
   upstreamHeadersTimeoutMs?: number;
@@ -117,6 +119,14 @@ export async function PUT(request: NextRequest) {
       return fail("balanceRetentionDays 必须为 0~3650 的整数（0 = 永久保留）");
     }
     updates.balanceRetentionDays = n;
+  }
+  // v4.9.0：成长中心执行日志保留期（全局；UI 可选 7/30/90，0 = 永久保留）
+  if (body.growthLogRetentionDays !== undefined) {
+    const n = Math.floor(Number(body.growthLogRetentionDays));
+    if (!Number.isFinite(n) || n < 0 || n > 3650) {
+      return fail("growthLogRetentionDays 必须为 0~3650 的整数（0 = 永久保留）");
+    }
+    updates.growthLogRetentionDays = n;
   }
   // ---- v4.2.0：SSE 流式保活与上游超时（范围与 runtimeSettings clampInt 一致） ----
   let timeoutsChanged = false;

@@ -1,6 +1,7 @@
 // 定时任务 —— 每日签到 & Token 保活：开关 / cron / 时区（热生效）、立即执行（逐账号明细）、最近执行历史。
 // v4.1.0：每日签到卡新增「签到提供商」多选下拉（空选 = 全部支持签到的提供商；保存后热生效）。
 // v4.1.1：立即执行签到直传当前下拉选择（无需先保存）；结果卡显示本次执行范围；定时调度仍按已保存配置。
+// v4.2.0：新增「成长中心」卡（分组勾选 + 账号选择 + 立即执行 SSE 实时日志 + 日志保留期）。
 "use client";
 
 import * as React from "react";
@@ -19,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -329,6 +331,361 @@ function CheckinProviderPicker({
   );
 }
 
+// ---------- 成长中心（v4.2.0）----------
+
+/** 分组 id（与后端 GrowthGroup 保持一致） */
+type GrowthGroupId = "growth" | "school" | "miniprogram" | "play";
+
+/** GET /api/console/growth 的分组项 */
+interface GrowthGroupInfo {
+  id: GrowthGroupId;
+  label: string;
+  total: number;
+}
+
+/** GET /api/console/growth 的账号项（已完成进度由 completedCount/totalCount 展示） */
+interface GrowthAccountInfo {
+  id: string;
+  name: string;
+  status: "idle" | "running" | "done" | string;
+  completedCount: number;
+  totalCount: number;
+}
+
+interface GrowthOverview {
+  groups: GrowthGroupInfo[];
+  accounts: GrowthAccountInfo[];
+}
+
+/** 日志级别（后端 GrowthRunEvent.level；info/ok/warn/error） */
+type GrowthLogLevel = "info" | "ok" | "warn" | "error";
+
+/** 日志框内的一行（历史行与流式行统一结构） */
+interface GrowthLogLine {
+  key: string;
+  level: GrowthLogLevel;
+  message: string;
+  time?: string;
+}
+
+/** GET /api/console/growth/logs 响应 */
+interface GrowthLogsData {
+  logs: { id: number; level: string; message: string; createdAt: string }[];
+  retentionDays: number;
+}
+
+/** SSE 单条 GrowthRunEvent（宽松解析：字段可能缺失） */
+interface GrowthRunEventPayload {
+  level?: string;
+  message?: string;
+  done?: boolean;
+  id?: number;
+  createdAt?: string;
+}
+
+const GROWTH_GROUP_LABELS: { id: GrowthGroupId; label: string }[] = [
+  { id: "growth", label: "成长中心任务" },
+  { id: "school", label: "开学季活动" },
+  { id: "miniprogram", label: "小程序任务" },
+  { id: "play", label: "互动玩法" },
+];
+
+/** 归一后端返回值：只接受四个已知级别，其余按 info 处理 */
+function normalizeGrowthLevel(level: unknown): GrowthLogLevel {
+  return level === "ok" || level === "warn" || level === "error" ? level : "info";
+}
+
+const GROWTH_LEVEL_CLASS: Record<GrowthLogLevel, string> = {
+  info: "text-stone-600",
+  ok: "text-teal-600",
+  warn: "text-amber-600",
+  error: "text-red-600",
+};
+
+const GROWTH_RETENTION_OPTIONS = [7, 30, 90];
+
+/**
+ * 成长中心卡：分组勾选 + 账号选择 + 立即执行（SSE 实时日志）+ 日志保留期。
+ * 仅「成长中心任务」默认勾选；已完成账号打 Badge 防重复执行；运行中禁止再次触发（后端为全局锁）。
+ */
+function GrowthCard({ fmtTime }: { fmtTime: (v: string) => string }) {
+  const [overview, setOverview] = React.useState<GrowthOverview | null>(null);
+  const [groups, setGroups] = React.useState<GrowthGroupId[]>(["growth"]);
+  const [accountId, setAccountId] = React.useState("");
+  const [lines, setLines] = React.useState<GrowthLogLine[]>([]);
+  const [running, setRunning] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [retention, setRetention] = React.useState(7);
+  const logBoxRef = React.useRef<HTMLDivElement | null>(null);
+
+  /** 加载分组 / 账号；保留已在框内的日志（只刷新状态与进度） */
+  const loadOverview = React.useCallback(async () => {
+    try {
+      const data = await apiGet<GrowthOverview>("/api/console/growth");
+      setOverview(data);
+    } catch (e) {
+      setError(errMessage(e));
+    }
+  }, []);
+
+  /** 历史日志一次性载入（sinceId=0 增量语义：追加而非替换） */
+  const loadHistory = React.useCallback(async () => {
+    try {
+      const data = await apiGet<GrowthLogsData>("/api/console/growth/logs?sinceId=0");
+      setRetention(data.retentionDays > 0 ? data.retentionDays : 7);
+      const rows = Array.isArray(data.logs) ? data.logs : [];
+      setLines(
+        rows.map(
+          (r): GrowthLogLine => ({
+            key: `h-${r.id}`,
+            level: normalizeGrowthLevel(r.level),
+            message: r.message,
+            time: fmtTime(r.createdAt),
+          })
+        )
+      );
+    } catch (e) {
+      setError(errMessage(e));
+    }
+  }, [fmtTime]);
+
+  // 挂载：并行拉取概览与历史日志
+  React.useEffect(() => {
+    void loadOverview();
+    void loadHistory();
+  }, [loadOverview, loadHistory]);
+
+  // 新日志行到达后滚动到底部
+  React.useEffect(() => {
+    const box = logBoxRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [lines]);
+
+  const selected = overview?.accounts.find((a) => a.id === accountId) ?? null;
+  const done = selected?.status === "done";
+  const accountRunning = selected?.status === "running";
+  const canRun =
+    !!selected && groups.length > 0 && !running && !done && !accountRunning;
+
+  const toggleGroup = (id: GrowthGroupId, checked: boolean) => {
+    setGroups((prev) =>
+      checked ? Array.from(new Set([...prev, id])) : prev.filter((g) => g !== id)
+    );
+  };
+
+  /** 保存日志保留期（热生效；与 settings 模块同一 PUT 契约：顶层字段平铺） */
+  const saveRetention = async (days: number) => {
+    setRetention(days);
+    try {
+      await apiPut("/api/console/settings", { growthLogRetentionDays: days });
+    } catch (e) {
+      setError(errMessage(e));
+    }
+  };
+
+  /** 立即执行：直连 fetch + ReadableStream 解析 SSE（apiPost 不支持流式） */
+  const run = async () => {
+    if (!canRun || !selected) return;
+    setRunning(true);
+    setError("");
+    setLines((prev) => [
+      ...prev,
+      { key: `s-start-${Date.now()}`, level: "info", message: `开始执行：${selected.name}` },
+    ]);
+    try {
+      const res = await fetch("/api/console/growth/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: selected.id, groups }),
+      });
+      if (!res.ok || !res.body) {
+        // 非 2xx：尽量读出 { ok, error } 包里的中文错误
+        const text = await res.text().catch(() => "");
+        let msg = `执行失败（HTTP ${res.status}）`;
+        try {
+          const parsed = JSON.parse(text) as { error?: string };
+          if (parsed.error) msg = parsed.error;
+        } catch {
+          // 非 JSON 响应（如 HTML 错误页）——保留状态码提示
+        }
+        throw new Error(msg);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finished = false;
+      while (!finished) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE 事件以空行分隔；最后一段可能不完整，留在 buffer 等下一次
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() ?? "";
+        for (const block of blocks) {
+          for (const rawLine of block.split("\n")) {
+            const line = rawLine.trim();
+            // 心跳/注释行（: ping）与非 data 行直接忽略
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload) continue;
+            try {
+              const evt = JSON.parse(payload) as GrowthRunEventPayload;
+              if (evt.done) {
+                finished = true;
+                if (evt.message) {
+                  setLines((prev) => [
+                    ...prev,
+                    {
+                      key: `s-done-${Date.now()}`,
+                      level: normalizeGrowthLevel(evt.level),
+                      message: evt.message ?? "",
+                    },
+                  ]);
+                }
+                continue;
+              }
+              if (!evt.message) continue;
+              setLines((prev) => [
+                ...prev,
+                {
+                  key: `s-${evt.id ?? Date.now()}-${prev.length}`,
+                  level: normalizeGrowthLevel(evt.level),
+                  message: evt.message ?? "",
+                },
+              ]);
+            } catch {
+              // 防御：单行 JSON 解析失败不应中断整个流
+            }
+          }
+        }
+      }
+    } catch (e) {
+      const msg = errMessage(e);
+      setError(msg);
+      setLines((prev) => [
+        ...prev,
+        { key: `s-err-${Date.now()}`, level: "error", message: msg },
+      ]);
+    } finally {
+      setRunning(false);
+      // 执行结束刷新状态/进度（完成账号会变为 done → 按钮改为「已完成」Badge）
+      await loadOverview();
+    }
+  };
+
+  return (
+    <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-stone-900">成长中心</h2>
+          <p className="text-xs text-muted-foreground">
+            WorkBuddy 国内站任务（分组勾选后立即执行，实时输出日志）
+          </p>
+        </div>
+        {selected && (
+          <span className="text-xs text-stone-500">
+            已完成 {selected.completedCount}/{selected.totalCount}
+          </span>
+        )}
+      </div>
+
+      {/* 分组勾选：默认仅勾选成长中心任务 */}
+      <div className="grid gap-2 sm:grid-cols-2">
+        {GROWTH_GROUP_LABELS.map((g) => {
+          const total = overview?.groups.find((x) => x.id === g.id)?.total ?? 0;
+          const id = `growth-group-${g.id}`;
+          return (
+            <label
+              key={g.id}
+              htmlFor={id}
+              className="flex cursor-pointer items-center gap-2 rounded-lg border border-stone-200 px-2.5 py-1.5 text-xs text-stone-700"
+            >
+              <Checkbox
+                id={id}
+                checked={groups.includes(g.id)}
+                onCheckedChange={(v) => toggleGroup(g.id, v === true)}
+              />
+              <span className="flex-1">{g.label}</span>
+              <Badge variant="secondary" className="text-[10px] font-normal">
+                {total}
+              </Badge>
+            </label>
+          );
+        })}
+      </div>
+
+      {/* 账号选择 + 进度 + 立即执行 */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={accountId} onValueChange={setAccountId}>
+          <SelectTrigger size="sm" className="w-40">
+            <SelectValue placeholder="选择账号" />
+          </SelectTrigger>
+          <SelectContent>
+            {(overview?.accounts ?? []).map((a) => (
+              <SelectItem key={a.id} value={a.id}>
+                {a.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <span className="text-xs text-stone-500">
+          {selected ? `已完成 ${selected.completedCount}/${selected.totalCount}` : "—"}
+        </span>
+        <div className="ml-auto">
+          {done ? (
+            // 已完成：打标签防重复执行（按钮置灰改为状态徽标）
+            <Badge className="bg-teal-50 text-teal-700 hover:bg-teal-50">
+              <Check className="size-3" />
+              已完成 {selected?.completedCount}/{selected?.totalCount}
+            </Badge>
+          ) : (
+            <Button size="sm" onClick={run} disabled={!canRun}>
+              {running ? <Loader2 className="animate-spin" /> : <Play />}
+              立即执行
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* 实时日志（最新在底部，自动滚动） */}
+      <div>
+        <div className="mb-1.5 flex items-center justify-between">
+          <span className="text-xs font-medium text-stone-600">实时日志</span>
+          <select
+            aria-label="日志保留期"
+            className="rounded-md border border-stone-200 bg-white px-1.5 py-0.5 text-[11px] text-stone-600"
+            value={retention}
+            onChange={(e) => void saveRetention(Number(e.target.value))}
+          >
+            {GROWTH_RETENTION_OPTIONS.map((d) => (
+              <option key={d} value={d}>
+                保留 {d} 天
+              </option>
+            ))}
+          </select>
+        </div>
+        <div
+          ref={logBoxRef}
+          className="max-h-[200px] min-h-24 overflow-y-auto rounded-lg border border-stone-200 bg-stone-50 p-2 font-mono text-xs leading-5"
+        >
+          {lines.length === 0 ? (
+            <p className="text-stone-400">暂无日志</p>
+          ) : (
+            lines.map((l) => (
+              <p key={l.key} className={cn("whitespace-pre-wrap break-all", GROWTH_LEVEL_CLASS[l.level])}>
+                {l.time ? <span className="text-stone-400">[{l.time}] </span> : null}
+                {l.message}
+              </p>
+            ))
+          )}
+        </div>
+        {error && <p className="mt-1.5 text-xs text-red-600">{error}</p>}
+      </div>
+    </section>
+  );
+}
+
 export function JobsModule() {
   const [data, setData] = React.useState<JobsData | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -460,8 +817,8 @@ export function JobsModule() {
       <ErrorAlert message={error} onRetry={load} />
       {configError && <ErrorAlert message={configError} />}
 
-      {/* 两张任务卡 */}
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* 三张任务卡：每日签到 / 成长中心 / Token 保活 */}
+      <div className="grid gap-4 lg:grid-cols-3">
         <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
@@ -511,6 +868,8 @@ export function JobsModule() {
             <JobRhythmStrip runs={(data?.recentRuns ?? []).filter((r) => r.job === "checkin")} />
           </div>
         </section>
+
+        <GrowthCard fmtTime={relativeTime} />
 
         <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4">
           <div className="flex items-center justify-between">
