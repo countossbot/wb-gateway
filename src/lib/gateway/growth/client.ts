@@ -124,6 +124,38 @@ export class GrowthClient {
   }
 
   /**
+   * 读取**开学季活动**任务（与成长中心是两套接口，不可混用）。
+   *
+   * 实测：开学季走 `https://www.codebuddy.cn/portal/activity/school/tasks`，
+   * 响应形状为 `{code:0,data:{tasks:[{task_code,title,status,progress,target_count}],in_period}}`，
+   * 与成长中心的 `accept_status/progress.{current,target}` 不同，故单独取。
+   */
+  async getSchoolTasks(opts: GrowthRequestOpts = {}): Promise<unknown> {
+    const url = `${SCHOOL_BASE}/portal/activity/school/tasks`;
+    return this.requestJson(url, { method: "GET" }, opts);
+  }
+
+  /** 开学季：标记任务已查看（前置动作，部分任务需先 viewed 才可完成） */
+  async schoolViewed(code: string, opts: GrowthRequestOpts = {}): Promise<boolean> {
+    const url = `${SCHOOL_BASE}/portal/activity/school/tasks/${encodeURIComponent(code)}/viewed`;
+    return this.isOk(await this.requestJson(url, { method: "POST", body: "{}" }, opts));
+  }
+
+  /** 开学季：分享完成（share_invite 的判据） */
+  async schoolShareComplete(opts: GrowthRequestOpts = {}): Promise<boolean> {
+    const url = `${SCHOOL_BASE}/portal/activity/school/tasks/share-complete`;
+    return this.isOk(
+      await this.requestJson(url, { method: "POST", body: JSON.stringify({ channel: "wechat" }) }, opts),
+    );
+  }
+
+  /** 开学季：领取任务奖励 */
+  async schoolClaim(code: string, opts: GrowthRequestOpts = {}): Promise<boolean> {
+    const url = `${SCHOOL_BASE}/portal/activity/school/tasks/${encodeURIComponent(code)}/claim`;
+    return this.isOk(await this.requestJson(url, { method: "POST", body: "{}" }, opts));
+  }
+
+  /**
    * 接受任务（上游为**批量**端点：POST /tasks/accept + {"task_codes":[...]}）。
    * 逐任务调用亦可（单元素数组），返回值表示本次调用是否成功（已接受也返回 code:0）。
    */

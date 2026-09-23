@@ -33,12 +33,11 @@ export const GROWTH_TASKS: GrowthTaskDef[] = [
     excluded: true,
     excludedReason: "需真实捐款，无法自动完成",
   },
-
   // ---------- 开学季活动（4 可执行 + 1 排除） ----------
   { code: "share_invite", label: "分享活动给好友", group: "school", mechanism: "miniprogram_event" },
-  { code: "chat_3", label: "与AI对话3次", group: "school", mechanism: "miniprogram_event" },
-  { code: "desktop_chat", label: "桌面端对话1次", group: "school", mechanism: "desktop_event" },
-  { code: "school_expert", label: "召唤开学季专家并对话", group: "school", mechanism: "miniprogram_event" },
+  { code: "chat_3_times", label: "和 AI 对话 3 次", group: "school", mechanism: "miniprogram_event" },
+  { code: "desktop_chat_1_time", label: "桌面端功能体验", group: "school", mechanism: "desktop_event" },
+  { code: "expert_use", label: "召唤 1 次开学季专家", group: "school", mechanism: "miniprogram_event" },
   {
     // 学生认证：需要微信实名认证，属于人工环节
     code: "task_student_verify",

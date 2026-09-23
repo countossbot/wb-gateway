@@ -1,7 +1,7 @@
-// 成长中心 —— 执行器（v4.9.0）
+// 成长中心 —— 执行器（v4.9.1）
 //
 // 一次「立即执行」的流程（对齐参考脚本的幂等思路）：
-//   1. 读上游任务进度（普通口径 + 小程序口径，合并去重）
+//   1. 读上游任务进度（普通口径 + 小程序口径 + 开学季口径，合并去重）
 //   2. 对勾选组内「未完成」的任务逐项执行
 //   3. 每步产出 GrowthRunEvent（增量写 GrowthLog + 实时推给 UI）
 //   4. 执行后回读进度，以「上游真值」结算 completedCount
@@ -10,7 +10,7 @@
 // 不按「本次执行成功数」统计 —— 否则数字会随勾选组跳变。
 import { db } from "@/lib/db";
 import { GrowthClient } from "./client";
-import { parseTasks, summarize } from "./parse";
+import { parseSchoolTasks, parseTasks, summarize } from "./parse";
 import { tasksForGroups } from "./tasks";
 import type {
   GrowthGroup,
@@ -21,14 +21,15 @@ import type {
 } from "./types";
 import { acquireLock, releaseLock, settleRun } from "./state";
 
+/** 执行上下文：日志同时落库（append-only）并回调给调用方（SSE 推送） */
+interface RunCtx {
+  accountId: string;
+  accountName: string;
+  runId: string;
+  sink?: (e: GrowthRunEvent) => void;
+}
 
-/** 开学季活动 id（对应 codebuddy.cn 的 school_open_day_2026 活动） */
-const SCHOOL_ACTIVITY_ID = "school_open_day_2026";
-/** 日志同时落库（append-only）并回调给调用方（SSE 推送） */
-async function emit(
-  ctx: { accountId: string; accountName: string; runId: string; sink?: (e: GrowthRunEvent) => void },
-  e: Omit<GrowthRunEvent, "ts">,
-): Promise<void> {
+async function emit(ctx: RunCtx, e: Omit<GrowthRunEvent, "ts">): Promise<void> {
   const ev: GrowthRunEvent = { ts: Date.now(), ...e };
   try {
     await db.growthLog.create({
@@ -50,9 +51,9 @@ async function emit(
 
 /**
  * 读取上游进度，合并三份口径（缺一份会导致任务被误判为 0/N，使 done 永不可达）：
- *   1. 普通口径      —— 成长中心组任务
- *   2. 小程序口径    —— 小程序组任务（必须带 X-Client-Platform: miniprogram 才下发）
- *   3. 开学季口径    —— 开学季组任务（走 codebuddy.cn + activity_id=school_open_day_2026）
+ *   1. 普通口径   —— 成长中心组任务
+ *   2. 小程序口径 —— 小程序组任务（必须带 X-Client-Platform: miniprogram 才下发）
+ *   3. 开学季口径 —— 开学季组任务（独立接口 portal/activity/school/tasks）
  */
 export async function readProgress(
   client: GrowthClient,
@@ -62,15 +63,15 @@ export async function readProgress(
   const [normal, mp, school] = await Promise.all([
     client.getTasks().catch(() => null),
     client.getTasks({ miniprogram: true }).catch(() => null),
-    wantSchool
-      ? client.getTasks({ activityId: SCHOOL_ACTIVITY_ID }).catch(() => null)
-      : Promise.resolve(null),
+    wantSchool ? client.getSchoolTasks().catch(() => null) : Promise.resolve(null),
   ]);
   const merged = new Map<string, GrowthTaskProgress>();
-  for (const p of [...parseTasks(normal), ...parseTasks(mp), ...parseTasks(school)]) {
+  for (const p of [...parseTasks(normal), ...parseTasks(mp), ...parseSchoolTasks(school)]) {
     const prev = merged.get(p.code);
     // 同一 code 多份口径都出现时，取进度更靠前的一份
-    if (!prev || p.current > prev.current || (p.completed && !prev.completed)) merged.set(p.code, p);
+    if (!prev || p.current > prev.current || (p.completed && !prev.completed)) {
+      merged.set(p.code, p);
+    }
   }
   const all = [...merged.values()];
   return { progress: summarize(all, groups), raw: all };
@@ -80,6 +81,7 @@ export interface RunOptions {
   accountId: string;
   accountName: string;
   accessToken: string;
+  uid?: string;
   nick?: string;
   groups: GrowthGroup[];
   sink?: (e: GrowthRunEvent) => void;
@@ -93,13 +95,10 @@ export interface RunResult {
   error?: string;
 }
 
-/**
- * 执行一次成长任务批次。
- * 调用方保证已通过 acquireLock 判定（此处再取一次以兜底）。
- */
+/** 执行一次成长任务批次（调用方无需预先取锁，此处内部取锁并保证释放） */
 export async function runGrowthTasks(opts: RunOptions): Promise<RunResult> {
   const runId = `grow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const ctx = {
+  const ctx: RunCtx = {
     accountId: opts.accountId,
     accountName: opts.accountName,
     runId,
@@ -112,7 +111,7 @@ export async function runGrowthTasks(opts: RunOptions): Promise<RunResult> {
     return { ok: false, completedCount: 0, totalCount: 0, error: lock.reason };
   }
 
-  const client = new GrowthClient(opts.accessToken, opts.nick || opts.accountName);
+  const client = new GrowthClient(opts.accessToken, opts.uid || opts.accountId, opts.nick || opts.accountName);
   let lastError = "";
 
   try {
@@ -180,17 +179,19 @@ export async function runGrowthTasks(opts: RunOptions): Promise<RunResult> {
   }
 }
 
-/** 执行单个任务：按机制分派。全部失败只记录，不中断整批。 */
-async function runOne(
-  ctx: { accountId: string; accountName: string; runId: string; sink?: (e: GrowthRunEvent) => void },
-  client: GrowthClient,
-  def: GrowthTaskDef,
-): Promise<void> {
+/** 执行单个任务：按机制分派。单项失败只记录，不中断整批。 */
+async function runOne(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
   const label = def.label;
   try {
     await emit(ctx, { level: "info", taskCode: def.code, label, message: `${label}：开始（${def.mechanism}）` });
 
-    // 所有机制都先 accept（上游要求先接受任务才计入进度）
+    // 开学季走独立接口族（portal/activity/school），不能用成长中心的 accept/claim
+    if (def.group === "school") {
+      await runSchoolTask(ctx, client, def);
+      return;
+    }
+
+    // 成长中心 / 小程序 / 互动玩法：统一先 accept（上游要求先接受才计入进度）
     await client.accept(def.code, { miniprogram: def.mechanism === "miniprogram_event" });
 
     switch (def.mechanism) {
@@ -218,11 +219,7 @@ async function runOne(
 }
 
 /** 真实 API 类：发真实模型对话（产生真实服务端状态） */
-async function runRealApi(
-  ctx: { accountId: string; accountName: string; runId: string; sink?: (e: GrowthRunEvent) => void },
-  client: GrowthClient,
-  def: GrowthTaskDef,
-): Promise<void> {
+async function runRealApi(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
   const prompts: Record<string, string[]> = {
     chat_5: ["你好", "今天天气怎么样？", "1+1等于几？", "Python是什么？", "推荐一本好书"],
     "Model_chat_GLM5.2": ["请用一句话介绍你自己"],
@@ -235,15 +232,51 @@ async function runRealApi(
   for (const p of list) {
     await client.chat(p);
   }
-  await emit(ctx, { level: "info", taskCode: def.code, label: def.label, message: `${def.label}：已发送 ${list.length} 次真实对话` });
+  await emit(ctx, {
+    level: "info",
+    taskCode: def.code,
+    label: def.label,
+    message: `${def.label}：已发送 ${list.length} 次真实对话`,
+  });
+}
+
+/**
+ * 开学季任务执行（独立接口族）。
+ * 流程对齐参考脚本：viewed（激活）→ 类别判据 → claim。
+ */
+async function runSchoolTask(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
+  // 1) 先 viewed 激活（部分任务需先查看才可完成）
+  await client.schoolViewed(def.code).catch(() => {});
+
+  // 2) 按任务类别触发判据
+  switch (def.code) {
+    case "share_invite":
+      await client.schoolShareComplete().catch(() => {});
+      break;
+    case "chat_3_times":
+      // 和 AI 对话 3 次（真实对话）
+      for (const p of ["你好", "1+1等于几？", "推荐一本好书"]) {
+        await client.chat(p).catch(() => {});
+      }
+      break;
+    case "desktop_chat_1_time":
+      // 桌面端功能体验：非 Windows 环境降级为桌面指纹事件上报
+      await client.reportTaskEvent(def.code, "desktop_event").catch(() => {});
+      break;
+    case "expert_use":
+      await client.reportTaskEvent(def.code, "miniprogram_event").catch(() => {});
+      break;
+    default:
+      break;
+  }
+
+  // 3) 领取奖励
+  await client.schoolClaim(def.code).catch(() => {});
+  await emit(ctx, { level: "ok", taskCode: def.code, label: def.label, message: `${def.label}：已提交` });
 }
 
 /** 互动玩法类：纯业务玩法调用（非埋点） */
-async function runPlayground(
-  ctx: { accountId: string; accountName: string; runId: string; sink?: (e: GrowthRunEvent) => void },
-  client: GrowthClient,
-  def: GrowthTaskDef,
-): Promise<void> {
+async function runPlayground(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
   switch (def.code) {
     case "lottery": {
       const chances = await client.lotteryChances();
@@ -253,7 +286,12 @@ async function runPlayground(
         await client.lotteryDraw();
         drew++;
       }
-      await emit(ctx, { level: "info", taskCode: def.code, label: def.label, message: `抽奖：剩余 ${n} 次，已抽 ${drew} 次` });
+      await emit(ctx, {
+        level: "info",
+        taskCode: def.code,
+        label: def.label,
+        message: `抽奖：剩余 ${n} 次，已抽 ${drew} 次`,
+      });
       break;
     }
     case "blindbox": {
@@ -271,7 +309,7 @@ async function runPlayground(
         await emit(ctx, { level: "info", taskCode: def.code, label: def.label, message: "旅行已到达，领取奖励" });
       } else if (state === "idle") {
         const cfg = await client.buddyTravelConfig();
-        const locs = ((cfg as { data?: { locations?: Array<{ id?: number }> } })?.data?.locations ?? []);
+        const locs = (cfg as { data?: { locations?: Array<{ id?: number }> } })?.data?.locations ?? [];
         const id = Number(locs[0]?.id ?? 0);
         if (id > 0) await client.buddyTravelDepart(id);
         await emit(ctx, { level: "info", taskCode: def.code, label: def.label, message: `派 Buddy 出发（目的地 ${id}）` });
@@ -290,9 +328,9 @@ async function runPlayground(
     case "badges":
       await client.badges();
       break;
+    case "buddy_info":
     case "makeup":
     case "gift_compensation":
-    case "buddy_info":
     default:
       await client.buddyInfo().catch(() => {});
       break;
@@ -300,11 +338,7 @@ async function runPlayground(
 }
 
 /** 事件上报类（web / 桌面 / 小程序）：按机制构造对应上报体 */
-async function runEventReport(
-  ctx: { accountId: string; accountName: string; runId: string; sink?: (e: GrowthRunEvent) => void },
-  client: GrowthClient,
-  def: GrowthTaskDef,
-): Promise<void> {
+async function runEventReport(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
   await client.reportTaskEvent(def.code, def.mechanism);
   await emit(ctx, {
     level: "info",

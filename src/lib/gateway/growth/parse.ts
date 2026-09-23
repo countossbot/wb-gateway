@@ -118,3 +118,37 @@ export function summarize(all: GrowthTaskProgress[], groups: GrowthGroup[]): Gro
     totalCount: tasks.length,
   };
 }
+
+/**
+ * 解析**开学季活动**任务（形状与成长中心不同）：
+ *   {code:0, data:{tasks:[{task_code,title,status,progress,target_count}], in_period}}
+ * status: pending | completed | claimed（无 accept_status 字段）
+ */
+export function parseSchoolTasks(json: unknown): GrowthTaskProgress[] {
+  if (!json || typeof json !== "object") return [];
+  const root = json as { code?: unknown; data?: unknown };
+  if (typeof root.code === "number" && root.code !== 0) return [];
+  const data = (root.data || {}) as { tasks?: unknown };
+  if (!Array.isArray(data.tasks)) return [];
+
+  const out: GrowthTaskProgress[] = [];
+  for (const raw of data.tasks) {
+    if (!raw || typeof raw !== "object") continue;
+    const t = raw as Record<string, unknown>;
+    const code = typeof t.task_code === "string" ? t.task_code : "";
+    if (!code) continue;
+    const current = toNumber(t.progress, 0);
+    const target = toNumber(t.target_count, 0);
+    const status = String(t.status || "");
+    out.push({
+      code,
+      label: typeof t.title === "string" ? t.title : code,
+      group: "school",
+      accepted: status !== "" && status !== "pending",
+      completed: status === "completed" || status === "claimed" || (target > 0 && current >= target),
+      current,
+      target,
+    });
+  }
+  return out;
+}
