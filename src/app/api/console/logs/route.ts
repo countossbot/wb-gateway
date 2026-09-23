@@ -46,7 +46,6 @@ export async function GET(request: NextRequest) {
       from: parseTs(params.get("from")),
       to: parseTs(params.get("to")),
       accountId: params.get("account") || undefined,
-      ownerUserId: params.get("owner") || undefined,
     }),
     distinctLogProviders(),
     distinctLogKeys(),
