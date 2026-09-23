@@ -85,11 +85,8 @@ export async function POST(request: NextRequest) {
   if (exists) return fail(`用户名 "${username}" 已存在`, 409);
 
   const passwordHash = await hashPassword(password);
-  // enabled 必须显式写入：schema 默认值在「已有库增量迁移」场景下不生效
-  // （ALTER TABLE ADD COLUMN 的默认值只作用于既有行，新建库由 init.sql 建表带默认值）。
-  // 显式写入使两种路径行为一致，避免成员落库为 enabled=false 而无法登录。
   const user = await db.adminUser.create({
-    data: { username, displayName, role, passwordHash, enabled: true },
+    data: { username, displayName, role, passwordHash },
   });
 
   const actor = await db.adminUser.findUnique({ where: { id: session.userId } });
