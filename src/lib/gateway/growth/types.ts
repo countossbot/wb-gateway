@@ -53,3 +53,80 @@ export interface GrowthRunEvent {
   completedCount?: number;
   totalCount?: number;
 }
+
+// ─────────────────────────────────────────────────────────────
+// 事件配方（T3）相关类型
+//
+// 为什么用「窄接口 GrowthReporter」而不是直接 import GrowthClient：
+// client.ts 由并行任务改造通道方法，两侧需要能独立编译。runner 传入的
+// 实际对象只需满足本接口即可。
+// ─────────────────────────────────────────────────────────────
+
+/** 专家条目（来自专家市场配置） */
+export interface ExpertInfo {
+  id: string;
+  name: string;
+  profession?: string;
+  industryId?: string;
+}
+
+/**
+ * 配方执行所需的最小上报能力。
+ * 所有方法都必须「防御式」：失败返回 false / null，不抛错。
+ */
+export interface GrowthReporter {
+  /** CLOUD 桌面通道（自动补桌面信封） */
+  reportCloud(events: Array<Record<string, unknown>>): Promise<boolean>;
+  /** web 域通道 */
+  reportWeb(events: Array<Record<string, unknown>>): Promise<boolean>;
+  /** 小程序通道 */
+  reportMp(events: Array<Record<string, unknown>>): Promise<boolean>;
+  /** 真实对话（webchat）；失败返回 null */
+  webchat(
+    convName: string,
+    prompt: string,
+    meta?: Record<string, unknown>,
+    model?: string,
+  ): Promise<{ conversationId: string; requestId: string; content: string } | null>;
+  // ── 以下为可选能力：client 未提供时配方会降级并说明原因（不伪成功） ──
+  /** 切换主题（Hp_Appearance） */
+  setTheme?(themeKey: string): Promise<boolean>;
+  /** 安装插件（skill_1） */
+  installPlugin?(name: string): Promise<boolean>;
+  /** 查技能 id（skill_1）；失败返回 null */
+  marketSkillList?(name: string): Promise<string | null>;
+  /** Buddy 协议同意（first_buddy） */
+  buddyAgree?(): Promise<boolean>;
+  /** 领取第一只 Buddy（first_buddy） */
+  buddyFirst?(): Promise<boolean>;
+}
+
+/** 开学季腾讯 copilot 通道上报（desktop_chat_1_time / expert_use） */
+export type SchoolReporter = (
+  events: Array<Record<string, unknown>>,
+  opts?: { desktop?: boolean },
+) => Promise<boolean>;
+
+/** 配方执行上下文：由 runner 注入 */
+export interface RecipeCtx {
+  uid: string;
+  nick: string;
+  /** 当前轮次（从 0 开始），配方可用它轮转专家/场景 */
+  round: number;
+  /** 上报客户端（窄接口） */
+  client: GrowthReporter;
+  /** 睡眠（秒），runner 注入以免阻塞事件循环 */
+  sleep: (sec: number) => Promise<void>;
+  /** 拉普通专家列表（失败返回空数组） */
+  getNormalExperts: (count: number) => Promise<ExpertInfo[]>;
+  /** 拉团队专家列表（失败返回空数组） */
+  getTeamExperts: (count: number) => Promise<ExpertInfo[]>;
+  /** 拉开学季专家（失败返回空 id） */
+  fetchSchoolExpert?: () => Promise<{ id: string; name: string }>;
+  /** 开学季 copilot 通道上报（未注入时相关配方会明确跳过） */
+  schoolReport?: SchoolReporter;
+  /** 是否具备真实桌面能力（Windows 桌面换血流程）；Node 侧恒为 false */
+  needRealDesktop?: boolean;
+  /** 桌面序列额外钩子（预留给真实桌面流程） */
+  desktopSeq?: unknown;
+}

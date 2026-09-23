@@ -10,14 +10,25 @@
 // 不按「本次执行成功数」统计 —— 否则数字会随勾选组跳变。
 import { db } from "@/lib/db";
 import { GrowthClient } from "./client";
+import {
+  fetchNormalExperts,
+  fetchSchoolExpert,
+  fetchTeamExperts,
+  getRecipe,
+  schoolExpertFallback,
+  schoolReport,
+  WRITE_GAP_SEC,
+} from "./events";
 import { parseSchoolTasks, parseTasks, summarize } from "./parse";
 import { tasksForGroups } from "./tasks";
 import type {
   GrowthGroup,
   GrowthProgress,
+  GrowthReporter,
   GrowthRunEvent,
   GrowthTaskDef,
   GrowthTaskProgress,
+  RecipeCtx,
 } from "./types";
 import { acquireLock, releaseLock, settleRun } from "./state";
 
@@ -131,16 +142,29 @@ export async function runGrowthTasks(opts: RunOptions): Promise<RunResult> {
       totalCount: before.progress.totalCount,
     });
 
-    // 2) 逐项执行未完成的任务
+    // 2) 先确定待办清单，并批量登记（accept）——先受理再上报判据，否则上报不计分
     const pending = defs.filter((d) => !doneBefore.has(d.code));
     if (pending.length === 0) {
       await emit(ctx, { level: "ok", message: "所有任务均已完成，无需执行" });
     }
-    for (const def of pending) {
-      await runOne(ctx, client, def);
+    const pendingCodes = pending.map((d) => d.code);
+    if (pendingCodes.length) {
+      try {
+        for (const c of pendingCodes) await client.accept(c);
+      } catch {
+        await emit(ctx, { level: "warn", message: "批量登记失败，继续尝试上报" });
+      }
     }
 
-    // 3) 回读上游真值结算
+    // 3) 逐项执行未完成的任务（开学季组走独立接口族）
+    for (const def of pending) {
+      if (def.group === "school") {
+        await runSchoolTask(ctx, client, def);
+      } else {
+        await runOne(ctx, client, def);
+      }
+    }
+
     const after = await readProgress(client, opts.groups);
     const status = await settleRun(opts.accountId, {
       completedCount: after.progress.completedCount,
@@ -179,100 +203,188 @@ export async function runGrowthTasks(opts: RunOptions): Promise<RunResult> {
   }
 }
 
-/** 执行单个任务：按机制分派。单项失败只记录，不中断整批。 */
+// ─────────────────────────────────────────────────────────────
+// 配方驱动执行（T3）
+//
+// 旧实现按 def.mechanism 粗粒度分派：发一个事件就宣称成功，
+// 于是出现「接口 200、进度不动」的静默成功。现在改为查表执行
+// events.ts 里的配方，并要求「上游进度曲线真的动了」才算完成。
+// ─────────────────────────────────────────────────────────────
+
+/** 把 GrowthClient 适配成配方所需的最小接口（窄接口，避免直接依赖具体类） */
+function asReporter(client: GrowthClient): GrowthReporter {
+  return {
+    reportCloud: (events) => client.reportCloud(events),
+    reportWeb: (events) => client.reportWeb(events),
+    reportMp: (events) => client.reportMp(events),
+    webchat: (convName, prompt, meta, model) => client.webchat(convName, prompt, meta, model),
+  };
+}
+
+/** 当前该任务的上游进度（取不到时按「未完成 0/1」处理，保证循环有界） */
+async function taskProgress(
+  client: GrowthClient,
+  def: GrowthTaskDef,
+): Promise<{ status: string; cur: number; tgt: number }> {
+  try {
+    const { progress } = await readProgress(client, [def.group]);
+    const t = progress.tasks.find((x) => x.code === def.code);
+    if (t) {
+      return {
+        status: t.completed ? "completed" : t.accepted ? "accepted" : "",
+        cur: t.current,
+        tgt: t.target,
+      };
+    }
+  } catch {
+    /* 读不到就按未完成处理 */
+  }
+  return { status: "", cur: 0, tgt: 1 };
+}
+
+/** 进度是否已达标（对齐脚本：completed/claimed 或 cur >= tgt 即 break） */
+function isSatisfied(p: { status: string; cur: number; tgt: number }): boolean {
+  if (p.status === "completed" || p.status === "claimed") return true;
+  return p.tgt > 0 && p.cur >= p.tgt;
+}
+
+/** 构造配方执行上下文 */
+function makeRecipeCtx(ctx: RunCtx, client: GrowthClient, round: number): RecipeCtx {
+  return {
+    uid: client.uid,
+    nick: client.nick,
+    round,
+    client: asReporter(client),
+    sleep: (sec) => new Promise((r) => setTimeout(r, Math.max(0, sec) * 1000)),
+    getNormalExperts: (count) => fetchNormalExperts(count),
+    getTeamExperts: (count) => fetchTeamExperts(count),
+    fetchSchoolExpert: async () => {
+      const r = await fetchSchoolExpert();
+      return r.id ? r : schoolExpertFallback();
+    },
+    schoolReport: (events, o) => {
+      // token 是 client 的私有字段（T3 约定不改 client.ts），此处用窄断言读取，
+      // 仅用于开学季 copilot 通道的 Authorization 头。
+      const tk = (client as unknown as { token?: string }).token ?? "";
+      return schoolReport(tk, client.uid, client.nick, events, o);
+    },
+    needRealDesktop: false,
+  };
+}
+
+/**
+ * 执行单个任务：查配方 → 多轮执行 → 回读进度确认。
+ * 单项失败只记录，不中断整批。
+ */
 async function runOne(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
   const label = def.label;
   try {
-    await emit(ctx, { level: "info", taskCode: def.code, label, message: `${label}：开始（${def.mechanism}）` });
+    await emit(ctx, { level: "info", taskCode: def.code, label, message: `${label}：开始` });
 
-    // 开学季走独立接口族（portal/activity/school），不能用成长中心的 accept/claim
-    if (def.group === "school") {
-      await runSchoolTask(ctx, client, def);
+    // 无配方的任务：明确 warn 并跳过（不再伪成功）
+    const recipe = getRecipe(def.code);
+    if (!recipe) {
+      await emit(ctx, {
+        level: "warn",
+        taskCode: def.code,
+        label,
+        message: `${label}：暂无事件配方，已跳过（需补充 events.ts 配方）`,
+      });
       return;
     }
 
-    // 成长中心 / 小程序 / 互动玩法：统一先 accept（上游要求先接受才计入进度）
-    await client.accept(def.code, { miniprogram: def.mechanism === "miniprogram_event" });
+    const before = await taskProgress(client, def);
+    if (isSatisfied(before)) {
+      await emit(ctx, {
+        level: "info",
+        taskCode: def.code,
+        label,
+        message: `${label}：上游已完成（${before.status} ${before.cur}/${before.tgt}），跳过`,
+      });
+      return;
+    }
 
-    switch (def.mechanism) {
-      case "playground":
-        await runPlayground(ctx, client, def);
+    // 多轮：每轮前查进度，达标即 break；轮间 sleep(WRITE_GAP)
+    const maxRounds = recipe.loop ? 8 : 1;
+    let reported = false;
+    let lastNote = "";
+    for (let round = 0; round < maxRounds; round++) {
+      const p = await taskProgress(client, def);
+      if (isSatisfied(p)) break;
+      const rctx = makeRecipeCtx(ctx, client, round);
+      const out = await recipe.run(rctx);
+      reported = reported || out.reported;
+      if (out.note) lastNote = out.note;
+      if (!out.reported) {
+        // 前置条件不满足（如不在夜猫窗口）：不再空转
+        await emit(ctx, {
+          level: "warn",
+          taskCode: def.code,
+          label,
+          message: `${label}：本轮未上报（${out.note || "条件不满足"}）`,
+        });
         break;
-      case "real_api":
-        await runRealApi(ctx, client, def);
-        break;
-      case "miniprogram_event":
-      case "desktop_event":
-      case "web_event":
-      default:
-        await runEventReport(ctx, client, def);
-        break;
+      }
+      if (round + 1 < maxRounds) await new Promise((r) => setTimeout(r, WRITE_GAP_SEC * 1000));
     }
 
     // 领奖（上游受理后即可领取；失败不视为任务失败）
     await client.claim(def.code, { miniprogram: def.mechanism === "miniprogram_event" }).catch(() => {});
-    await emit(ctx, { level: "ok", taskCode: def.code, label, message: `${label}：已提交` });
+
+    // 回读进度，以「上游真值」判定成败（避免静默成功）
+    const after = await taskProgress(client, def);
+    const moved = after.cur > before.cur || isSatisfied(after);
+    const ok = reported && moved;
+    await emit(ctx, {
+      level: ok ? "ok" : "warn",
+      taskCode: def.code,
+      label,
+      message: ok
+        ? `${label}：完成（进度 ${before.cur}/${before.tgt} → ${after.cur}/${after.tgt}）${
+            lastNote ? " · " + lastNote : ""
+          }`
+        : `${label}：已上报但上游进度未变（${before.cur} → ${after.cur}）${
+            lastNote ? " · " + lastNote : ""
+          }`,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await emit(ctx, { level: "error", taskCode: def.code, label, message: `${label}：失败 ${msg.slice(0, 120)}` });
   }
 }
 
-/** 真实 API 类：发真实模型对话（产生真实服务端状态） */
-async function runRealApi(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
-  const prompts: Record<string, string[]> = {
-    chat_5: ["你好", "今天天气怎么样？", "1+1等于几？", "Python是什么？", "推荐一本好书"],
-    "Model_chat_GLM5.2": ["请用一句话介绍你自己"],
-    black_cat: ["晚上好"],
-    Expert_team_use_3: ["请用一句话介绍团队协作的要点"],
-    create_canvas: ["帮我设计一个简洁的产品介绍画布"],
-    playbook_prompt: ["给我一个写周报的提示词模板"],
-  };
-  const list = prompts[def.code] || [def.label];
-  for (const p of list) {
-    await client.chat(p);
-  }
-  await emit(ctx, {
-    level: "info",
-    taskCode: def.code,
-    label: def.label,
-    message: `${def.label}：已发送 ${list.length} 次真实对话`,
-  });
-}
-
 /**
- * 开学季任务执行（独立接口族）。
- * 流程对齐参考脚本：viewed（激活）→ 类别判据 → claim。
+ * 开学季任务执行。
+ *
+ * share_invite 不走上报配方（保持原样：调 schoolShareComplete）。
+ * 其余开学季任务若在 events.ts 有配方，则走配方；否则回落到
+ * 「viewed 激活 → claim」的最小流程。
  */
 async function runSchoolTask(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
-  // 1) 先 viewed 激活（部分任务需先查看才可完成）
-  await client.schoolViewed(def.code).catch(() => {});
-
-  // 2) 按任务类别触发判据
-  switch (def.code) {
-    case "share_invite":
-      await client.schoolShareComplete().catch(() => {});
-      break;
-    case "chat_3_times":
-      // 和 AI 对话 3 次（真实对话）
-      for (const p of ["你好", "1+1等于几？", "推荐一本好书"]) {
-        await client.chat(p).catch(() => {});
-      }
-      break;
-    case "desktop_chat_1_time":
-      // 桌面端功能体验：非 Windows 环境降级为桌面指纹事件上报
-      await client.reportTaskEvent(def.code, "desktop_event").catch(() => {});
-      break;
-    case "expert_use":
-      await client.reportTaskEvent(def.code, "miniprogram_event").catch(() => {});
-      break;
-    default:
-      break;
+  // share_invite：保持原实现，不引入事件配方
+  if (def.code === "share_invite") {
+    await client.schoolViewed(def.code).catch(() => {});
+    await client.schoolShareComplete().catch(() => {});
+    await client.schoolClaim(def.code).catch(() => {});
+    await emit(ctx, { level: "ok", taskCode: def.code, label: def.label, message: `${def.label}：已提交` });
+    return;
   }
 
-  // 3) 领取奖励
+  // 其余任务若有配方（desktop_chat_1_time / expert_use / chat_3_times / school_season），走配方
+  if (getRecipe(def.code)) {
+    await runOne(ctx, client, def);
+    return;
+  }
+
+  // 无配方：viewed 激活 → claim（明确 warn，不伪成功）
+  await client.schoolViewed(def.code).catch(() => {});
   await client.schoolClaim(def.code).catch(() => {});
-  await emit(ctx, { level: "ok", taskCode: def.code, label: def.label, message: `${def.label}：已提交` });
+  await emit(ctx, {
+    level: "warn",
+    taskCode: def.code,
+    label: def.label,
+    message: `${def.label}：暂无事件配方，仅做 viewed/claim`,
+  });
 }
 
 /** 互动玩法类：纯业务玩法调用（非埋点） */
@@ -335,15 +447,4 @@ async function runPlayground(ctx: RunCtx, client: GrowthClient, def: GrowthTaskD
       await client.buddyInfo().catch(() => {});
       break;
   }
-}
-
-/** 事件上报类（web / 桌面 / 小程序）：按机制构造对应上报体 */
-async function runEventReport(ctx: RunCtx, client: GrowthClient, def: GrowthTaskDef): Promise<void> {
-  await client.reportTaskEvent(def.code, def.mechanism);
-  await emit(ctx, {
-    level: "info",
-    taskCode: def.code,
-    label: def.label,
-    message: `${def.label}：已上报 ${def.mechanism} 事件`,
-  });
 }
