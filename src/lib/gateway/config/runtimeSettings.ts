@@ -27,6 +27,9 @@ export interface RuntimeSettingsShape {
   accountSchedulingMode: "load-balance" | "sequential";
   auditRetentionDays: number; // v3.2.2：操作审计保留天数（默认 90，0 = 永久保留，每小时节流清扫）
   balanceRetentionDays: number; // v3.7.0：余额快照保留天数（默认 365，0 = 永久保留，每小时节流清扫）
+  // v4.9.0：成长中心执行日志保留天数（全局，默认 7；UI 可选 7/30/90）。
+  // 日志表 append-only 永不 UPDATE，仅按此期限删除过期行（0 = 永久保留）。
+  growthLogRetentionDays: number;
   // ---- v4.2.0：SSE 流式保活与上游超时（Task 33 诊断 R1/R2/R6 修复，可热调） ----
   streamStallMs: number; // 上游停滞熔断阈值（默认 180_000；0 = 用默认；转译/透传/聚合三条路径统一）
   upstreamHeadersTimeoutMs: number; // undici 等待响应头超时（默认 300_000）
@@ -50,6 +53,7 @@ const DEFAULTS: RuntimeSettingsShape = {
   accountSchedulingMode: "load-balance",
   auditRetentionDays: 90,
   balanceRetentionDays: 365,
+  growthLogRetentionDays: 7,
   streamStallMs: 180_000,
   upstreamHeadersTimeoutMs: 300_000,
   upstreamBodyTimeoutMs: 600_000,
@@ -166,6 +170,11 @@ function applyRows(rows: Array<{ key: string; value: unknown }>): void {
         case "balanceRetentionDays": {
           const n = Math.floor(Number(row.value));
           merged.balanceRetentionDays = Number.isFinite(n) && n >= 0 ? n : DEFAULTS.balanceRetentionDays;
+          break;
+        }
+        case "growthLogRetentionDays": {
+          const n = Math.floor(Number(row.value));
+          merged.growthLogRetentionDays = Number.isFinite(n) && n >= 0 ? n : DEFAULTS.growthLogRetentionDays;
           break;
         }
         // v4.2.0：SSE 流式保活与上游超时（范围与设置页 PUT 校验一致；0 = 用默认仅 stall 支持语义）

@@ -184,3 +184,90 @@ export async function seedDefaultAdmin(): Promise<SeedAdminResult> {
   g[SEED_ADMIN_KEY] = run;
   return run;
 }
+
+// ---- v4.9.0：已有库的增量建表（幂等）----
+// 背景：ensureDatabaseSchema() 仅处理「空库」（执行 init.sql），已存在的库会被整体跳过，
+// 因此新增表必须走这条显式增量路径，否则老容器升级后 Prisma 查询会报 no such table。
+// 幂等保证：先查 sqlite_master，表已存在则整段跳过（重复重启不重复执行、不报错）。
+const ADDITIVE_TABLES_KEY = "__uag_additive_tables_promise__";
+
+/** 成长中心相关表 DDL（与 prisma/schema.prisma 的 model 定义保持一致） */
+const GROWTH_TABLE_DDL: Array<{ name: string; sql: string }> = [
+  {
+    name: "GrowthAccountState",
+    sql: `CREATE TABLE "GrowthAccountState" (
+      "accountId" TEXT NOT NULL PRIMARY KEY,
+      "providerId" TEXT NOT NULL DEFAULT 'workbuddy',
+      "status" TEXT NOT NULL DEFAULT 'idle',
+      "completedCount" INTEGER NOT NULL DEFAULT 0,
+      "totalCount" INTEGER NOT NULL DEFAULT 0,
+      "groups" TEXT NOT NULL DEFAULT '',
+      "lastRunAt" DATETIME,
+      "lastError" TEXT NOT NULL DEFAULT '',
+      "updatedAt" DATETIME NOT NULL
+    )`,
+  },
+  {
+    name: "GrowthLog",
+    sql: `CREATE TABLE "GrowthLog" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "accountId" TEXT NOT NULL DEFAULT '',
+      "accountName" TEXT NOT NULL DEFAULT '',
+      "runId" TEXT NOT NULL DEFAULT '',
+      "taskCode" TEXT NOT NULL DEFAULT '',
+      "label" TEXT NOT NULL DEFAULT '',
+      "level" TEXT NOT NULL DEFAULT 'info',
+      "message" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  },
+  {
+    name: "GrowthAccountState_status_idx",
+    sql: `CREATE INDEX "GrowthAccountState_status_idx" ON "GrowthAccountState"("status")`,
+  },
+  {
+    name: "GrowthLog_createdAt_idx",
+    sql: `CREATE INDEX "GrowthLog_createdAt_idx" ON "GrowthLog"("createdAt")`,
+  },
+  {
+    name: "GrowthLog_accountId_createdAt_idx",
+    sql: `CREATE INDEX "GrowthLog_accountId_createdAt_idx" ON "GrowthLog"("accountId", "createdAt")`,
+  },
+  {
+    name: "GrowthLog_runId_idx",
+    sql: `CREATE INDEX "GrowthLog_runId_idx" ON "GrowthLog"("runId")`,
+  },
+];
+
+/**
+ * 增量建表（幂等）：逐个检查 sqlite_master，缺少才执行对应 DDL。
+ * 返回本次实际新建的对象名，便于启动日志核对。
+ */
+export async function ensureAdditiveTables(): Promise<string[]> {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const pending = g[ADDITIVE_TABLES_KEY] as Promise<string[]> | undefined;
+  if (pending) return pending;
+
+  const run = (async (): Promise<string[]> => {
+    const created: string[] = [];
+    for (const item of GROWTH_TABLE_DDL) {
+      const kind = item.name.includes("_idx") ? "index" : "table";
+      const rows = (await db.$queryRawUnsafe(
+        `SELECT name FROM sqlite_master WHERE type='${kind}' AND name='${item.name}'`,
+      )) as Array<{ name: string }>;
+      if (rows.length > 0) continue; // 已存在 → 跳过（幂等）
+      await db.$executeRawUnsafe(item.sql);
+      created.push(item.name);
+    }
+    if (created.length > 0) {
+      console.log(`[SchemaInit] additive tables created: ${created.join(", ")}`);
+    }
+    return created;
+  })().catch((err) => {
+    g[ADDITIVE_TABLES_KEY] = undefined; // 失败允许下次重试
+    throw err;
+  });
+
+  g[ADDITIVE_TABLES_KEY] = run;
+  return run;
+}

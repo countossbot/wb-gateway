@@ -177,9 +177,6 @@ CREATE TABLE "ModelPricing" (
     "updatedBy" TEXT NOT NULL DEFAULT 'admin'
 );
 
--- CreateIndex
-CREATE UNIQUE INDEX "ModelPricing_model_key" ON "ModelPricing"("model");
-
 -- CreateTable
 CREATE TABLE "BalanceSnapshot" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -203,6 +200,32 @@ CREATE TABLE "AuditLog" (
     "detail" JSONB,
     "ip" TEXT NOT NULL DEFAULT '',
     "actor" TEXT NOT NULL DEFAULT 'admin',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
+CREATE TABLE "GrowthAccountState" (
+    "accountId" TEXT NOT NULL PRIMARY KEY,
+    "providerId" TEXT NOT NULL DEFAULT 'workbuddy',
+    "status" TEXT NOT NULL DEFAULT 'idle',
+    "completedCount" INTEGER NOT NULL DEFAULT 0,
+    "totalCount" INTEGER NOT NULL DEFAULT 0,
+    "groups" TEXT NOT NULL DEFAULT '',
+    "lastRunAt" DATETIME,
+    "lastError" TEXT NOT NULL DEFAULT '',
+    "updatedAt" DATETIME NOT NULL
+);
+
+-- CreateTable
+CREATE TABLE "GrowthLog" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "accountId" TEXT NOT NULL DEFAULT '',
+    "accountName" TEXT NOT NULL DEFAULT '',
+    "runId" TEXT NOT NULL DEFAULT '',
+    "taskCode" TEXT NOT NULL DEFAULT '',
+    "label" TEXT NOT NULL DEFAULT '',
+    "level" TEXT NOT NULL DEFAULT 'info',
+    "message" TEXT NOT NULL,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -261,6 +284,9 @@ CREATE INDEX "UsageDaily_day_idx" ON "UsageDaily"("day");
 CREATE UNIQUE INDEX "UsageDaily_day_providerId_apiKeyName_model_key" ON "UsageDaily"("day", "providerId", "apiKeyName", "model");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "ModelPricing_model_key" ON "ModelPricing"("model");
+
+-- CreateIndex
 CREATE INDEX "BalanceSnapshot_day_idx" ON "BalanceSnapshot"("day");
 
 -- CreateIndex
@@ -274,4 +300,16 @@ CREATE INDEX "AuditLog_createdAt_idx" ON "AuditLog"("createdAt");
 
 -- CreateIndex
 CREATE INDEX "AuditLog_entity_action_idx" ON "AuditLog"("entity", "action");
+
+-- CreateIndex
+CREATE INDEX "GrowthAccountState_status_idx" ON "GrowthAccountState"("status");
+
+-- CreateIndex
+CREATE INDEX "GrowthLog_createdAt_idx" ON "GrowthLog"("createdAt");
+
+-- CreateIndex
+CREATE INDEX "GrowthLog_accountId_createdAt_idx" ON "GrowthLog"("accountId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "GrowthLog_runId_idx" ON "GrowthLog"("runId");
 

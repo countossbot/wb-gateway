@@ -269,3 +269,43 @@ model AuditLog {
   @@index([createdAt])
   @@index([entity, action])
 }
+
+// ---- 成长中心账号状态（v4.9.0 手动执行，无定时调度）----
+// 一个 CN workbuddy 账号一行。status 三态：
+//   idle    未开始 / partial 已重置 → 可选
+//   running 执行中（全局互斥锁持有）
+//   done    本次全部完成 → 永久锁定，防再次手动执行
+// partial（未全部完成）当天可重试；次日 0 点（Asia/Shanghai）由清理任务重置为 idle。
+model GrowthAccountState {
+  accountId      String   @id // = Account.id
+  providerId     String   @default("workbuddy") // 恒为 workbuddy（CN）；intl 不参与
+  status         String   @default("idle") // idle | running | done
+  completedCount Int      @default(0) // 上游真值：已完成项数
+  totalCount     Int      @default(0) // 本次勾选组内的任务总数
+  groups         String   @default("") // 逗号分隔的勾选组快照，便于展示本次口径
+  lastRunAt      DateTime?
+  lastError      String   @default("")
+  updatedAt      DateTime @updatedAt
+
+  @@index([status])
+}
+
+// ---- 成长中心执行日志（append-only 增量，永不 UPDATE）----
+// 每条 = 一个任务步骤事件；前端按 id 增量拉取（sinceId）实时显示。
+// 保留期由 SystemSetting.growthLogRetentionDays 控制（7/30/90，默认 7），
+// 由调度器的清理 tick 删除过期行（仅清日志，不做成长任务调度）。
+model GrowthLog {
+  id         Int      @id @default(autoincrement())
+  accountId  String   @default("") // 执行账号（Account.id）
+  accountName String  @default("") // 账号展示名（快照，便于账号删除后仍可读）
+  runId      String   @default("") // 一次「立即执行」的批次 id
+  taskCode   String   @default("") // 上游 task_code（批次级事件为空）
+  label      String   @default("") // 任务中文名
+  level      String   @default("info") // info | ok | warn | error
+  message    String
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([accountId, createdAt])
+  @@index([runId])
+}

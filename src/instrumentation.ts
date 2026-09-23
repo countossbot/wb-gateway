@@ -10,8 +10,10 @@ export async function register() {
   // ---- v4.0.0：schema 初始化与默认管理员播种（必须最前：后续 refreshRuntimeSettings /
   // ensureSystemSecrets / startScheduler 均依赖业务表存在；空库/新卷首启即自动就绪） ----
   try {
-    const { ensureDatabaseSchema, seedDefaultAdmin } = await import("@/lib/schemaInit");
+    const { ensureDatabaseSchema, ensureAdditiveTables, seedDefaultAdmin } = await import("@/lib/schemaInit");
     const schema = await ensureDatabaseSchema();
+    // v4.9.0：已有库的新增表（ensureDatabaseSchema 只处理空库），幂等
+    await ensureAdditiveTables();
     if (schema.initialized) {
       console.log(`[Instrumentation] database schema initialized (${schema.reason})`);
     }
