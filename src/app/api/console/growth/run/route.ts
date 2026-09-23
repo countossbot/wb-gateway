@@ -123,6 +123,8 @@ export async function POST(request: NextRequest) {
             accountId: account.id,
             accountName: account.name || account.id,
             accessToken: token,
+            // 上游 userId（Keycloak UUID）：事件信封与指纹必须用它，账号 ID 上游不认
+            uid: String((account.credentials as { userId?: unknown } | null)?.userId || ""),
             groups,
             sink: (e) => send(e),
           });
