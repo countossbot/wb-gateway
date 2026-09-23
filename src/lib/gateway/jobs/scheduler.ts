@@ -162,6 +162,8 @@ let lastCooldownSweepAt = 0; // v3.2.3：过期冷却残留清扫节流（每小
 const COOLDOWN_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 let lastBalancePurgeAt = 0; // v3.7.0：余额快照保留期清扫节流（每小时一次）
 const BALANCE_PURGE_INTERVAL_MS = 60 * 60 * 1000;
+let lastGrowthPurgeAt = 0; // v4.9.0：成长中心日志清扫 + partial 重置节流（每小时一次）
+const GROWTH_PURGE_INTERVAL_MS = 60 * 60 * 1000;
 let lastWalCheckpointAt = 0; // v3.9.3：WAL 主动 checkpoint 节流（每小时无条件一次）
 const WAL_CHECKPOINT_INTERVAL_MS = 60 * 60 * 1000;
 let lastWalThresholdCheckAt = 0; // v3.9.3：WAL 阈值检查节流（每分钟一次，防抖）
@@ -350,6 +352,23 @@ async function tick(): Promise<void> {
         if (purged > 0) console.log(`[Scheduler] Purged ${purged} expired audit log(s) (retention ${settings.auditRetentionDays}d)`);
       } catch (e) {
         console.error("[Scheduler] audit purge failed:", e);
+      }
+    }
+
+    // v4.9.0：成长中心（每小时一次节流，与审计/余额清扫同一 tick）
+    //   1) 日志保留期清扫（growthLogRetentionDays=0 表示永久保留，跳过）
+    //   2) 次日 0 点重置：partial → idle（done 保持锁定，防重复手动执行）
+    // 注意：此处仅做数据维护，成长任务本身无定时调度（按需求手动执行）。
+    if (now.getTime() - lastGrowthPurgeAt >= GROWTH_PURGE_INTERVAL_MS) {
+      lastGrowthPurgeAt = now.getTime();
+      try {
+        const { pruneGrowthLogs, resetStalePartial } = await import("../growth/state");
+        const purged = await pruneGrowthLogs();
+        if (purged > 0)
+          console.log(`[Scheduler] Purged ${purged} expired growth log(s) (retention ${settings.growthLogRetentionDays}d)`);
+        await resetStalePartial();
+      } catch (e) {
+        console.error("[Scheduler] growth maintenance failed:", e);
       }
     }
 

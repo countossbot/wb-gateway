@@ -6,6 +6,7 @@
 // 3. 所有方法必须防御式：网络异常只返回 false / null，绝不向调用方抛错，也不打印 token。
 
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
+import { desktopFingerprint } from "./derive";
 
 /** 桌面端客户端版本号（与上游校验的 UA 一致，升级只需改这一行） */
 export const GROWTH_CLIENT_VERSION = "5.5.6";
@@ -43,10 +44,17 @@ export interface GrowthRequestOpts {
  */
 export class GrowthClient {
   private readonly token: string;
+  /** 账号 uid：用于派生稳定的桌面指纹（同账号跨次执行保持一致） */
+  readonly uid: string;
+  /** 账号昵称：参与指纹派生，仅用于上报体，不外发 */
+  readonly nick: string;
 
-  constructor(accessToken: string) {
+  constructor(accessToken: string, uid = "", nick = "") {
     this.token = accessToken;
+    this.uid = uid;
+    this.nick = nick;
   }
+
 
   /** 组装请求头；不打印任何 token 内容 */
   private headers(opts: GrowthRequestOpts = {}): Record<string, string> {
@@ -214,8 +222,60 @@ export class GrowthClient {
   }
 
   /** 查询已获得的徽章列表 */
-  /** 查询已获得的徽章列表 */
   async badges(opts: GrowthRequestOpts = {}): Promise<unknown> {
     return this.requestJson(`${this.base(opts)}/v2/activity/growth/badges`, { method: "GET" }, opts);
+  }
+
+  /** 查询 Buddy 信息（挂件状态等） */
+  async buddyInfo(opts: GrowthRequestOpts = {}): Promise<unknown> {
+    return this.requestJson(`${this.base(opts)}/v2/activity/growth/buddy/info`, { method: "GET" }, opts);
+  }
+
+  /** 查询连签热度图（补签卡判据） */
+  async heatmap(opts: GrowthRequestOpts = {}): Promise<unknown> {
+    return this.requestJson(`${this.base(opts)}/v2/activity/growth/heatmap`, { method: "GET" }, opts);
+  }
+
+  /**
+   * 发起一次真实模型对话（real_api 类任务的真实判据）。
+   * 上游按会话计入 chat_5 / Model_chat_GLM5.2 等任务进度。
+   */
+  async chat(prompt: string, opts: GrowthRequestOpts = {}): Promise<boolean> {
+    const json = await this.requestJson(
+      `${this.base(opts)}/console/chat/completions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [{ role: "user", content: prompt }],
+          stream: false,
+        }),
+      },
+      { ...opts, timeoutMs: opts.timeoutMs ?? 60_000 },
+    );
+    return this.isOk(json) || json !== null;
+  }
+
+  /**
+   * 按机制上报任务事件（web_event / desktop_event / miniprogram_event）。
+   * 桌面端事件注入 desktopFingerprint，小程序事件走 miniprogram 头。
+   */
+  async reportTaskEvent(
+    code: string,
+    mechanism: string,
+    opts: GrowthRequestOpts = {},
+  ): Promise<boolean> {
+    const fn = desktopFingerprint(this.uid, this.nick);
+    const event = {
+      event: code,
+      task_code: code,
+      ts: Date.now(),
+      ...(mechanism === "desktop_event" ? fn : {}),
+    };
+    return this.reportEvent([event], {
+      ...opts,
+      miniprogram: mechanism === "miniprogram_event",
+      // 事件上报统一走 codebuddy.cn（与参考实现一致）
+      schoolDomain: true,
+    });
   }
 }
