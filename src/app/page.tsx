@@ -294,15 +294,7 @@ export default function Home() {
           initialModel={logsModel}
         />
       )}
-      {tab === "settings" && (
-        <SettingsModule
-          canWrite={userRole !== "VIEWER"}
-          onPasswordChanged={() => {
-            clearSessionToken();
-            setPhase("login");
-          }}
-        />
-      )}
+      {tab === "settings" && <SettingsModule onPasswordChanged={() => { clearSessionToken(); setPhase("login"); }} />}
     </ConsoleShell>
   );
 }
