@@ -5,8 +5,9 @@
 // 2. 上游对 User-Agent 有硬校验：缺失或格式不对会直接拒绝，所以 UA 统一由版本常量拼装。
 // 3. 所有方法必须防御式：网络异常只返回 false / null，绝不向调用方抛错，也不打印 token。
 
+import { createHash, randomUUID } from "node:crypto";
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
-import { desktopFingerprint, deriveId } from "./derive";
+import { deriveId } from "./derive";
 
 /** 桌面端客户端版本号（与上游校验的 UA 一致，升级只需改这一行） */
 export const GROWTH_CLIENT_VERSION = "5.5.6";
@@ -176,29 +177,80 @@ export class GrowthClient {
     return this.isOk(json);
   }
 
-  /** 批量上报埋点事件（web_event / desktop_event / miniprogram_event 都走这里） */
   /**
-   * 事件上报（POST /v2/report，载荷为**事件信封数组**）。
-   * 上游要求每个元素自带完整信封（eventCode 等必填），否则返回 10001。
+   * 通道 1：CLOUD 桌面通道上报（对齐脚本 report()，workbuddy_daily.py L566-591）。
+   *
+   * 端点：`CN_BASE + /v2/report`（POST）。
+   * 载荷：**每个事件一个完整信封**组成的数组；信封字段先按 L570-579 铺满，
+   * 再用事件字段覆盖同名字段（脚本 L580 的 `dict(env, **e)` 等价语义）。
+   * 必填字段缺失上游会返回 10001，所以这里绝不允许裁剪信封。
    */
-  async reportEvent(events: Array<Record<string, unknown>>, opts: GrowthRequestOpts = {}): Promise<boolean> {
-    const url = `${SCHOOL_BASE}/v2/report`;
-    const json = await this.requestJson(url, { method: "POST", body: JSON.stringify(events) }, opts);
-    return this.isOk(json);
+  async reportCloud(events: Array<Record<string, unknown>>): Promise<boolean> {
+    const arr = events.map((e) => ({ ...desktopCloudEnvelope(this.uid, this.nick), ...e }));
+    return this.postReport(CN_BASE, arr);
   }
 
-  /** 构造一个完整上报信封（字段对齐桌面端埋点） */
-  private reportEnvelope(eventCode: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
-    const fp = desktopFingerprint(this.uid, this.nick);
-    return {
-      timestamp: Date.now(),
-      reportDelay: 0,
+  /**
+   * 通道 2：web 域单事件上报（对齐脚本 report_web_event()，L2207-2219）。
+   *
+   * 端点：`CN_BASE + /v2/report`（POST）。
+   * 载荷：`{"common": {...}, "events": [ev]}` —— **不是裸数组**，这是 web 域与桌面域最大的结构差异。
+   * common 字段照 L2215-2219；事件 ev 照 L2210-2214（自带 eventCode / 页面元素信息）。
+   * 注意：web 域 machineId 用 derive_id(uid, "webmachine")，与桌面域的 "machine" 不同。
+   */
+  async reportWeb(events: Array<Record<string, unknown>>): Promise<boolean> {
+    const machineId = deriveId(this.uid, "webmachine");
+    const common = {
       userId: this.uid,
       userNickname: this.nick,
-      eventCode,
-      ...fp,
-      ...extra,
+      ideName: "web",
+      ideType: "web",
+      machineId,
+      mode: "CLOUD",
+      userAgent: "Mozilla/5.0",
+      os: "Win32",
+      timezone: "Asia/Shanghai",
     };
+    // 脚本每次只上报一个事件，这里按同一信封形状批量补齐，保持语义一致
+    const now = Date.now();
+    const evs = events.map((e) => ({
+      timestamp: now,
+      reportDelay: 0,
+      pageURL: "",
+      elementId: "",
+      elementName: "",
+      os: "Win32",
+      arch: "",
+      osVersion: "10.0",
+      userAgent: SHORT_UA_WEB,
+      machineId,
+      userId: this.uid,
+      userNickname: this.nick,
+      ...e,
+    }));
+    return this.postReport(CN_BASE, { common, events: evs });
+  }
+
+  /**
+   * 通道 3：小程序埋点上报（对齐 mp_base() L1585-1593 + mp_report() L1649-1665）。
+   *
+   * 端点：`https://www.codebuddy.cn/v2/report`（脚本 L1663 写死，非 workbuddy.cn）。
+   * 请求头：MP_REPORT_HEADERS（L1572-1576）四项 + 既有 Authorization / X-User-Id。
+   * 载荷：mp 信封数组（**不是** {"common","events"} 结构，与 web 域不同）。
+   * 注意 machineId 用 **md5** 派生（L1581），不能用 deriveId 的 sha256 变体。
+   */
+  async reportMp(events: Array<Record<string, unknown>>): Promise<boolean> {
+    const base = mpBase(this.uid, this.nick);
+    const arr = events.map((e) => ({ ...base, ...e }));
+    return this.postReport(SCHOOL_BASE, arr, {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Client-Product": "workbuddy-mp",
+      "X-Client-Version": "2.4.0",
+      "X-Client-Platform": "mp-weixin",
+      "X-Platform": "wechatmp",
+      ...(this.uid ? { "X-User-Id": this.uid } : {}),
+    });
   }
 
   // ---------------- 互动玩法（playground）薄封装 ----------------
@@ -346,18 +398,241 @@ export class GrowthClient {
   }
 
   /**
-   * 按机制上报任务事件（web_event / desktop_event / miniprogram_event）。
-   * 事件信封由 reportEnvelope() 构造（含桌面指纹）；小程序事件额外带 miniprogram 头。
+   * 通道 4：发起一次**真实对话**（对齐脚本 webchat()，L591-619）。
+   *
+   * 脚本语义：先建会话，再向 /console/chat/completions 发流式请求，返回会话 id 与拼接后的回复文本。
+   * meta 走请求体 `_meta` 字段（脚本 L597-598），T3 的 Expert_team_use_3 依赖其中
+   * `codebuddy.ai.growthEvent` + `promptRequestId` 携带 ExpertActualUse JSON。
+   *
+   * @returns `{ conversationId, responseId, requestId, content }`；任一步失败返回 null（防御式，不抛错）。
+   */
+  async webchat(
+    convName: string,
+    prompt: string,
+    meta?: Record<string, unknown>,
+    model: string = GROWTH_CHAT_MODEL,
+  ): Promise<WebchatResult | null> {
+    // 1) 先建会话（脚本 L592-594）：名称后缀 8 位随机串保证唯一
+    const convUrl = `${CN_BASE}/console/webchat/conversations`;
+    const convJson = await this.requestJson(
+      convUrl,
+      {
+        method: "POST",
+        body: JSON.stringify({ name: `${convName}-${randomSuffix(8)}` }),
+      },
+      {},
+    );
+    const conversationId =
+      (convJson as { data?: { conversationId?: string } } | null)?.data?.conversationId ?? "";
+    // requestId 由客户端生成并随 meta 上报，后续事件用它关联这次对话
+    const requestId = randomUuid();
+
+    // 2) 发流式对话请求（脚本 L595-602）
+    const payload: Record<string, unknown> = {
+      messages: [{ role: "user", content: prompt }],
+      model,
+      stream: true,
+      conversationId,
+      requestId,
+    };
+    if (meta) payload._meta = meta;
+
+    let content = "";
+    try {
+      const resp = await fetchWithProxy(
+        `${CN_BASE}/console/chat/completions`,
+        {
+          method: "POST",
+          headers: { ...this.headers({}), Accept: "text/event-stream" },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS_FOR_CHAT),
+        },
+      );
+      if (!resp.ok || !resp.body) return null;
+      // 复用 chat() 同款 SSE 读取逻辑：必须把流读完，[DONE] 即收尾
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          content += extractSseText(buf);
+          if (buf.includes("[DONE]")) break;
+        }
+      } finally {
+        // 异常安全：无论正常结束还是提前 break 都释放连接
+        await reader.cancel().catch(() => {});
+      }
+    } catch {
+      return null;
+    }
+    return { conversationId, responseId: requestId, requestId, content };
+  }
+
+  /**
+   * 统一 POST /v2/report；网络异常 / 非 2xx / 解析失败一律返回 false，绝不抛错。
+   * extraHeaders 用于小程序通道覆盖/追加协议头。
+   */
+  private async postReport(
+    baseUrl: string,
+    body: unknown,
+    extraHeaders: Record<string, string> = {},
+  ): Promise<boolean> {
+    try {
+      const json = await this.requestJson(
+        `${baseUrl}/v2/report`,
+        {
+          method: "POST",
+          headers: { ...this.headers({}), ...extraHeaders },
+          body: JSON.stringify(body),
+        },
+        {},
+      );
+      if (json === null) return false;
+      return this.isOk(json);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * @deprecated T2 已将上报拆为 reportCloud / reportWeb / reportMp 三条通道，
+   * 本方法仅为兼容 runner.ts 现有调用点而保留（薄包装，转发到桌面 CLOUD 通道）。
+   * T3 会改写 runner.ts 的调用点，届时可删除本方法。
    */
   async reportTaskEvent(
     code: string,
     mechanism: string,
-    opts: GrowthRequestOpts = {},
+    _opts: GrowthRequestOpts = {},
   ): Promise<boolean> {
-    const env = this.reportEnvelope(code, { task_code: code });
-    return this.reportEvent([env], {
-      ...opts,
-      miniprogram: mechanism === "miniprogram_event",
-    });
+    // 旧实现按机制分域名，现统一走桌面上报通道，事件字段保持 task_code 语义
+    return this.reportCloud([{ eventCode: code, task_code: code, mechanism }]);
   }
+}
+
+/** webchat() 返回值：会话 id + 关联 id + 拼接后的回复文本 */
+export interface WebchatResult {
+  conversationId: string;
+  /** 响应 id（与 requestId 同源，供后续事件构造使用） */
+  responseId: string;
+  /** 客户端生成的请求 id，脚本用 meta.promptRequestId 关联 */
+  requestId: string;
+  /** SSE 拼接后的完整回复文本 */
+  content: string;
+}
+
+/** 脚本 report()/report_web_event() 使用的短 UA 字面量（L568 / L2213） */
+const SHORT_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 WorkBuddy/5.5.4";
+
+/** 对话请求超时（脚本 timeout=90） */
+const DEFAULT_TIMEOUT_MS_FOR_CHAT = 90_000;
+
+/**
+ * CLOUD 桌面通道信封（脚本 report() L570-579），字段逐项对齐：
+ * 写死的 os/arch/releaseDate/commit 等是上游指纹校验的一部分，勿改。
+ */
+function desktopCloudEnvelope(uid: string, nick: string): Record<string, unknown> {
+  return {
+    timestamp: Date.now(),
+    reportDelay: 0,
+    userId: uid,
+    userNickname: nick,
+    ideName: "WorkBuddy",
+    ideType: "WorkBuddy",
+    ideVersion: GROWTH_CLIENT_VERSION,
+    machineId: deriveId(uid, "machine"),
+    sessionId: deriveId(uid, "session"),
+    mode: "CLOUD",
+    userAgent: SHORT_UA,
+    os: "Win32",
+    arch: "x64",
+    osVersion: "10.0.26220",
+    timezone: "Asia/Shanghai",
+    product: "SaaS",
+    releaseDate: 1789036585355,
+    commit: "5f9692923c93033111c51ad7b003eb80204a9b75",
+    extName: "workbuddy-desktop",
+    extVersion: GROWTH_CLIENT_VERSION,
+    cpuCores: 20,
+    memorySize: 24,
+  };
+}
+
+/**
+ * 小程序通道信封基础字段（脚本 mp_base() L1585-1593）。
+ * machineId 用 md5("mp:<uid>") 切成 UUID 形态（L1579-1581），与 deriveId 的 sha256 不同。
+ */
+function mpBase(uid: string, nick: string): Record<string, unknown> {
+  return {
+    timestamp: Date.now(),
+    ideType: "WorkBuddy_MP",
+    ideVersion: "2.4.0",
+    extName: "workbuddy-mp",
+    extVersion: "2.4.0",
+    product: "SaaS",
+    ideName: "wx_app_cloud",
+    platform: "mini_program",
+    os: "windows",
+    osVersion: "11",
+    arch: "x64",
+    machineId: mpMachineId(uid),
+    timezone: "Asia/Shanghai",
+    userId: uid,
+    userNickname: nick,
+  };
+}
+
+/**
+ * 脚本 mp_machine_id()（L1579-1581）：md5("mp:<uid>") 的 hex 按 8-4-4-4-12 切分成 UUID 形态。
+ * 必须用 md5（不能用 deriveId 的 sha256），否则上游指纹不匹配。
+ */
+function mpMachineId(uid: string): string {
+  const hex = createHash("md5").update(`mp:${uid}`).digest("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join("-");
+}
+
+/** 脚本 report_web_event() 使用的 web UA 字面量（L2213，无 WorkBuddy 后缀） */
+const SHORT_UA_WEB = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+
+/** 生成 n 位随机小写字母数字串（替代脚本的 uuid4()[:8] 会话名后缀） */
+function randomSuffix(n: number): string {
+  return Math.random().toString(36).slice(2, 2 + n);
+}
+
+/** 生成 UUID v4（替代脚本 uuid.uuid4()，用于请求 id） */
+function randomUuid(): string {
+  return randomUUID();
+}
+
+/**
+ * 从 SSE 增量缓冲中抽取文本片段（复用 chat() 的流式解析语义）。
+ * 只处理形如 `data: {...}` 的行，解析失败/非 JSON 一律跳过，绝不抛错。
+ */
+function extractSseText(buf: string): string {
+  const out: string[] = [];
+  for (const line of buf.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("data:")) continue;
+    const raw = t.slice(5).trim();
+    if (!raw || raw === "[DONE]") continue;
+    try {
+      const j = JSON.parse(raw) as {
+        choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>;
+      };
+      const c = j.choices?.[0]?.delta?.content ?? j.choices?.[0]?.message?.content;
+      if (typeof c === "string") out.push(c);
+    } catch {
+      // 半行/坏行：跳过即可，下一轮补齐
+    }
+  }
+  return out.join("");
 }
