@@ -59,10 +59,40 @@ export async function POST(request: NextRequest) {
     return fail(`已有账号正在执行（${running.accountId}），请等待完成`);
   }
 
-  const token = String(
-    (account.credentials as { accessToken?: unknown } | null)?.accessToken || "",
-  );
+  // 取 workbuddy 账号凭证（成长任务用它作上游 Bearer，与主代理链路同一份凭据）
+  let token = String((account.credentials as { accessToken?: unknown } | null)?.accessToken || "");
   if (!token) return fail("该账号缺少 accessToken，请在「API 中转」页重新登录");
+
+  // 预刷新：上游对失效 token 直接返回 401（APISIX），而成长客户端不做续签。
+  // 复用 provider 既有 refreshAccessToken（含 CN/INTL 端点差异 + 写回 Account.credentials），
+  // 避免在此重复实现一套刷新逻辑。
+  try {
+    const { getConfig } = await import("@/lib/gateway/config/configService");
+    const { WorkBuddyProvider } = await import("@/lib/gateway/providers/workbuddy");
+    const cfg = await getConfig();
+    const matched = cfg.providers.find((p) => p.id === "workbuddy");
+    if (matched) {
+      const adapter = new WorkBuddyProvider({
+        id: matched.id,
+        name: matched.name,
+        type: matched.type,
+        config: matched.config,
+      });
+      const refreshed = await adapter.refreshAccessToken({
+        id: account.id,
+        name: account.name,
+        accessToken: token,
+        refreshToken: String(
+          (account.credentials as { refreshToken?: unknown } | null)?.refreshToken || "",
+        ),
+      });
+      if (typeof refreshed === "string" && refreshed) {
+        token = refreshed; // 上游已续签并写回 DB
+      }
+    }
+  } catch {
+    // 续签失败不阻断：沿用旧 token，上游若拒绝会在执行日志中体现
+  }
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({

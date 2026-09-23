@@ -39,7 +39,7 @@ import {
   LoadingBlock,
   PageHeader,
 } from "@/components/console/ui";
-import { apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
+import { apiGet, apiPost, apiPut, authHeaders, errMessage } from "@/lib/console/api";
 import { COMMON_TIMEZONES, CRON_PRESETS, relativeTime } from "@/lib/console/format";
 import { cn } from "@/lib/utils";
 import type { CheckinCandidate, JobRunResult, JobsConfig, JobsData } from "@/lib/console/types";
@@ -493,11 +493,18 @@ function GrowthCard({ fmtTime }: { fmtTime: (v: string) => string }) {
       { key: `s-start-${Date.now()}`, level: "info", message: `开始执行：${selected.name}` },
     ]);
     try {
+      // 双通道会话：Bearer（localStorage 会话令牌）+ Cookie 兜底。
+      // 原生 fetch 不带 apiGet 的自动附头，必须显式加 authHeaders + credentials，
+      // 否则预览面板（无 Cookie）或 Cookie 不达时会被网关判为未登录。
       const res = await fetch("/api/console/growth/run", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        credentials: "same-origin",
         body: JSON.stringify({ accountId: selected.id, groups }),
       });
+      if (res.status === 401) {
+        throw new Error("控制台会话已过期，请重新登录后再执行");
+      }
       if (!res.ok || !res.body) {
         // 非 2xx：尽量读出 { ok, error } 包里的中文错误
         const text = await res.text().catch(() => "");
