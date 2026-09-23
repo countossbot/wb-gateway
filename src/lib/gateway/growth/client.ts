@@ -6,7 +6,7 @@
 // 3. 所有方法必须防御式：网络异常只返回 false / null，绝不向调用方抛错，也不打印 token。
 
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
-import { desktopFingerprint } from "./derive";
+import { desktopFingerprint, deriveId } from "./derive";
 
 /** 桌面端客户端版本号（与上游校验的 UA 一致，升级只需改这一行） */
 export const GROWTH_CLIENT_VERSION = "5.5.6";
@@ -20,6 +20,9 @@ const SCHOOL_BASE = "https://www.codebuddy.cn";
 
 /** 默认超时（毫秒） */
 const DEFAULT_TIMEOUT_MS = 20_000;
+
+/** 默认对话模型：上游 /console/chat/completions 必须显式带 model，否则 11102 */
+export const GROWTH_CHAT_MODEL = "glm-5.2";
 
 /** 统一的 User-Agent：WorkBuddy/<客户端版本> WorkBuddy/<客户端版本> CLI/<CLI 版本> */
 function buildUserAgent(): string {
@@ -120,10 +123,17 @@ export class GrowthClient {
     return this.requestJson(url, { method: "GET" }, opts);
   }
 
-  /** 领取（接受）任务；返回上游 code === 0 */
+  /**
+   * 接受任务（上游为**批量**端点：POST /tasks/accept + {"task_codes":[...]}）。
+   * 逐任务调用亦可（单元素数组），返回值表示本次调用是否成功（已接受也返回 code:0）。
+   */
   async accept(code: string, opts: GrowthRequestOpts = {}): Promise<boolean> {
-    const url = `${this.base(opts)}/v2/activity/growth/tasks/${encodeURIComponent(code)}/accept`;
-    const json = await this.requestJson(url, { method: "POST", body: "{}" }, opts);
+    const url = `${this.base(opts)}/v2/activity/growth/tasks/accept`;
+    const json = await this.requestJson(
+      url,
+      { method: "POST", body: JSON.stringify({ task_codes: [code] }) },
+      opts,
+    );
     return this.isOk(json);
   }
 
@@ -135,10 +145,28 @@ export class GrowthClient {
   }
 
   /** 批量上报埋点事件（web_event / desktop_event / miniprogram_event 都走这里） */
-  async reportEvent(body: unknown, opts: GrowthRequestOpts = {}): Promise<boolean> {
+  /**
+   * 事件上报（POST /v2/report，载荷为**事件信封数组**）。
+   * 上游要求每个元素自带完整信封（eventCode 等必填），否则返回 10001。
+   */
+  async reportEvent(events: Array<Record<string, unknown>>, opts: GrowthRequestOpts = {}): Promise<boolean> {
     const url = `${SCHOOL_BASE}/v2/report`;
-    const json = await this.requestJson(url, { method: "POST", body: JSON.stringify(body ?? {}) }, opts);
+    const json = await this.requestJson(url, { method: "POST", body: JSON.stringify(events) }, opts);
     return this.isOk(json);
+  }
+
+  /** 构造一个完整上报信封（字段对齐桌面端埋点） */
+  private reportEnvelope(eventCode: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    const fp = desktopFingerprint(this.uid, this.nick);
+    return {
+      timestamp: Date.now(),
+      reportDelay: 0,
+      userId: this.uid,
+      userNickname: this.nick,
+      eventCode,
+      ...fp,
+      ...extra,
+    };
   }
 
   // ---------------- 互动玩法（playground）薄封装 ----------------
@@ -238,44 +266,66 @@ export class GrowthClient {
 
   /**
    * 发起一次真实模型对话（real_api 类任务的真实判据）。
-   * 上游按会话计入 chat_5 / Model_chat_GLM5.2 等任务进度。
+   *
+   * 上游约束（实测）：
+   *   - stream 必须为 true（false 直接返回 11101 "Non-stream chat request is currently not supported"）
+   *   - 必须带 model，否则 11102 "model [] service info not found"
+   *   - 响应为 SSE，需读到 data: [DONE] 才算完成
    */
   async chat(prompt: string, opts: GrowthRequestOpts = {}): Promise<boolean> {
-    const json = await this.requestJson(
-      `${this.base(opts)}/console/chat/completions`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          messages: [{ role: "user", content: prompt }],
-          stream: false,
-        }),
-      },
-      { ...opts, timeoutMs: opts.timeoutMs ?? 60_000 },
-    );
-    return this.isOk(json) || json !== null;
+    const url = `${this.base(opts)}/console/chat/completions`;
+    const body = JSON.stringify({
+      messages: [{ role: "user", content: prompt }],
+      model: GROWTH_CHAT_MODEL,
+      stream: true,
+      conversationId: `conv-${deriveId(this.uid || "anon", "conv")}`,
+    });
+    try {
+      const resp = await fetchWithProxy(
+        url,
+        {
+          method: "POST",
+          headers: { ...this.headers(opts), Accept: "text/event-stream" },
+          body,
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 90_000),
+        },
+        null,
+      );
+      if (!resp.ok || !resp.body) return false;
+      // 必须把流读完（上游按会话完整性计入任务进度）
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          if (buf.includes("[DONE]")) break;
+        }
+      } finally {
+        // 异常安全：无论正常结束还是提前 break 都释放连接
+        await reader.cancel().catch(() => {});
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
    * 按机制上报任务事件（web_event / desktop_event / miniprogram_event）。
-   * 桌面端事件注入 desktopFingerprint，小程序事件走 miniprogram 头。
+   * 事件信封由 reportEnvelope() 构造（含桌面指纹）；小程序事件额外带 miniprogram 头。
    */
   async reportTaskEvent(
     code: string,
     mechanism: string,
     opts: GrowthRequestOpts = {},
   ): Promise<boolean> {
-    const fn = desktopFingerprint(this.uid, this.nick);
-    const event = {
-      event: code,
-      task_code: code,
-      ts: Date.now(),
-      ...(mechanism === "desktop_event" ? fn : {}),
-    };
-    return this.reportEvent([event], {
+    const env = this.reportEnvelope(code, { task_code: code });
+    return this.reportEvent([env], {
       ...opts,
       miniprogram: mechanism === "miniprogram_event",
-      // 事件上报统一走 codebuddy.cn（与参考实现一致）
-      schoolDomain: true,
     });
   }
 }
