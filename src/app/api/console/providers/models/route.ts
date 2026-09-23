@@ -11,6 +11,7 @@ import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { fetchWithProxy } from "@/lib/gateway/proxy/proxyAgent";
 import { WorkBuddyProvider } from "@/lib/gateway/providers/workbuddy";
+import { getConfig } from "@/lib/gateway/config/configService";
 import type { UpstreamModelDetail } from "@/lib/gateway/core/types";
 
 export const dynamic = "force-dynamic";
@@ -39,6 +40,34 @@ const cache = new Map<string, { payload: ModelsPayload; at: number }>();
 // v4.8.x：模型目录只来自上游实时拉取；内置 DEFAULT_ROUTES 预设不再作为下拉数据源。
 function unsupportedType(type: string): never {
   throw new Error(`provider type "${type}" 无上游模型目录端点（模型列表仅来自实时拉取）`);
+}
+
+// ---- provider.config + Account 表凭证合并 ----
+// 网关主流程用 getConfig() 加载（config.accounts 已由 Account 表按 providerId 合并）；
+// 本路由若直接读 db.provider.config，适配器 getAccounts() 会为空，导致
+// workbuddy 实时拉取报「无可用账户」。此处对齐主流程的装配方式。
+async function loadProviderConfigWithAccounts(
+  providerId: string,
+  raw: unknown,
+): Promise<Record<string, unknown>> {
+  const cfg = { ...((raw as Record<string, unknown>) || {}) };
+  try {
+    const full = await getConfig();
+    const matched = full.providers.find((p) => p.id === providerId);
+    if (matched?.config && typeof matched.config === "object") {
+      // 保留 DB 行上的显式字段，但以 getConfig() 的合并结果为准（含 accounts）
+      Object.assign(cfg, matched.config as Record<string, unknown>);
+    }
+    const accounts = (full as { accounts?: unknown }).accounts;
+    if (cfg.accounts === undefined && Array.isArray(accounts)) {
+      cfg.accounts = accounts.filter(
+        (a) => (a as { providerId?: string })?.providerId === providerId,
+      );
+    }
+  } catch {
+    // getConfig() 失败不阻塞：退回原始 config（上游会如实报「无可用账户」）
+  }
+  return cfg;
 }
 
 // ---- 上游实时拉取（openai / anthropic） ----
@@ -100,12 +129,15 @@ export async function GET(request: NextRequest) {
   const provider = await db.provider.findUnique({ where: { id: providerId } });
   if (!provider) return fail(`提供商「${providerId}」不存在`);
   const type = provider.type;
-  const cfg = { ...((provider.config as Record<string, unknown>) || {}) };
+  // config.accounts 由 getConfig() 从 Account 表合并注入；直接读 db.provider 拿不到，
+  // 会导致适配器 getAccounts() 为空 → 报「无可用账户」。此处按区域匹配注入。
+  const cfg = await loadProviderConfigWithAccounts(provider.id, provider.config);
 
   let payload: ModelsPayload;
   try {
   if (type === "workbuddy") {
-    // WorkBuddy：/v3/config 实时拉取；失败如实报错（不再降级内置目录）。
+    // WorkBuddy：/v3/config 实时拉取（CN www.workbuddy.ai / INTL copilot.tencent.com，
+    // 按 config.region 选端点 + UA）；失败如实报错（不降级内置目录）。
     try {
       const adapter = new WorkBuddyProvider({ id: provider.id, name: provider.name, type: provider.type, config: cfg });
       const { models, details, url, allCount } = await adapter.listUpstreamModels();
