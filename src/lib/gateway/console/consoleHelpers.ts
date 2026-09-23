@@ -1,6 +1,6 @@
 // 控制台 API 共享工具 —— 会话鉴权、凭据掩码/回填契约（与 /admin/api/config 同一套约定）、
 // 统一响应包 { ok, data?, error? }。
-import { resolveSession, hasPermission, type SessionPrincipal } from "../session/session";
+import { resolveSession, type SessionPrincipal } from "../session/session";
 import { getRuntimeSettingsAsync } from "../config/runtimeSettings";
 import { db } from "@/lib/db";
 
@@ -21,19 +21,6 @@ export async function requireSessionOr401(request: Request): Promise<SessionPrin
   const session = await resolveSession(request);
   if (!session) return fail("未登录或会话已过期", 401);
   return session;
-}
-
-// v4.9.0：轻量 RBAC —— 会话有效 + 具备指定权限；失败返回 401/403 Response。
-export async function requirePermission(
-  request: Request,
-  permission: string
-): Promise<SessionPrincipal | Response> {
-  const maybe = await requireSessionOr401(request);
-  if (maybe instanceof Response || maybe === null) return maybe ?? fail("未登录或会话已过期", 401);
-  if (!hasPermission(maybe.role, permission)) {
-    return fail("权限不足", 403);
-  }
-  return maybe;
 }
 
 // ---- 凭据掩码 / 回填契约（验收要求三.6，与 configService.mergeSecrets 同一约定） ----
