@@ -3,7 +3,7 @@
 import { NextRequest } from "next/server";
 import { randomBytes } from "node:crypto";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail, maskSecret } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail, maskSecret } from "@/lib/gateway/console/consoleHelpers";
 import { invalidateConfigChanged } from "@/lib/gateway/config/configService";
 import { localDayKey } from "@/lib/gateway/config/requestLog";
 import { loadPricingMap, estimateRowCost } from "@/lib/console/pricing";
@@ -26,7 +26,7 @@ function sanitizeBudget(raw: unknown): number {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "key.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const keys = await db.virtualKey.findMany({ orderBy: { createdAt: "asc" } });
 
@@ -122,7 +122,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await requirePermission(request, "key.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     name?: string;
@@ -165,7 +165,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const session = await requirePermission(request, "key.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const body = (await request.json().catch(() => ({}))) as {
     id?: string;
@@ -220,7 +220,7 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const session = await requirePermission(request, "key.write");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const id = request.nextUrl.searchParams.get("id");
   if (!id) return fail("缺少 key id");

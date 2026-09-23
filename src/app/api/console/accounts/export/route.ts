@@ -3,14 +3,14 @@
 // 脱敏导出：凭据置空 + redacted: true 标记，用于分享；系统导入时识别该标记并拒绝。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok, fail } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 
 export const dynamic = "force-dynamic";
 
 const SECRET_FIELDS = ["accessToken", "refreshToken", "apiKey", "token", "cookie", "jwtToken"];
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "provider.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const mode = request.nextUrl.searchParams.get("mode") === "redacted" ? "redacted" : "full";
@@ -81,7 +81,7 @@ export async function GET(request: NextRequest) {
 
 // HEAD 用于前端预检（返回导出条数；完整导出前的二次确认弹窗展示）
 export async function HEAD(request: NextRequest) {
-  const session = await requirePermission(request, "provider.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
   const count = await db.account.count();
   return new Response(null, {

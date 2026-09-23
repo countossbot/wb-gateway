@@ -8,7 +8,7 @@
 // v4.3.2：slo_hours=1|6|24（服务质量 SLO 窗口，默认 24；非白名单值回落 24）——延迟分位数/
 // 成功率/流式占比/延迟分布直方图（RequestLog 聚合）。
 import { NextRequest } from "next/server";
-import { requirePermission, ok } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
 import {
   computeModelHealthData,
   computeSloData,
@@ -20,7 +20,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "usage.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const mhDays = normalizeWindowDays(request.nextUrl.searchParams.get("mh_days"));

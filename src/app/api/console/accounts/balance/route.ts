@@ -6,7 +6,7 @@
 // 非 workbuddy 家族（openai/anthropic）无余额概念 → 不查询，前端显示「—」。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { requirePermission, ok } from "@/lib/gateway/console/consoleHelpers";
+import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
 import { getConfig } from "@/lib/gateway/config/configService";
 import { getProviderFleet, invalidateBalanceCache } from "@/lib/gateway/core/fleet";
 
@@ -68,7 +68,7 @@ async function queryBalance(
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requirePermission(request, "provider.read");
+  const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
 
   const config = await getConfig();
