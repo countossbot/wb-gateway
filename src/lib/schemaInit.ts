@@ -200,8 +200,6 @@ export interface AdminUserMigrationResult {
   reason: string;
 }
 
-const VIRTUAL_KEY_OWNER_COLUMN = "ownerUserId";
-
 const ADMIN_USER_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: "displayName", ddl: `ALTER TABLE "AdminUser" ADD COLUMN "displayName" TEXT` },
   { name: "role", ddl: `ALTER TABLE "AdminUser" ADD COLUMN "role" TEXT NOT NULL DEFAULT 'VIEWER'` },
@@ -270,15 +268,6 @@ export async function migrateAdminUserColumns(): Promise<AdminUserMigrationResul
       if (rescued > 0) {
         console.warn("[SchemaInit] AdminUser migrated: no active ADMIN found, promoted the earliest enabled user");
       }
-    }
-
-    // v4.9.0 Task 6：VirtualKey.ownerUserId 列补齐（幂等）
-    const vkColumns = (await db.$queryRawUnsafe(`PRAGMA table_info("VirtualKey")`)) as Array<{ name: string }>;
-    const vkNames = new Set(vkColumns.map((c) => c.name));
-    if (!vkNames.has(VIRTUAL_KEY_OWNER_COLUMN)) {
-      await db.$executeRawUnsafe(`ALTER TABLE "VirtualKey" ADD COLUMN "ownerUserId" TEXT`);
-      columnsAdded.push(VIRTUAL_KEY_OWNER_COLUMN);
-      console.log(`[SchemaInit] VirtualKey migrated: added column ${VIRTUAL_KEY_OWNER_COLUMN}`);
     }
 
     return {
