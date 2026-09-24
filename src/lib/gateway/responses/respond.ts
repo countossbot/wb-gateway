@@ -57,6 +57,7 @@ interface ChatChoiceMessage {
   role?: string;
   content?: string | null;
   reasoning_content?: string | null;
+  reasoning?: string | null;
   tool_calls?: Array<{
     id?: string;
     type?: string;
@@ -260,6 +261,8 @@ interface StreamToolCallAccumulator {
   chatId: string;
   name: string;
   arguments: string;
+  outputIndex?: number; // Responses 流内 output_index（首片段 added 时分配）
+  item?: Record<string, unknown>; // added 事件里已发出的 item（done 时复用同一 id/name）
 }
 
 /** SSE 计量发射器：统一 sequence_number 分配 + 流完整性计量（events / bytes / last_event） */
@@ -344,13 +347,20 @@ export function chatSseToResponsesStream(
   let logged = false;
 
   // 流内累积状态机
+  let nextOutputIndex = 0; // 动态 output_index 分配器：reasoning/message/tool 按实际出现顺序编号
+  let reasoningItemOpen = false; // 思维链 reasoning 项已 added（delta.reasoning_content → 标准 reasoning item）
+  let reasoningItemId = `rs_${randSuffix()}`;
+  let reasoningOutputIndex = -1;
+  let reasoningText = "";
+  let reasoningPartAdded = false;
   let messageItemOpen = false; // 正文 message 项已 added
+  let messageOutputIndex = -1; // 正文项的 output_index（reasoning 先出现时不再是 0）
   let messageItemId = `msg_${randSuffix()}`;
   let fullText = "";
-  let usage: Record<string, unknown> | null = null;
   const toolAccumulators = new Map<number, StreamToolCallAccumulator>();
   const toolOrder: number[] = [];
   let textDoneEmitted = false;
+  let usage: Record<string, unknown> | null = null; // 上游 usage 帧（finalize 时映射）
 
   const meter = createSseMeter((bytes) => {
     try {
@@ -370,8 +380,9 @@ export function chatSseToResponsesStream(
   const openMessageItem = (): void => {
     if (messageItemOpen) return;
     messageItemOpen = true;
+    messageOutputIndex = nextOutputIndex++;
     emitEvent("response.output_item.added", {
-      output_index: 0,
+      output_index: messageOutputIndex,
       item: {
         type: "message",
         id: messageItemId,
@@ -382,29 +393,76 @@ export function chatSseToResponsesStream(
     });
     emitEvent("response.content_part.added", {
       item_id: messageItemId,
-      output_index: 0,
+      output_index: messageOutputIndex,
       content_index: 0,
       part: { type: "output_text", text: "", annotations: [] },
     });
   };
 
+  /** 思维链增量 → 标准 Responses reasoning item（added → summary_text.delta → done） */
+  const openReasoningItem = (): void => {
+    if (reasoningItemOpen) return;
+    reasoningItemOpen = true;
+    reasoningOutputIndex = nextOutputIndex++;
+    emitEvent("response.output_item.added", {
+      output_index: reasoningOutputIndex,
+      item: { type: "reasoning", id: reasoningItemId, summary: [], content: [] },
+    });
+  };
+  const ensureReasoningPart = (): void => {
+    if (!reasoningItemOpen || reasoningPartAdded) return;
+    reasoningPartAdded = true;
+    emitEvent("response.reasoning_summary_part.added", {
+      item_id: reasoningItemId,
+      output_index: reasoningOutputIndex,
+      summary_index: 0,
+      part: { type: "summary_text", text: "" },
+    });
+  };
+  const closeReasoningItem = (): void => {
+    if (!reasoningItemOpen) return;
+    reasoningItemOpen = false;
+    if (reasoningPartAdded) {
+      emitEvent("response.reasoning_summary_text.done", {
+        item_id: reasoningItemId,
+        output_index: reasoningOutputIndex,
+        summary_index: 0,
+        text: reasoningText,
+      });
+      emitEvent("response.reasoning_summary_part.done", {
+        item_id: reasoningItemId,
+        output_index: reasoningOutputIndex,
+        summary_index: 0,
+        part: { type: "summary_text", text: reasoningText },
+      });
+    }
+    emitEvent("response.output_item.done", {
+      output_index: reasoningOutputIndex,
+      item: {
+        type: "reasoning",
+        id: reasoningItemId,
+        summary: reasoningPartAdded ? [{ type: "summary_text", text: reasoningText }] : [],
+        content: [],
+      },
+    });
+  };
   const closeMessageItem = (): void => {
     if (!messageItemOpen || textDoneEmitted) return;
     textDoneEmitted = true;
     emitEvent("response.output_text.done", {
       item_id: messageItemId,
-      output_index: 0,
+      output_index: messageOutputIndex,
       content_index: 0,
       text: fullText,
     });
     emitEvent("response.content_part.done", {
       item_id: messageItemId,
-      output_index: 0,
+      output_index: messageOutputIndex,
       content_index: 0,
       part: { type: "output_text", text: fullText, annotations: [] },
     });
     emitEvent("response.output_item.done", {
-      output_index: 0,
+      output_index: messageOutputIndex,
       item: {
         type: "message",
         id: messageItemId,
@@ -419,20 +477,35 @@ export function chatSseToResponsesStream(
   const finalizeSuccess = (): void => {
     if (ended || terminal !== null) return;
     closeMessageItem();
-    // 工具调用项：以完整 item 形态在流尾输出（added → done 背靠背，合法事件序列）
-    let outputIndex = messageItemOpen ? 1 : 0;
+    closeReasoningItem();
+    // 工具调用项：added 已在首片段到达时发出，这里补 args.done + item.done（标准增量事件序列）
     for (const idx of toolOrder) {
       const acc = toolAccumulators.get(idx)!;
-      const item = toolCallToResponsesItem(
-        { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: acc.arguments || "{}" } },
+      const args = acc.arguments || "{}";
+      const item = acc.item ?? toolCallToResponsesItem(
+        { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: args } },
         ctx
       );
-      emitEvent("response.output_item.added", { output_index: outputIndex, item: { ...item, status: "in_progress" } });
-      emitEvent("response.output_item.done", { output_index: outputIndex, item });
-      outputIndex++;
+      emitEvent("response.function_call_arguments.done", {
+        item_id: item.id,
+        output_index: acc.outputIndex,
+        arguments: args,
+      });
+      emitEvent("response.output_item.done", {
+        output_index: acc.outputIndex,
+        item: { ...item, function: { ...(item as any).function, arguments: args }, status: "completed" },
+      });
     }
     const incompleteReason = incompleteReasonFromFinish(finishReason);
     const output: Array<Record<string, unknown>> = [];
+    if (reasoningText || reasoningPartAdded) {
+      output.push({
+        type: "reasoning",
+        id: reasoningItemId,
+        summary: reasoningPartAdded ? [{ type: "summary_text", text: reasoningText }] : [],
+        content: [],
+      });
+    }
     if (messageItemOpen) {
       output.push({
         type: "message",
@@ -444,12 +517,12 @@ export function chatSseToResponsesStream(
     }
     for (const idx of toolOrder) {
       const acc = toolAccumulators.get(idx)!;
-      output.push(
-        toolCallToResponsesItem(
-          { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: acc.arguments || "{}" } },
-          ctx
-        )
+      const args = acc.arguments || "{}";
+      const item = acc.item ?? toolCallToResponsesItem(
+        { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: args } },
+        ctx
       );
+      output.push({ ...item, function: { ...(item as any).function, arguments: args }, status: "completed" });
     }
     const response = responsesSkeleton(ctx, incompleteReason ? "incomplete" : "completed");
     if (incompleteReason) response.incomplete_details = { reason: incompleteReason };
@@ -465,9 +538,18 @@ export function chatSseToResponsesStream(
     if (ended || terminal !== null) return;
     upstreamError = message;
     closeMessageItem(); // 文本项生命周期闭合（已发出的 delta 序列有始有终）
+    closeReasoningItem();
     const response = responsesSkeleton(ctx, "failed");
     response.error = { code, message };
     const output: Array<Record<string, unknown>> = [];
+    if (reasoningText || reasoningPartAdded) {
+      output.push({
+        type: "reasoning",
+        id: reasoningItemId,
+        summary: reasoningPartAdded ? [{ type: "summary_text", text: reasoningText }] : [],
+        content: [],
+      });
+    }
     if (messageItemOpen) {
       output.push({
         type: "message",
@@ -545,6 +627,7 @@ export function chatSseToResponsesStream(
         delta?: {
           content?: string | null;
           reasoning_content?: string | null;
+          reasoning?: string | null;
           tool_calls?: Array<{
             index?: number;
             id?: string;
@@ -576,12 +659,30 @@ export function chatSseToResponsesStream(
     }
     if (choice?.delta) {
       const delta = choice.delta;
+      // 思维链增量（DeepSeek reasoning_content / OpenCode、MiMo reasoning）→ 标准 reasoning item 增量事件
+      const reasoningDelta =
+        typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0
+          ? delta.reasoning_content
+          : typeof delta.reasoning === "string" && delta.reasoning.length > 0
+            ? delta.reasoning
+            : "";
+      if (reasoningDelta) {
+        openReasoningItem();
+        ensureReasoningPart();
+        reasoningText += reasoningDelta;
+        emitEvent("response.reasoning_summary_text.delta", {
+          item_id: reasoningItemId,
+          output_index: reasoningOutputIndex,
+          summary_index: 0,
+          delta: reasoningDelta,
+        });
+      }
       if (typeof delta.content === "string" && delta.content.length > 0) {
         openMessageItem();
         fullText += delta.content;
         emitEvent("response.output_text.delta", {
           item_id: messageItemId,
-          output_index: 0,
+          output_index: messageOutputIndex,
           content_index: 0,
           delta: delta.content,
         });
@@ -598,22 +699,55 @@ export function chatSseToResponsesStream(
             };
             toolAccumulators.set(idx, acc);
             toolOrder.push(idx);
+            // 首片段即产出 added 事件 + 后续逐片段 arguments.delta（客户端可实时组装工具调用）
+            acc.outputIndex = nextOutputIndex++;
+            acc.item = toolCallToResponsesItem(
+              { id: acc.chatId, type: "function", function: { name: "", arguments: "" } },
+              ctx
+            );
+            emitEvent("response.output_item.added", {
+              output_index: acc.outputIndex,
+              item: { ...acc.item, status: "in_progress" },
+            });
           }
           if (fragment.id && fragment.id !== acc.chatId) acc.chatId = fragment.id;
-          if (fragment.function?.name) acc.name += fragment.function.name;
-          if (fragment.function?.arguments) acc.arguments += fragment.function.arguments;
+          if (fragment.function?.name) {
+            acc.name += fragment.function.name;
+            if (acc.item) {
+              (acc.item as any).function = { ...(acc.item as any).function, name: acc.name };
+            }
+          }
+          if (fragment.function?.arguments) {
+            acc.arguments += fragment.function.arguments;
+            emitEvent("response.function_call_arguments.delta", {
+              item_id: (acc.item as any).id,
+              output_index: acc.outputIndex,
+              delta: fragment.function.arguments,
+            });
+          }
         }
       }
-      // delta.reasoning_content：流式思维链无 Responses 增量事件等价物 —— 忽略（completed 前不掺正文）
     } else if (choice?.message) {
       // 整段 message 帧（部分兼容上游不产 delta、单帧回完整消息）：仅在尚无增量时采纳，避免双计
+      const rcText = typeof choice.message.reasoning_content === "string" ? choice.message.reasoning_content : "";
+      if (rcText && !reasoningPartAdded && reasoningText === "") {
+        openReasoningItem();
+        ensureReasoningPart();
+        reasoningText = rcText;
+        emitEvent("response.reasoning_summary_text.delta", {
+          item_id: reasoningItemId,
+          output_index: reasoningOutputIndex,
+          summary_index: 0,
+          delta: rcText,
+        });
+      }
       const text = typeof choice.message.content === "string" ? choice.message.content : "";
       if (text.length > 0 && fullText === "") {
         openMessageItem();
         fullText = text;
         emitEvent("response.output_text.delta", {
           item_id: messageItemId,
-          output_index: 0,
+          output_index: messageOutputIndex,
           content_index: 0,
           delta: text,
         });
@@ -621,12 +755,18 @@ export function chatSseToResponsesStream(
       if (Array.isArray(choice.message.tool_calls) && toolOrder.length === 0) {
         for (const tc of choice.message.tool_calls) {
           const idx = toolAccumulators.size;
-          toolAccumulators.set(idx, {
+          const acc: StreamToolCallAccumulator = {
             chatId: tc.id || `call_${randSuffix()}`,
             name: typeof tc.function?.name === "string" ? tc.function.name : "",
             arguments: typeof tc.function?.arguments === "string" ? tc.function.arguments : "{}",
-          });
+          };
+          toolAccumulators.set(idx, acc);
           toolOrder.push(idx);
+          acc.outputIndex = nextOutputIndex++;
+          acc.item = toolCallToResponsesItem(
+            { id: acc.chatId, type: "function", function: { name: acc.name, arguments: acc.arguments } },
+            ctx
+          );
         }
       }
     }
