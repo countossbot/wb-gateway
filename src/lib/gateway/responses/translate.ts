@@ -280,7 +280,12 @@ export function translateResponsesInput(input: unknown, instructions: unknown): 
       continue;
     }
     const item = raw as Record<string, unknown>;
-    const type = typeof item.type === "string" ? item.type : "";
+ const rawType = typeof item.type === "string" ? item.type : "";
+ // 规范容错：Responses message item 允许省略 type（默认 "message"）。
+ // 缺 type 但带 role/content 的 item 若落入 default 分支会被整条丢弃，
+ // 空会话再触发兜底合成空 user 消息，导致上游 400（WorkBuddy 11133/extError 1214）。
+ const type =
+   rawType === "" && ("role" in item || "content" in item) ? "message" : rawType;
     const callId =
       typeof item.call_id === "string" && item.call_id
         ? item.call_id
@@ -412,6 +417,12 @@ export function translateResponsesInput(input: unknown, instructions: unknown): 
   // 保证返回的 messages 数组长度 >=1 ，从根源杜绝传给上游 OpenAI Chat Completions 时出现 "zero messages" 400。
   if (messages.length === 0) {
     console.warn('[Responses] input translated to zero messages; synthesizing minimal user message ""');
+    messages.push({ role: 'user', content: '' });
+  } else if (messages.every((m) => m.role === "system")) {
+    // 仅 system（如 instructions 存在但 input 全部无法翻译）→ 上游 Chat Completions
+    // 以 400「参数被模型供应商拒绝」（WorkBuddy 11133/extError 1214）回绝；
+    // 补一条空 user 消息保证会话结构完整（上游已验证接受 [system, user("")]）。
+    console.warn('[Responses] only system message(s) translated; appending minimal user message ""');
     messages.push({ role: 'user', content: '' });
   }
 
