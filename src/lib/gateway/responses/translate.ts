@@ -250,6 +250,8 @@ function fallbackCallId(prefix: string, index: number): string {
  *   - local_shell_call_output → role:"tool"（call_id 对应）
  *   - reasoning → 跳过（加密思维链无 Chat 等价物；不产生配对缺口）
  *   - item_reference → 400（客户端可修复：回放完整 item 而非引用）
+ *
+ * 鲁棒性保证（grok2api 风格）：无论如何处理，最终返回的 messages 数组长度 ≥ 1（空场景合成 {role:'user', content:''}）。
  */
 export function translateResponsesInput(input: unknown, instructions: unknown): ChatMessage[] {
   const messages: ChatMessage[] = [];
@@ -403,6 +405,14 @@ export function translateResponsesInput(input: unknown, instructions: unknown): 
     console.warn(
       `[Responses] dropped ${reasoningDropped} reasoning item(s) from history (no Chat Completions equivalent; pairing unaffected)`
     );
+  }
+
+  // grok2api-style robustness (参考 responses_input.go + responses_history.go)：
+  // 无论 input 是空数组、仅含 reasoning、或所有 message 内容为空，均在此合成一条最小的 user 消息，
+  // 保证返回的 messages 数组长度 >=1 ，从根源杜绝传给上游 OpenAI Chat Completions 时出现 "zero messages" 400。
+  if (messages.length === 0) {
+    console.warn('[Responses] input translated to zero messages; synthesizing minimal user message ""');
+    messages.push({ role: 'user', content: '' });
   }
 
   return messages;
@@ -590,8 +600,9 @@ export interface TranslatedRequest {
  * Responses 请求 → Chat Completions 请求体（入口编排：tools 剥离 → tool_choice 防御降级 →
  * input 转译 → repairToolCallSequence 规范形态修复 → 采样参数映射）。
  *
- * 抛 HttpError(400) 的情形严格限定为「客户端可自行修复且有替代路径」：
- * input 缺失 / 转译后消息为空 / item_reference 引用 / previous_response_id（路由层守卫）。
+ * 按 grok2api 风格重构：
+ * - 明确 400 只用于客户端可自行修复的错误（缺失 input、item_reference、previous_response_id）
+ * - 转译后零消息不再 400，而是由 translateResponsesInput 内部合成兜底
  */
 export function translateResponsesRequest(body: Record<string, unknown>): TranslatedRequest {
   const input = body.input !== undefined ? body.input : body.prompt; // prompt 为旧版字段兜底
@@ -603,14 +614,8 @@ export function translateResponsesRequest(body: Record<string, unknown>): Transl
   const toolTranslation = translateResponsesTools(body.tools);
   // 2. tool_choice 防御降级（无剩余工具时强制形态 → "auto"）
   const toolChoice = translateResponsesToolChoice(body.tool_choice, toolTranslation);
-  // 3. input items → messages（switch 全类型覆盖）
+  // 3. input items → messages（内部保证非空）
   let messages = translateResponsesInput(input, body.instructions);
-  if (messages.length === 0) {
-    throw new HttpError(
-      'Invalid request: "input" translated to zero messages (at least one message is required).',
-      400
-    );
-  }
   // 4. 统一修复通道 → 规范形态（严格上游 11148 隐式契约）
   const repaired = repairToolCallSequence(messages);
   messages = repaired.messages;
@@ -620,12 +625,10 @@ export function translateResponsesRequest(body: Record<string, unknown>): Transl
     model: typeof body.model === "string" ? body.model : "deepseek-v4.1-flash",
     messages,
   };
-
   if (toolTranslation.tools) chatBody.tools = toolTranslation.tools;
   if (toolChoice !== undefined) chatBody.tool_choice = toolChoice;
   if (body.stream === true) {
     chatBody.stream = true;
-    // 上游 usage 帧依赖 stream_options（真实上游；mock 恒发 usage 帧不受影响）
     chatBody.stream_options = { include_usage: true };
   }
   if (typeof body.temperature === "number") chatBody.temperature = body.temperature;
@@ -634,11 +637,13 @@ export function translateResponsesRequest(body: Record<string, unknown>): Transl
     chatBody.max_tokens = body.max_output_tokens;
   }
   if (typeof body.parallel_tool_calls === "boolean") chatBody.parallel_tool_calls = body.parallel_tool_calls;
-  // Responses reasoning:{effort} → chat reasoning_effort（o 系/推理模型上游识别）
+
+  // Responses reasoning:{effort} → chat reasoning_effort
   const reasoning = body.reasoning as Record<string, unknown> | undefined;
   if (reasoning && typeof reasoning === "object" && typeof reasoning.effort === "string") {
     chatBody.reasoning_effort = reasoning.effort;
   }
+
   // Responses text.format → chat response_format
   const text = body.text as Record<string, unknown> | undefined;
   if (text && typeof text === "object" && text.format && typeof text.format === "object") {
@@ -656,6 +661,7 @@ export function translateResponsesRequest(body: Record<string, unknown>): Transl
       };
     }
   }
+
   if (body.background === true) {
     console.warn("[Responses] background=true is not supported by this gateway — request executed synchronously");
   }
