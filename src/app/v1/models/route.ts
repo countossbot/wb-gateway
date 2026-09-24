@@ -1,5 +1,4 @@
-// GET /v1/models —— 模型列表（OpenAI 兼容）。有启用路由就只用路由；一条都没有才用默认列表。
-// 不读 getConfig().routes：backfillMissingRoutes 会把 DEFAULT_ROUTES 补进那份对象。
+// GET /v1/models —— 模型列表接口（OpenAI 兼容目录结构）。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { DEFAULT_ROUTES } from "@/lib/gateway/config/configService";
@@ -12,12 +11,25 @@ export async function GET(request: NextRequest) {
   const auth = await requireGatewayAuth(request);
   if (!auth.ok) return auth.response;
 
+  // 1. 先取 DB 中已启用、且有候选的模型路由（优先）
   const rows = await db.modelRoute.findMany({
     where: { enabled: true, candidates: { some: { enabled: true } } },
     select: { model: true },
     orderBy: { id: "asc" },
   });
-  const configuredModels = rows.length > 0 ? rows.map((row) => row.model) : Object.keys(DEFAULT_ROUTES);
+
+  // 2. 再取 DEFAULT_ROUTES 的全部键
+  const defaults = Object.keys(DEFAULT_ROUTES);
+
+  // 3. 去重合并：DB 路由在前，默认列表补齐缺失项
+  const seen = new Set<string>();
+  const configuredModels: string[] = [];
+  for (const m of [...rows.map((row) => row.model), ...defaults]) {
+    if (!seen.has(m)) {
+      seen.add(m);
+      configuredModels.push(m);
+    }
+  }
 
   return new Response(
     JSON.stringify({
@@ -32,6 +44,6 @@ export async function GET(request: NextRequest) {
     {
       status: 200,
       headers: { "Content-Type": "application/json", ...corsHeadersFor(request) },
-    }
+    },
   );
 }
