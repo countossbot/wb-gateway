@@ -88,23 +88,30 @@ export function translateResponsesTools(rawTools: unknown): TranslatedTools {
       const name = typeof tool.name === "string" ? tool.name : "";
 
       if (type === "function") {
-        // Responses function 工具为扁平形态 {type,name,description,parameters} → chat 嵌套形态
-        if (!name) {
+        // 扁平 {type,name,description,parameters}，或 Chat 嵌套 {type,function:{name,...}}。
+        // 只读顶层 name 会把嵌套工具当成无名丢掉（X-Gateway-Dropped-Tools: function(unnamed)）。
+        const nested = tool.function && typeof tool.function === "object"
+          ? (tool.function as Record<string, unknown>)
+          : undefined;
+        const fnName = name || (typeof nested?.name === "string" ? nested.name : "");
+        if (!fnName) {
           console.warn('[Responses] dropping function tool without a name (client-fixable)');
           dropped.push("function(unnamed)");
           continue;
         }
-        functionToolNames.add(name);
+        functionToolNames.add(fnName);
+        const description = typeof tool.description === "string"
+          ? tool.description
+          : typeof nested?.description === "string" ? nested.description : "";
+        const parameters =
+          tool.parameters && typeof tool.parameters === "object"
+            ? (tool.parameters as Record<string, unknown>)
+            : nested?.parameters && typeof nested.parameters === "object"
+              ? (nested.parameters as Record<string, unknown>)
+              : { type: "object", properties: {} };
         tools.push({
           type: "function",
-          function: {
-            name,
-            description: typeof tool.description === "string" ? tool.description : "",
-            parameters:
-              tool.parameters && typeof tool.parameters === "object"
-                ? (tool.parameters as Record<string, unknown>)
-                : { type: "object", properties: {} },
-          },
+          function: { name: fnName, description, parameters },
         });
         continue;
       }
@@ -154,8 +161,9 @@ export function translateResponsesTools(rawTools: unknown): TranslatedTools {
 
 /**
  * Responses tool_choice → Chat Completions tool_choice。
- * 防御：剥离后请求不再有任何工具时，强制形态（"required" 或指定函数对象）降级为 "auto"，
- * 避免「无工具请求 + 强制 tool_choice」这一非法形态再次触发上游 400。
+ * 指定函数不转成对象：WorkBuddy 等上游 tool_choice 是 string，对象会 11101。
+ * 只保留被点名的工具并改为 "required"（接受对象的上游同样接受这个字符串）。
+ * 剥离后已无工具时，强制形态降级为 "auto"。
  */
 export function translateResponsesToolChoice(
   rawChoice: unknown,
@@ -182,9 +190,14 @@ export function translateResponsesToolChoice(
   if (typeof rawChoice === "object") {
     const choice = rawChoice as Record<string, unknown>;
     const type = typeof choice.type === "string" ? choice.type : "";
-    const name = typeof choice.name === "string" ? choice.name : "";
+    const nested = choice.function && typeof choice.function === "object"
+      ? (choice.function as Record<string, unknown>)
+      : undefined;
+    const name =
+      (typeof choice.name === "string" && choice.name) ||
+      (typeof nested?.name === "string" ? nested.name : "");
 
-    // 指定函数对象的强制形态
+    // 指定函数：上游 tool_choice 只接受 string。只留该工具 + "required"。
     if (type === "function" || type === "custom") {
       if (!hasTools) {
         console.warn(
@@ -201,7 +214,11 @@ export function translateResponsesToolChoice(
         );
         return "auto";
       }
-      return { type: "function", function: { name } };
+      translated.tools = translated.tools!.filter((t) => {
+        const fn = t.function;
+        return !!fn && typeof fn === "object" && (fn as Record<string, unknown>).name === name;
+      });
+      return "required";
     }
 
     // {type:"local_shell"} / {type:"web_search"} 等服务端工具引用：强制形态降级
