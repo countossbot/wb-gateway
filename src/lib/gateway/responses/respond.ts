@@ -17,7 +17,7 @@
 //   直接区分「网关没发终点」「发完被中间层吃掉」还是「客户端自身断开」。
 //   事件序列：response.created → response.in_progress → output_item.added → content_part.added →
 //   output_text.delta* → output_text.done → content_part.done → output_item.done →
-//   response.completed（工具调用项在流尾以完整 item 形态 added → done 背靠背输出）。
+//   response.completed（function_call 在工具名到达后 added，arguments 增量跟随，流尾 done 带齐 name/arguments）。
 
 import { sseHeaders } from "../http/headers";
 
@@ -261,8 +261,11 @@ interface StreamToolCallAccumulator {
   chatId: string;
   name: string;
   arguments: string;
-  outputIndex?: number; // Responses 流内 output_index（首片段 added 时分配）
-  item?: Record<string, unknown>; // added 事件里已发出的 item（done 时复用同一 id/name）
+  /** 工具名到达前缓存的 arguments 片段，added 之后按原序补发 delta */
+  pendingArgDeltas: string[];
+  addedEmitted?: boolean;
+  outputIndex?: number;
+  item?: Record<string, unknown>;
 }
 
 /** SSE 计量发射器：统一 sequence_number 分配 + 流完整性计量（events / bytes / last_event） */
@@ -373,6 +376,48 @@ export function chatSseToResponsesStream(
     meter.event(eventType, payload);
   };
 
+  /**
+   * 工具名已知后才发 output_item.added。
+   * 首个 delta 经常只有 id，name 在后续片段；用空名立刻建 item 时
+   * toolCallToResponsesItem 会把 name 回落成 "tool"，客户端按这个名字找工具，调用全部失败。
+   */
+  const openStreamToolItem = (acc: StreamToolCallAccumulator): void => {
+    if (acc.addedEmitted || !acc.name) return;
+    acc.outputIndex = nextOutputIndex++;
+    const item = toolCallToResponsesItem(
+      { id: acc.chatId, type: "function", function: { name: acc.name, arguments: "" } },
+      ctx
+    );
+    item.status = "in_progress";
+    acc.item = item;
+    acc.addedEmitted = true;
+    emitEvent("response.output_item.added", {
+      output_index: acc.outputIndex,
+      item,
+    });
+    const pending = acc.pendingArgDeltas;
+    acc.pendingArgDeltas = [];
+    for (const delta of pending) {
+      emitEvent("response.function_call_arguments.delta", {
+        item_id: item.id,
+        output_index: acc.outputIndex,
+        delta,
+      });
+    }
+  };
+
+  /** done / completed 用累积后的 name + arguments 重建 Responses item，并复用已发出的 id */
+  const completedStreamToolItem = (acc: StreamToolCallAccumulator): Record<string, unknown> => {
+    const args = acc.arguments || "{}";
+    const item = toolCallToResponsesItem(
+      { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: args } },
+      ctx
+    );
+    if (typeof acc.item?.id === "string") item.id = acc.item.id;
+    item.status = "completed";
+    return item;
+  };
+
   // ---- 终点事件 ----
   /** terminal 状态：null = 尚未发出任何终点（幂等护栏兼观测字段） */
   let terminal: "response.completed" | "response.incomplete" | "response.failed" | null = null;
@@ -478,14 +523,14 @@ export function chatSseToResponsesStream(
     if (ended || terminal !== null) return;
     closeMessageItem();
     closeReasoningItem();
-    // 工具调用项：added 已在首片段到达时发出，这里补 args.done + item.done（标准增量事件序列）
+    // 工具名到达时已发 added；这里补 arguments.done + item.done。字段只用 Responses 的 name/arguments。
+    const completedTools: Array<Record<string, unknown>> = [];
     for (const idx of toolOrder) {
       const acc = toolAccumulators.get(idx)!;
+      if (!acc.name) acc.name = "tool";
+      openStreamToolItem(acc);
       const args = acc.arguments || "{}";
-      const item = acc.item ?? toolCallToResponsesItem(
-        { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: args } },
-        ctx
-      );
+      const item = completedStreamToolItem(acc);
       emitEvent("response.function_call_arguments.done", {
         item_id: item.id,
         output_index: acc.outputIndex,
@@ -493,8 +538,10 @@ export function chatSseToResponsesStream(
       });
       emitEvent("response.output_item.done", {
         output_index: acc.outputIndex,
-        item: { ...item, function: { ...(item as any).function, arguments: args }, status: "completed" },
+        item,
       });
+      acc.item = item;
+      completedTools.push(item);
     }
     const incompleteReason = incompleteReasonFromFinish(finishReason);
     const output: Array<Record<string, unknown>> = [];
@@ -515,15 +562,7 @@ export function chatSseToResponsesStream(
         content: [{ type: "output_text", text: fullText, annotations: [] }],
       });
     }
-    for (const idx of toolOrder) {
-      const acc = toolAccumulators.get(idx)!;
-      const args = acc.arguments || "{}";
-      const item = acc.item ?? toolCallToResponsesItem(
-        { id: acc.chatId, type: "function", function: { name: acc.name || "tool", arguments: args } },
-        ctx
-      );
-      output.push({ ...item, function: { ...(item as any).function, arguments: args }, status: "completed" });
-    }
+    for (const item of completedTools) output.push(item);
     const response = responsesSkeleton(ctx, incompleteReason ? "incomplete" : "completed");
     if (incompleteReason) response.incomplete_details = { reason: incompleteReason };
     response.output = output;
@@ -696,35 +735,29 @@ export function chatSseToResponsesStream(
               chatId: fragment.id || `call_${randSuffix()}`,
               name: "",
               arguments: "",
+              pendingArgDeltas: [],
             };
             toolAccumulators.set(idx, acc);
             toolOrder.push(idx);
-            // 首片段即产出 added 事件 + 后续逐片段 arguments.delta（客户端可实时组装工具调用）
-            acc.outputIndex = nextOutputIndex++;
-            acc.item = toolCallToResponsesItem(
-              { id: acc.chatId, type: "function", function: { name: "", arguments: "" } },
-              ctx
-            );
-            emitEvent("response.output_item.added", {
-              output_index: acc.outputIndex,
-              item: { ...acc.item, status: "in_progress" },
-            });
           }
           if (fragment.id && fragment.id !== acc.chatId) acc.chatId = fragment.id;
-          if (fragment.function?.name) {
+          if (typeof fragment.function?.name === "string" && fragment.function.name.length > 0) {
             acc.name += fragment.function.name;
-            if (acc.item) {
-              (acc.item as any).function = { ...(acc.item as any).function, name: acc.name };
+          }
+          const argPiece = fragment.function?.arguments;
+          if (typeof argPiece === "string" && argPiece.length > 0) {
+            acc.arguments += argPiece;
+            if (acc.addedEmitted && acc.item) {
+              emitEvent("response.function_call_arguments.delta", {
+                item_id: acc.item.id,
+                output_index: acc.outputIndex,
+                delta: argPiece,
+              });
+            } else {
+              acc.pendingArgDeltas.push(argPiece);
             }
           }
-          if (fragment.function?.arguments) {
-            acc.arguments += fragment.function.arguments;
-            emitEvent("response.function_call_arguments.delta", {
-              item_id: (acc.item as any).id,
-              output_index: acc.outputIndex,
-              delta: fragment.function.arguments,
-            });
-          }
+          openStreamToolItem(acc);
         }
       }
     } else if (choice?.message) {
@@ -759,14 +792,10 @@ export function chatSseToResponsesStream(
             chatId: tc.id || `call_${randSuffix()}`,
             name: typeof tc.function?.name === "string" ? tc.function.name : "",
             arguments: typeof tc.function?.arguments === "string" ? tc.function.arguments : "{}",
+            pendingArgDeltas: [],
           };
           toolAccumulators.set(idx, acc);
           toolOrder.push(idx);
-          acc.outputIndex = nextOutputIndex++;
-          acc.item = toolCallToResponsesItem(
-            { id: acc.chatId, type: "function", function: { name: acc.name, arguments: acc.arguments } },
-            ctx
-          );
         }
       }
     }
