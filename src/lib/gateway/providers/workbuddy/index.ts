@@ -27,6 +27,9 @@ const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
 // 使各自池内的轮转失去均匀性（A 池的请求推进 B 池的下标）。
 const roundRobinCounters = new Map<string, number>();
 
+// 签到单飞：providerId -> 进行中的签到 Promise。防止并发入口重复发起同一轮签到。
+const checkinInFlight = new Map<string, Promise<{ success: boolean; accounts_count: number; details: unknown[] }>>();
+
 // 抖动重试基准延迟：env RETRY_BASE_MS（.env），默认 600ms；非法值回退默认。
 export const DEFAULT_RETRY_DELAY_MS = 600;
 export function retryDelayMs(): number {
@@ -272,7 +275,10 @@ export class WorkBuddyProvider implements ProviderAdapter {
   // 背景（2026-09-22 实测）: INTL 域 *全部* 签到端点 (www.workbuddy.ai / www.codebuddy.ai,
   // 带/不带 /v2 前缀) 均返回 400 code=10001「签到活动未开启或已过期」——INTL 无签到活动，
   // 原路径必然失败。故 INTL 以一次 hy3 会话置为签到成功判据（用户指定方式）。
-  // 只读首块即 cancel：会话已被上游受理（200 text/event-stream）即达成目的，不耗生成额度。
+  // v4.9.2：修复「读到首块即 cancel」——HTTP 200 只说明连接被受理，不代表会话完成；
+  // 提前断开会被上游记成中断/空会话，签到不一定真正入账。改为读完整条流：
+  // 语义上以收到结束信号（[DONE] / message_stop / finish_reason / usage）或流自然结束为准；
+  // 同时设 8 秒上限兜底，避免长生成拖住签到（max_tokens=1 正常瞬时结束）。
   private async checkinViaHy3Chat(account: WorkbuddyAccount, token: string): Promise<Record<string, unknown>> {
     const resp = await fetchWithProxy(
       this.ep().chat,
@@ -298,14 +304,60 @@ export class WorkBuddyProvider implements ProviderAdapter {
       const text = (await resp.text()).slice(0, 200);
       return { success: false, mode: "hy3-chat", status: resp.status, error: text };
     }
-    try {
-      // 读到首块即认定会话已建立并断开（释放上游连接）
-      await resp.body?.getReader().read();
-      await resp.body?.cancel();
-    } catch {
-      /* 读流失败不影响判定：HTTP 200 已说明会话被受理 */
+    // 读完整条 SSE 流再判定成功。max_tokens=1 的正常签到会立刻流结束；
+    // 超时（8s）但已经收到数据帧时，说明会话确已建立，记成功但不阻塞调度。
+    const read = await this.drainCheckinStream(resp);
+    if (!read.completed) {
+      return { success: false, mode: "hy3-chat", model: "hy3", status: 200, error: read.error, frames: read.frames };
     }
-    return { success: true, mode: "hy3-chat", model: "hy3", status: 200 };
+    return { success: true, mode: "hy3-chat", model: "hy3", status: 200, frames: read.frames };
+  }
+
+  // 读尽 hy3 签到流。completed=true 的条件：
+  //   a) 命中结束信号（[DONE] / finish_reason / message_stop / usage 帧）；或
+  //   b) 流自然结束（reader 读到 done）。
+  // 仅在「超时且一个帧都没收到」或「中途抛错」时 completed=false，交上层记失败并纳入冷却。
+  private async drainCheckinStream(
+    resp: Response
+  ): Promise<{ completed: boolean; frames: number; error?: string }> {
+    const body = resp.body;
+    if (!body) {
+      // 无响应体：非流式 200，视为上游已一次性回应完整结果
+      const text = await resp.text().catch(() => "");
+      return { completed: true, frames: 0, error: text ? undefined : "empty body" };
+    }
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    const deadline = Date.now() + 8_000;
+    let frames = 0;
+    let buffered = "";
+    try {
+      for (;;) {
+        if (Date.now() > deadline) {
+          // 超时但有帧：会话已建立并产出内容，记完成（避免误判失败触发无谓冷却退避）
+          return frames > 0
+            ? { completed: true, frames }
+            : { completed: false, frames, error: "checkin stream timeout (8s, no frames)" };
+        }
+        const { done, value } = await reader.read();
+        if (done) return { completed: true, frames };
+        frames += 1;
+        buffered += decoder.decode(value, { stream: true });
+        if (buffered.includes("[DONE]") || buffered.includes("message_stop")) {
+          return { completed: true, frames };
+        }
+        if (buffered.includes('"finish_reason"') || buffered.includes('"usage"')) {
+          return { completed: true, frames };
+        }
+        // 只保留尾部窗口，避免长流无限累积内存
+        if (buffered.length > 8192) buffered = buffered.slice(-2048);
+      }
+    } catch (e) {
+      return { completed: false, frames, error: (e as Error).message };
+    } finally {
+      // 已读到完成信号或自然结束则连接已释放；异常/超时路径显式取消，避免句柄泄漏
+      await reader.cancel().catch(() => {});
+    }
   }
 
   // 获取所有启用的账号列表（支持单账号与账号池双重兼容）
@@ -950,8 +1002,31 @@ export class WorkBuddyProvider implements ProviderAdapter {
     accounts_count: number;
     details: unknown[];
   }> {
+    // v4.9.2 进程级单飞：同一 provider 的并发调用（checkin cron 与手动入口同一分钟重叠）
+    // 复用同一次执行结果，避免两边都读到空 doneToday 而对同一账号各发一轮 hy3 会话。
+    const inFlight = checkinInFlight.get(this.id);
+    if (inFlight) return inFlight as Promise<{ success: boolean; accounts_count: number; details: unknown[] }>;
+    const run = this.runDailyCheckinOnce();
+    checkinInFlight.set(this.id, run);
+    try {
+      return await run;
+    } finally {
+      checkinInFlight.delete(this.id);
+    }
+  }
+
+  private async runDailyCheckinOnce(): Promise<{
+    success: boolean;
+    accounts_count: number;
+    details: unknown[];
+  }> {
     const accounts = this.getAccounts();
     if (accounts.length === 0) return { success: false, accounts_count: 0, details: [{ msg: "no accounts configured" }] };
+
+    // v4.9.2 当日幂等：同一账号在某自然日内只要已成功签到过一次，本轮直接跳过。
+    // 目的：即使调度被重复触发（多入口/手动补跑/未来再引入钩子），一天也只真正打一次。
+    // 自然日边界按签到配置时区（默认 Asia/Shanghai）切分，与 checkinTz 语义一致。
+    const doneToday = await this.successfulCheckinAccountIdsToday();
 
     const checkinSingle = async (account: WorkbuddyAccount) => {
       const token = await this.getActiveToken(account);
@@ -999,7 +1074,34 @@ export class WorkBuddyProvider implements ProviderAdapter {
       }
     };
 
-    const results = await Promise.allSettled(accounts.map(checkinSingle));
+    // 已完成的账号直接标记 skipped，不发起任何上游请求
+    const targets = accounts.filter((a) => !doneToday.has(a.id));
+    if (targets.length === 0) {
+      return {
+        success: false,
+        accounts_count: accounts.length,
+        details: accounts.map((a) => ({
+          id: a.id,
+          name: a.name,
+          success: false,
+          skipped: true,
+          msg: "今日已签到，跳过",
+        })),
+      };
+    }
+
+    const results = await Promise.allSettled([
+      ...targets.map(checkinSingle),
+      ...accounts
+        .filter((a) => doneToday.has(a.id))
+        .map(async (a) => ({
+          id: a.id,
+          name: a.name,
+          success: false,
+          skipped: true,
+          msg: "今日已签到，跳过",
+        })),
+    ]);
     const checkinLogs: Array<Record<string, unknown>> = results.map((r) =>
       r.status === "fulfilled" ? (r.value as Record<string, unknown>) : { error: (r.reason as Error)?.message }
     );
@@ -1016,9 +1118,13 @@ export class WorkBuddyProvider implements ProviderAdapter {
 
   private async persistCheckinLogs(logs: unknown[]): Promise<void> {
     const now = new Date();
+    // v4.9.2：skipped 项（当日已签到而跳过）不落 CheckinLog、也不回写 Account 状态，
+    // 否则会把成功的 lastCheckinOk=true 覆盖成 false，污染「上次签到结果」展示。
+    const real = logs.filter((l) => !(l as { skipped?: boolean }).skipped);
+    if (real.length === 0) return;
     try {
       await db.checkinLog.createMany({
-        data: logs.map((l) => {
+        data: real.map((l) => {
           const entry = l as { id?: string; name?: string; success?: boolean };
           return {
             providerId: this.id,
@@ -1029,7 +1135,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
           };
         }),
       });
-      for (const l of logs) {
+      for (const l of real) {
         const entry = l as { id?: string; success?: boolean };
         if (entry.id) {
           await db.account.update({
@@ -1043,9 +1149,45 @@ export class WorkBuddyProvider implements ProviderAdapter {
     }
   }
 
-  // 定时调度生命周期钩子：并发执行所有账号签到与 Token 保活
+  // 当日幂等查询：返回本自然日（按 provider.config.checkinTz，默认 Asia/Shanghai）已成功签到的账号标识集合。
+  // accountId 与 accountName 一并收集，兼容历史记录只落 name 的情况。
+  // 查询失败时返回空集合：宁可重试一次，也不因读库异常而漏签到。
+  private async successfulCheckinAccountIdsToday(): Promise<Set<string>> {
+    try {
+      const dayStart = startOfDayInTz(new Date(), this.checkinTz());
+      const rows = await db.checkinLog.findMany({
+        where: { providerId: this.id, success: true, createdAt: { gte: dayStart } },
+        select: { accountId: true, accountName: true },
+      });
+      const done = new Set<string>();
+      for (const r of rows) {
+        if (r.accountId) done.add(r.accountId);
+        if (r.accountName) done.add(r.accountName);
+      }
+      return done;
+    } catch (e) {
+      console.error("[WorkBuddy] idempotency lookup failed:", e);
+      return new Set<string>();
+    }
+  }
+
+  // 签到时区：读 provider 配置 checkinTz，非法值回退 Asia/Shanghai
+  private checkinTz(): string {
+    const tz = (this.config as { checkinTz?: string }).checkinTz;
+    if (!tz) return "Asia/Shanghai";
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: tz });
+      return tz;
+    } catch {
+      return "Asia/Shanghai";
+    }
+  }
+
+  // 定时调度生命周期钩子：仅做 Token 保活（供 keepalive cron 调用）。
+  // v4.9.2：签到曾错误地挂在这里，导致 keepalive cron（默认 0 */6 * * *）每次都额外
+  // 触发一轮签到，一天最多 5 次。签到只应由 checkin cron / 手动执行经
+  // fleet.runDailyCheckins() → doDailyCheckin() 触发，不要再回到本钩子。
   async onSchedule(): Promise<void> {
-    await this.doDailyCheckin();
     const accounts = this.getAccounts();
     await Promise.allSettled(accounts.map((acc) => this.refreshAccessToken(acc)));
   }
@@ -1055,4 +1197,23 @@ export class WorkBuddyProvider implements ProviderAdapter {
 export function resetWorkbuddyCacheForTest(): void {
   memoryTokenCache.clear();
   roundRobinCounters.clear();
+  checkinInFlight.clear();
+}
+
+// 按指定时区取「当地自然日 00:00」对应的 UTC 时刻。
+// 例：Asia/Shanghai 的 2026-09-27 00:00 → 2026-09-26T16:00:00Z。
+// 做法：先取当地年月日，再反查该时刻的时区偏移，扣掉偏移即得当地午夜。
+function startOfDayInTz(now: Date, tz: string): Date {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const [y, m, d] = fmt.format(now).split("-").map(Number);
+  const utcMidnight = Date.UTC(y, m - 1, d, 0, 0, 0);
+  // 该 UTC 午夜在目标时区的本地表示，与原 UTC 表示的差即偏移
+  const asLocal = new Date(new Date(utcMidnight).toLocaleString("en-US", { timeZone: tz }));
+  const asUtc = new Date(new Date(utcMidnight).toLocaleString("en-US", { timeZone: "UTC" }));
+  return new Date(utcMidnight - (asLocal.getTime() - asUtc.getTime()));
 }

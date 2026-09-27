@@ -478,7 +478,10 @@ export async function runJob(
       detail = await fleet.runDailyCheckins(only);
       success = Array.isArray(detail) && (detail as Array<{ error?: string }>).every((r) => !r.error);
     } else {
-      // 保活：Token 刷新 + 各 provider onSchedule（指纹/免费模型池）
+      // 保活：只做 Token 刷新 + 各 provider onSchedule（指纹/免费模型池）。
+      // v4.9.2 契约：本分支严禁触发签到。WorkBuddy 的 onSchedule() 曾内嵌
+      // doDailyCheckin()，导致 keepalive cron（默认 0 */6 * * *）每天额外签到 4 次。
+      // 新增 provider 时请确保 onSchedule() 无签到副作用，签到一律走 checkin 分支。
       const refresh = await fleet.refreshAllTokens();
       await fleet.runScheduledTasks();
       detail = { refresh };
