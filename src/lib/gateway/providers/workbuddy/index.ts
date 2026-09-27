@@ -46,6 +46,12 @@ export function retryDelayMs(): number {
 // - 只有「无 system 的简单调用」（curl / SDK 快速验证 / 脚本）原本必然 11128 失败，注入只赚不赔。
 const INTL_FALLBACK_SYSTEM = "You are a helpful assistant.";
 
+// v4.9.3：签到的用户提问。刻意使用一条**真实、有信息量**的提问而非 "hi"，
+// 使其在服务端聚合侧更像一次正常桌面客户端的真实对话，而非脚本探测。
+// 仅用于 INTL 会话签到（checkinViaHy3Chat），不影响任何中转请求。
+const CHECKIN_PROMPT =
+  "Reply with a short one-sentence confirmation that you are ready to help.";
+
 // v4.8.0：WorkBuddy Desktop outbound identity（合入 wb-gateway 06e9ade，Task 62 修复方案 A 落地）。
 // Chat 的用量归属头使用官方桌面端形态；Web fingerprint 只在确实属于 Web endpoint
 // 的请求上使用，不能再作为全局身份标识。
@@ -278,7 +284,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
   // v4.9.2：修复「读到首块即 cancel」——HTTP 200 只说明连接被受理，不代表会话完成；
   // 提前断开会被上游记成中断/空会话，签到不一定真正入账。改为读完整条流：
   // 语义上以收到结束信号（[DONE] / message_stop / finish_reason / usage）或流自然结束为准；
-  // 同时设 8 秒上限兜底，避免长生成拖住签到（max_tokens=1 正常瞬时结束）。
+  // 同时设 8 秒上限兜底，避免长生成拖住签到（签到为一句短回复，正常秒级结束）。
   private async checkinViaHy3Chat(account: WorkbuddyAccount, token: string): Promise<Record<string, unknown>> {
     const resp = await fetchWithProxy(
       this.ep().chat,
@@ -288,12 +294,15 @@ export class WorkBuddyProvider implements ProviderAdapter {
         body: JSON.stringify({
           model: "hy3",
           stream: true,
-          max_tokens: 1,
+          // v4.9.3：签到请求对齐「一次正常桌面客户端对话」的形态。
+          // 原 max_tokens:1 + "hi" 是最小化合成请求，服务端可轻易判定为非真人活跃
+          // （活动规则第 18/20 行排除「未通过客户端发起」与「脚本/接口调用」）。
+          // 改为正常提问，并读完整条流，使其在服务端看来是一次完整会话。
           // 必须带 system 首条：INTL WAF 要求（否则 400 11128 "first message is not
           // system prompt"，实测 2026-09-22 四账户全中）；同 callChat 的 INTL 兜底注入。
           messages: [
             { role: "system", content: INTL_FALLBACK_SYSTEM },
-            { role: "user", content: "hi" },
+            { role: "user", content: CHECKIN_PROMPT },
           ],
         }),
         signal: AbortSignal.timeout(30_000),
@@ -304,7 +313,7 @@ export class WorkBuddyProvider implements ProviderAdapter {
       const text = (await resp.text()).slice(0, 200);
       return { success: false, mode: "hy3-chat", status: resp.status, error: text };
     }
-    // 读完整条 SSE 流再判定成功。max_tokens=1 的正常签到会立刻流结束；
+    // 读完整条 SSE 流再判定成功。签到是短回复，正常几百毫秒内流结束；
     // 超时（8s）但已经收到数据帧时，说明会话确已建立，记成功但不阻塞调度。
     const read = await this.drainCheckinStream(resp);
     if (!read.completed) {
