@@ -52,8 +52,8 @@ async function appendHistory(record: ProxyTestRecord): Promise<ProxyTestRecord[]
 
 // ---- GET：返回最近一次测试结果、测试历史、调度器诊断 ----
 export async function GET(req: Request) {
-  const g = await requireSessionOr401(req);
-  if (g) return g;
+  const session = await requireSessionOr401(req);
+  if (session instanceof Response) return session;
   try {
     // lastTest 从运行时设置（SystemSetting 写穿缓存的 proxy 键）读取
     const runtime = await getRuntimeSettingsAsync();
@@ -70,8 +70,8 @@ export async function GET(req: Request) {
 
 // ---- POST：实测代理连通性（支持未保存草稿） ----
 export async function POST(req: Request) {
-  const g = await requireSessionOr401(req);
-  if (g) return g;
+  const session = await requireSessionOr401(req);
+  if (session instanceof Response) return session;
   try {
     // 空 body / 解析失败 → 按生效配置实测（draft 传 null）
     let body: { proxyList?: unknown; bypass?: unknown } = {};
@@ -154,8 +154,8 @@ export async function POST(req: Request) {
 
 // ---- DELETE：仅清空测试历史（非业务数据） ----
 export async function DELETE(req: Request) {
-  const g = await requireSessionOr401(req);
-  if (g) return g;
+  const session = await requireSessionOr401(req);
+  if (session instanceof Response) return session;
   try {
     // 只删历史键，不动 proxy 生效配置
     await db.systemSetting.deleteMany({ where: { key: HISTORY_KEY } });
