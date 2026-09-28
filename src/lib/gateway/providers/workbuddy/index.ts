@@ -282,6 +282,12 @@ export class WorkBuddyProvider implements ProviderAdapter {
     return this.endpoints;
   }
 
+  // v4.9.1：INTL 签到方式开关。默认 "hy3"（会话签到，用户指定）；
+  // 注：.workbuddy 目录外无 UI 入口，改 provider.config.intlCheckinMode 即可（控制台账号页保存会保留该字段）。
+  private intlCheckinMode(): "hy3" | "legacy" {
+    return this.config.intlCheckinMode === "legacy" ? "legacy" : "hy3";
+  }
+
   // v4.9.4：chat 头的唯一构造点。callChat 与 INTL 会话签到共用，防止两处头集漂移。
   //
   // 头集依据「本机 WorkBuddy AI Desktop 5.5.2 真实抓包」（MITM 解密后的
@@ -292,7 +298,8 @@ export class WorkBuddyProvider implements ProviderAdapter {
   // X-Agent-Purpose 等浏览器或编辑器侧头，故此处一并移除，避免「像 curl 的合成请求」。
   buildChatHeaders(token: string, userId: string): Record<string, string> {
     const ep = this.ep();
-    return {
+    // 共同头（INTL 抓包实测 = 桌面端真实头集；CN 为历史沿用形态）。
+    const common: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "application/json, text/plain, */*",
       Connection: "keep-alive",
@@ -300,24 +307,30 @@ export class WorkBuddyProvider implements ProviderAdapter {
       Authorization: `Bearer ${token}`,
       "X-User-Id": userId,
       "X-Request-ID": workbuddyRequestId(),
-      // 桌面端固定 SaaS（抓包实测），INTL/CN 一致。
+      // 桌面端固定 SaaS（抓包实测）。
       "X-Product": "SaaS",
-      // 抓包实测桌面端带 X-Domain：INTL=www.workbuddy.ai，CN=站点 host。
-      "X-Domain": this.region === "intl" ? "www.workbuddy.ai" : "www.codebuddy.cn",
+    };
+    if (this.region === "intl") {
+      // INTL：严格对齐 2026-09-28 抓包实测的桌面端头集，不多不少。
+      // 实测桌面端不发 Origin / Referer / X-Requested-With / X-CodeBuddy-Request /
+      // X-Agent-Purpose / X-IDE-*，故一律不加。
+      return { ...common, "X-Domain": "www.workbuddy.ai" };
+    }
+    // CN：保持改动前的行为不变（cn 侧上游依赖 editor/浏览器侧头与白名单域），
+    // 仅新增 X-Request-ID / X-Product 两个通用头，不删除既有头，避免 CN 回归。
+    return {
+      ...common,
+      "X-Requested-With": "XMLHttpRequest",
+      Origin: ep.origin,
+      Referer: ep.referer,
+      "X-Agent-Purpose": "conversation",
+      "X-IDE-Name": "WorkBuddy",
+      "X-IDE-Type": "WorkBuddy",
+      "X-IDE-Version": WORKBUDDY_CLIENT_VERSION,
+      "X-CodeBuddy-Request": "1",
+      "Accept-Language": "zh-CN",
     };
   }
-
-  // v4.9.1：INTL 签到方式开关。默认 "hy3"（会话签到，用户指定）；
-  // 置 "legacy" 可切回 billing/meter/daily-checkin（上游若恢复签到活动时用）。
-  // 注：.workbuddy 目录外无 UI 入口，改 provider.config.intlCheckinMode 即可（控制台账号页保存会保留该字段）。
-  private intlCheckinMode(): "hy3" | "legacy" {
-    return this.config.intlCheckinMode === "legacy" ? "legacy" : "hy3";
-  }
-
-  // v4.9.1：INTL 站签到改用「发一次 hy3 会话」。
-  // 背景（2026-09-22 实测）: INTL 域 *全部* 签到端点 (www.workbuddy.ai / www.codebuddy.ai,
-  // 带/不带 /v2 前缀) 均返回 400 code=10001「签到活动未开启或已过期」——INTL 无签到活动，
-  // 原路径必然失败。故 INTL 以一次 hy3 会话置为签到成功判据（用户指定方式）。
   // v4.9.4：修复「桌面端发的是会话（/console/as/conversations/v2），不是裸 chat/completions」。
   // 抓包实测（2026-09-28，MITM 解密本机 Desktop 5.5.2 发送「你好」全过程）：
   //   桌面端一条消息的真实来源是 POST https://www.workbuddy.ai/console/as/conversations/v2，
@@ -328,7 +341,9 @@ export class WorkBuddyProvider implements ProviderAdapter {
   // 因此签到要走与桌面端同形的「建一次会话」请求，避免被判定为脚本调用。
   private async checkinViaHy3Chat(account: WorkbuddyAccount, token: string): Promise<Record<string, unknown>> {
     const sessionId = workbuddySessionId();
-    const workDir = `/Users/${process.env.USER ?? "youmi"}/WorkBuddy AI/${workbuddyTimestampDir()}`;
+    // workDir 取真实家目录，避免硬编码用户名（抓包实测桌面端用 `/Users/<user>/WorkBuddy AI/<ts>`）。
+    const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? "/Users/unknown";
+    const workDir = `${homeDir}/WorkBuddy AI/${workbuddyTimestampDir()}`;
     const resp = await fetchWithProxy(
       this.ep().conversationsV2,
       {
@@ -360,15 +375,24 @@ export class WorkBuddyProvider implements ProviderAdapter {
       const text = (await resp.text()).slice(0, 200);
       return { success: false, mode: "hy3-chat", status: resp.status, error: text };
     }
-    // 读完整条 SSE 流再判定成功。签到是短回复，正常几百毫秒内流结束；
     // v4.9.4：桌面端 /console/as/conversations/v2 返回的是**普通 JSON**（非 SSE）——
     // 抓包实测响应体：{"code":0,"msg":"OK","requestId":"...","data":{id,name,status,
     // createdAt,userId,...}}，且无 content-type: text/event-stream。
     // 判定：HTTP 2xx 且 code===0（或存在 data.id）即会话登记成功，签到完成。
+    //
+    // 注意：Response body 只能消费一次（消费后再读会抛
+    // "Body has already been read"）。因此这里**只读一次 text()**，
+    // 再用同一份文本判断是 JSON 还是 SSE，绝不二次读取 resp。
     const raw = await resp.text().catch(() => "");
     if (!raw.trim()) {
-      return { success: true, mode: "hy3-chat", model: "hy3", status: resp.status, frames: 0 };
+      // 空响应体：不视为成功。上游若返回 200 空体（WAF 拦截 / 网关超时补 200），
+      // 记成功会写入 CheckinLog 并触发当日幂等跳过，导致真实签到被静默漏掉一整天。
+      return {
+        success: false, mode: "hy3-chat", model: "hy3", status: resp.status,
+        error: "empty response body",
+      };
     }
+    // 先尝试按 JSON 解析（桌面端真实形态）。
     try {
       const json = JSON.parse(raw) as { code?: unknown; data?: { id?: unknown } };
       const ok = json.code === 0 || json.code === "0" || typeof json.data?.id === "string";
@@ -380,59 +404,26 @@ export class WorkBuddyProvider implements ProviderAdapter {
         error: `unexpected payload: ${raw.slice(0, 160)}`,
       };
     } catch {
-      // 兼容上游日后改回 SSE 的情况：交给原流式读取逻辑。
-      const read = await this.drainCheckinStream(resp);
-      if (!read.completed) {
-        return { success: false, mode: "hy3-chat", model: "hy3", status: resp.status, error: read.error, frames: read.frames };
-      }
-      return { success: true, mode: "hy3-chat", model: "hy3", status: resp.status, frames: read.frames };
+      // 非 JSON —— 兼容上游改回 SSE 的情况，用已读到的文本做流式语义判定。
+      return this.judgeCheckinSseText(raw, resp.status);
     }
   }
-  // 读尽 hy3 签到流。completed=true 的条件：
-  //   a) 命中结束信号（[DONE] / finish_reason / message_stop / usage 帧）；或
-  //   b) 流自然结束（reader 读到 done）。
-  // 仅在「超时且一个帧都没收到」或「中途抛错」时 completed=false，交上层记失败并纳入冷却。
-  private async drainCheckinStream(
-    resp: Response
-  ): Promise<{ completed: boolean; frames: number; error?: string }> {
-    const body = resp.body;
-    if (!body) {
-      // 无响应体：非流式 200，视为上游已一次性回应完整结果
-      const text = await resp.text().catch(() => "");
-      return { completed: true, frames: 0, error: text ? undefined : "empty body" };
+
+  // 用已读取的 SSE 文本判断签到是否完成，避免二次消费 Response body。
+  private judgeCheckinSseText(
+    raw: string,
+    status: number
+  ): { success: boolean; mode: string; model?: string; status: number; frames?: number; error?: string } {
+    const markers = ['[DONE]', '"finish_reason"', '"message_stop"', '"usage"'];
+    const hit = markers.some((m) => raw.includes(m));
+    const frames = raw.split("\n").filter((l) => l.startsWith("data:")).length;
+    if (hit || frames > 0) {
+      return { success: true, mode: "hy3-chat", model: "hy3", status, frames };
     }
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    const deadline = Date.now() + 8_000;
-    let frames = 0;
-    let buffered = "";
-    try {
-      for (;;) {
-        if (Date.now() > deadline) {
-          // 超时但有帧：会话已建立并产出内容，记完成（避免误判失败触发无谓冷却退避）
-          return frames > 0
-            ? { completed: true, frames }
-            : { completed: false, frames, error: "checkin stream timeout (8s, no frames)" };
-        }
-        const { done, value } = await reader.read();
-        if (done) return { completed: true, frames };
-        frames += 1;
-        buffered += decoder.decode(value, { stream: true });
-        if (buffered.includes("[DONE]") || buffered.includes("message_stop")) {
-          return { completed: true, frames };
-        }
-        if (buffered.includes('"finish_reason"') || buffered.includes('"usage"')) {
-          return { completed: true, frames };
-        }
-        // 只保留尾部窗口，避免长流无限累积内存
-        if (buffered.length > 8192) buffered = buffered.slice(-2048);
-      }
-    } catch (e) {
-      return { completed: false, frames, error: (e as Error).message };
-    } finally {
-      // 已读到完成信号或自然结束则连接已释放；异常/超时路径显式取消，避免句柄泄漏
-      await reader.cancel().catch(() => {});
-    }
+    return {
+      success: false, mode: "hy3-chat", model: "hy3", status, frames,
+      error: `unrecognized body: ${raw.slice(0, 160)}`,
+    };
   }
 
   // 获取所有启用的账号列表（支持单账号与账号池双重兼容）
