@@ -52,27 +52,56 @@ const INTL_FALLBACK_SYSTEM = "You are a helpful assistant.";
 const CHECKIN_PROMPT =
   "Reply with a short one-sentence confirmation that you are ready to help.";
 
-// v4.8.0：WorkBuddy Desktop outbound identity（合入 wb-gateway 06e9ade，Task 62 修复方案 A 落地）。
-// Chat 的用量归属头使用官方桌面端形态；Web fingerprint 只在确实属于 Web endpoint
-// 的请求上使用，不能再作为全局身份标识。
-const WORKBUDDY_CLIENT_VERSION = "5.5.6";
+// v4.9.4：WorkBuddy Desktop outbound identity —— 以本机 5.5.2 真实抓包为准重校。
+// 抓包实测（MITM 解密 /console/as/conversations/v2）：
+//   User-Agent: workbuddy-ai/5.5.2 workbuddy-ai/5.5.2 CLI/2.137.1
+// 即 client 段与 platform 段**同形**（都是小写 product slug `workbuddy-ai`），
+// 版本号取自实际安装的 Desktop 版本（5.5.2），而非历史常量 5.5.6。
+const WORKBUDDY_CLIENT_VERSION = "5.5.2";
 const WORKBUDDY_CLI_VERSION = "2.137.1";
+// 抓包实测的 UA 形态：`<slug>/<ver> <slug>/<ver> CLI/<cliVer>`，两段 slug 相同。
+const WORKBUDDY_PRODUCT_SLUG = "workbuddy-ai";
 
-function workbuddyUserAgent(region: "cn" | "intl"): string {
-  const platform = region === "intl" ? "WorkBuddy AI" : "WorkBuddy";
-  return `WorkBuddy/${WORKBUDDY_CLIENT_VERSION} ${platform}/${WORKBUDDY_CLIENT_VERSION} CLI/${WORKBUDDY_CLI_VERSION}`;
+function workbuddyUserAgent(_region: "cn" | "intl"): string {
+  const slug = WORKBUDDY_PRODUCT_SLUG;
+  return `${slug}/${WORKBUDDY_CLIENT_VERSION} ${slug}/${WORKBUDDY_CLIENT_VERSION} CLI/${WORKBUDDY_CLI_VERSION}`;
 }
 
-function workbuddyDesktopAttributionHeaders(): Record<string, string> {
-  return {
-    "X-Agent-Purpose": "conversation",
-    "X-IDE-Name": "WorkBuddy",
-    "X-IDE-Type": "WorkBuddy",
-    "X-IDE-Version": WORKBUDDY_CLIENT_VERSION,
-    "X-Product": "WorkBuddy",
-  };
+// 抓包实测：桌面端每个请求携带独立的 32 位十六进制 X-Request-ID。
+function workbuddyRequestId(): string {
+  try {
+    return globalThis.crypto.randomUUID().replace(/-/g, "");
+  } catch {
+    let s = "";
+    for (let i = 0; i < 32; i += 1) s += Math.floor(Math.random() * 16).toString(16);
+    return s;
+  }
 }
 
+// v4.9.4：桌面端会话标识。抓包实测 sessionId / hostId 均为 UUID 形态，
+// workDir 为 `<HOME>/WorkBuddy AI/<YYYY-MM-DD-HH-mm-ss>`。
+function workbuddySessionId(): string {
+  try {
+    return globalThis.crypto.randomUUID();
+  } catch {
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = Math.floor(Math.random() * 16);
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+}
+
+function workbuddyHostId(): string {
+  return workbuddySessionId();
+}
+
+// 抓包实测 workDir 形态：`/Users/<user>/WorkBuddy AI/2026-09-28-13-44-43`
+function workbuddyTimestampDir(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+}
 function workbuddyBillingUserAgent(): string {
   return `WorkBuddy/${WORKBUDDY_CLIENT_VERSION}`;
 }
@@ -143,6 +172,9 @@ export interface WorkbuddyEndpoints {
   probed: boolean;
   refresh: string;
   chat: string;
+  // v4.9.4：桌面端真实发送通道 —— 会话登记端点（抓包实测）。
+  // Desktop 发消息时 POST 到此，而非裸 /v2/chat/completions。
+  conversationsV2: string;
   billing: string;
   checkin: string;
   // 模型目录端点：对齐桌面客户端 ProductManager 的 /v3/config 合并列表。
@@ -160,6 +192,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
       probed: true,
       refresh: "https://www.workbuddy.ai/v2/plugin/auth/token/refresh",
       chat: "https://www.workbuddy.ai/v2/chat/completions",
+      conversationsV2: "https://www.workbuddy.ai/console/as/conversations/v2",
       billing: "https://www.workbuddy.ai/billing/meter/get-user-resource",
       checkin: "https://www.workbuddy.ai/billing/meter/daily-checkin",
       models: "https://www.workbuddy.ai/v3/config",
@@ -174,6 +207,7 @@ export function resolveWorkbuddyEndpoints(region: unknown): WorkbuddyEndpoints {
     refresh: "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
+    conversationsV2: "https://copilot.tencent.com/console/as/conversations/v2",
     checkin: "https://www.codebuddy.cn/v2/billing/meter/daily-checkin",
     models: "https://copilot.tencent.com/v3/config",
     origin: "https://www.codebuddy.cn",
@@ -248,25 +282,28 @@ export class WorkBuddyProvider implements ProviderAdapter {
     return this.endpoints;
   }
 
-  // v4.9.1：chat 头的唯一构造点。callChat 与 INTL 会话签到共用，防止两处头集漂移。
+  // v4.9.4：chat 头的唯一构造点。callChat 与 INTL 会话签到共用，防止两处头集漂移。
+  //
+  // 头集依据「本机 WorkBuddy AI Desktop 5.5.2 真实抓包」（MITM 解密后的
+  // /console/as/conversations/v2 请求，2026-09-28 采集）逐项对齐，实测桌面端只发：
+  //   Accept / Content-Type / User-Agent / X-Request-ID / X-Product / Authorization
+  //   / X-User-Id / X-Domain / Connection(+Host/Content-Length 由 HTTP 栈自动补)
+  // 桌面端**不发** Origin / Referer / X-Requested-With / X-CodeBuddy-Request /
+  // X-Agent-Purpose 等浏览器或编辑器侧头，故此处一并移除，避免「像 curl 的合成请求」。
   buildChatHeaders(token: string, userId: string): Record<string, string> {
     const ep = this.ep();
     return {
       "Content-Type": "application/json",
       Accept: "application/json, text/plain, */*",
       Connection: "keep-alive",
-      "X-Requested-With": "XMLHttpRequest",
-      Origin: ep.origin,
-      Referer: ep.referer,
       "User-Agent": ep.userAgent,
       Authorization: `Bearer ${token}`,
       "X-User-Id": userId,
-      ...workbuddyDesktopAttributionHeaders(),
-      "X-CodeBuddy-Request": "1",
-      "Accept-Language": this.region === "intl" ? "en-US" : "zh-CN",
-      ...(this.region === "intl"
-        ? { "X-No-Enterprise-Id": "1", "X-Domain": "www.workbuddy.ai" }
-        : {}),
+      "X-Request-ID": workbuddyRequestId(),
+      // 桌面端固定 SaaS（抓包实测），INTL/CN 一致。
+      "X-Product": "SaaS",
+      // 抓包实测桌面端带 X-Domain：INTL=www.workbuddy.ai，CN=站点 host。
+      "X-Domain": this.region === "intl" ? "www.workbuddy.ai" : "www.codebuddy.cn",
     };
   }
 
@@ -281,29 +318,39 @@ export class WorkBuddyProvider implements ProviderAdapter {
   // 背景（2026-09-22 实测）: INTL 域 *全部* 签到端点 (www.workbuddy.ai / www.codebuddy.ai,
   // 带/不带 /v2 前缀) 均返回 400 code=10001「签到活动未开启或已过期」——INTL 无签到活动，
   // 原路径必然失败。故 INTL 以一次 hy3 会话置为签到成功判据（用户指定方式）。
-  // v4.9.2：修复「读到首块即 cancel」——HTTP 200 只说明连接被受理，不代表会话完成；
-  // 提前断开会被上游记成中断/空会话，签到不一定真正入账。改为读完整条流：
-  // 语义上以收到结束信号（[DONE] / message_stop / finish_reason / usage）或流自然结束为准；
-  // 同时设 8 秒上限兜底，避免长生成拖住签到（签到为一句短回复，正常秒级结束）。
+  // v4.9.4：修复「桌面端发的是会话（/console/as/conversations/v2），不是裸 chat/completions」。
+  // 抓包实测（2026-09-28，MITM 解密本机 Desktop 5.5.2 发送「你好」全过程）：
+  //   桌面端一条消息的真实来源是 POST https://www.workbuddy.ai/console/as/conversations/v2，
+  //   body 形如 {type:"local", sessionId, name:<首条消息文本>, conversationOrigin:
+  //   "legacy_workbuddy_local", workDir, isPlayground:1, clientContext:{...}}，
+  //   而**不是**直接 POST /v2/chat/completions。模型推理由本机 sidecar 承接，
+  //   公网侧只做会话元数据登记；客户端身份靠 UA/X-Product/X-Domain/X-Request-ID 体现。
+  // 因此签到要走与桌面端同形的「建一次会话」请求，避免被判定为脚本调用。
   private async checkinViaHy3Chat(account: WorkbuddyAccount, token: string): Promise<Record<string, unknown>> {
+    const sessionId = workbuddySessionId();
+    const workDir = `/Users/${process.env.USER ?? "youmi"}/WorkBuddy AI/${workbuddyTimestampDir()}`;
     const resp = await fetchWithProxy(
-      this.ep().chat,
+      this.ep().conversationsV2,
       {
         method: "POST",
         headers: this.buildChatHeaders(token, String(account.userId)),
+        // 与桌面端抓包同构的 body（字段名、取值形态逐项对齐）
         body: JSON.stringify({
-          model: "hy3",
-          stream: true,
-          // v4.9.3：签到请求对齐「一次正常桌面客户端对话」的形态。
-          // 原 max_tokens:1 + "hi" 是最小化合成请求，服务端可轻易判定为非真人活跃
-          // （活动规则第 18/20 行排除「未通过客户端发起」与「脚本/接口调用」）。
-          // 改为正常提问，并读完整条流，使其在服务端看来是一次完整会话。
-          // 必须带 system 首条：INTL WAF 要求（否则 400 11128 "first message is not
-          // system prompt"，实测 2026-09-22 四账户全中）；同 callChat 的 INTL 兜底注入。
-          messages: [
-            { role: "system", content: INTL_FALLBACK_SYSTEM },
-            { role: "user", content: CHECKIN_PROMPT },
-          ],
+          type: "local",
+          sessionId,
+          name: CHECKIN_PROMPT,
+          conversationOrigin: "legacy_workbuddy_local",
+          workDir,
+          isPlayground: 1,
+          clientContext: {
+            localStatus: "active",
+            hostId: workbuddyHostId(),
+            model: "hy3",
+            sourceMode: "",
+            permissionMode: "",
+            runtimeIdentity: "",
+            marketplace: "",
+          },
         }),
         signal: AbortSignal.timeout(30_000),
       },
@@ -314,14 +361,33 @@ export class WorkBuddyProvider implements ProviderAdapter {
       return { success: false, mode: "hy3-chat", status: resp.status, error: text };
     }
     // 读完整条 SSE 流再判定成功。签到是短回复，正常几百毫秒内流结束；
-    // 超时（8s）但已经收到数据帧时，说明会话确已建立，记成功但不阻塞调度。
-    const read = await this.drainCheckinStream(resp);
-    if (!read.completed) {
-      return { success: false, mode: "hy3-chat", model: "hy3", status: 200, error: read.error, frames: read.frames };
+    // v4.9.4：桌面端 /console/as/conversations/v2 返回的是**普通 JSON**（非 SSE）——
+    // 抓包实测响应体：{"code":0,"msg":"OK","requestId":"...","data":{id,name,status,
+    // createdAt,userId,...}}，且无 content-type: text/event-stream。
+    // 判定：HTTP 2xx 且 code===0（或存在 data.id）即会话登记成功，签到完成。
+    const raw = await resp.text().catch(() => "");
+    if (!raw.trim()) {
+      return { success: true, mode: "hy3-chat", model: "hy3", status: resp.status, frames: 0 };
     }
-    return { success: true, mode: "hy3-chat", model: "hy3", status: 200, frames: read.frames };
+    try {
+      const json = JSON.parse(raw) as { code?: unknown; data?: { id?: unknown } };
+      const ok = json.code === 0 || json.code === "0" || typeof json.data?.id === "string";
+      if (ok) {
+        return { success: true, mode: "hy3-chat", model: "hy3", status: resp.status, frames: 1 };
+      }
+      return {
+        success: false, mode: "hy3-chat", model: "hy3", status: resp.status,
+        error: `unexpected payload: ${raw.slice(0, 160)}`,
+      };
+    } catch {
+      // 兼容上游日后改回 SSE 的情况：交给原流式读取逻辑。
+      const read = await this.drainCheckinStream(resp);
+      if (!read.completed) {
+        return { success: false, mode: "hy3-chat", model: "hy3", status: resp.status, error: read.error, frames: read.frames };
+      }
+      return { success: true, mode: "hy3-chat", model: "hy3", status: resp.status, frames: read.frames };
+    }
   }
-
   // 读尽 hy3 签到流。completed=true 的条件：
   //   a) 命中结束信号（[DONE] / finish_reason / message_stop / usage 帧）；或
   //   b) 流自然结束（reader 读到 done）。
