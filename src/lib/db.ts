@@ -23,15 +23,26 @@ export type DbDialect = 'postgresql' | 'mysql'
 
 const rawUrl = (process.env.DATABASE_URL ?? '').trim()
 
-function detectDialect(url: string): DbDialect {
+/**
+ * 识别连接串方言。返回 null 表示「未配置或无法识别」——不在模块加载时抛错。
+ *
+ * v4.2.3 修复：原实现于模块顶层立即抛错，导致 `next build` 阶段（collecting page data
+ * 会 import 本模块）在没有 DATABASE_URL 的环境直接构建失败——CI/Docker 构建期本就不该
+ * 依赖运行期配置。现改为惰性：加载期得到 null，首次真正访问数据库时才校验并报错。
+ */
+function detectDialect(url: string): DbDialect | null {
   if (url.startsWith('postgres://') || url.startsWith('postgresql://')) return 'postgresql'
   if (url.startsWith('mysql://')) return 'mysql'
-  throw new Error(
-    `[DB] DATABASE_URL 无法识别数据源类型（需以 postgresql:// 或 mysql:// 开头），当前值前缀: "${url.slice(0, 24)}"`
-  )
+  return null
 }
 
-export const dbDialect: DbDialect = detectDialect(rawUrl)
+const detected = detectDialect(rawUrl)
+
+/**
+ * 运行期方言。构建期未配置 DATABASE_URL 时回落为 'postgresql' 仅用于让类型与模块图成立，
+ * 真正生效的行为由下面的 Proxy 在首次属性访问时再次校验（见 assertConfigured）。
+ */
+export const dbDialect: DbDialect = detected ?? 'postgresql'
 
 /** 当前数据源是否为 MySQL（供少量方言差异分支使用）。 */
 export const isMysql = dbDialect === 'mysql'
@@ -44,7 +55,24 @@ const globalForPrisma = globalThis as unknown as {
 // （三元表达式会推断成 Pg|Mysql 联合，导致 db.xxx 不可调用），此处断言为 PG Client 类型。
 const PrismaClientCtor = (dbDialect === 'mysql' ? MysqlPrismaClient : PgPrismaClient) as typeof PgPrismaClient
 
-export const db: PgPrismaClient =
+/**
+ * 运行期配置校验：延迟到第一次访问 db 时才要求 DATABASE_URL 合法。
+ * 这样 `next build`（无运行期配置）可正常完成，而一旦真连库、配置缺失会立刻给出明确报错。
+ */
+function assertConfigured(): void {
+  if (rawUrl.length === 0) {
+    throw new Error(
+      '[DB] 未设置 DATABASE_URL。请配置为 postgresql://user:pw@host:5432/db?sslmode=require 或 mysql://user:pw@host:3306/db'
+    )
+  }
+  if (detected === null) {
+    throw new Error(
+      `[DB] DATABASE_URL 无法识别数据源类型（需以 postgresql:// 或 mysql:// 开头），当前值前缀: "${rawUrl.slice(0, 24)}"`
+    )
+  }
+}
+
+const realDb: PgPrismaClient =
   globalForPrisma.prisma ??
   new PrismaClientCtor({
     // v3.9.3：query 日志改为显式开启（PRISMA_LOG_QUERIES=1 重启生效）——此前每条 SQL 同步
@@ -53,8 +81,19 @@ export const db: PgPrismaClient =
     log: process.env.PRISMA_LOG_QUERIES === '1' ? ['query', 'error', 'warn'] : ['error', 'warn'],
   })
 
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
-// ---- v4.2.0：SQLite 支持已移除 ----
+/**
+ * 代理：首次访问任意属性时先校验配置，再转发给真实 Client。
+ * 这样既保留了「配置错误立即暴露」的保护，又不把校验提前到模块加载/构建期。
+ */
+export const db: PgPrismaClient = new Proxy(realDb, {
+  get(target, prop, receiver) {
+    assertConfigured()
+    const value = Reflect.get(target, prop, receiver)
+    return typeof value === 'function' ? value.bind(target) : value
+  },
+})
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = realDb
 // 数据源只支持 PostgreSQL / MySQL（均无 PRAGMA 概念）。以下保留兼容符号：
 //   - isSqlite：恒为 false，供 scheduler 中「仅 SQLite 需要的 WAL 治理」分支短路，
 //     避免为一次能力下线改动调度器多处逻辑。
