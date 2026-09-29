@@ -9,18 +9,24 @@ export async function register() {
   await applySqlitePragmas();
   // ---- v4.0.0：schema 初始化与默认管理员播种（必须最前：后续 refreshRuntimeSettings /
   // ensureSystemSecrets / startScheduler 均依赖业务表存在；空库/新卷首启即自动就绪） ----
+  // v4.1.1：建表失败不再静默吞掉——失败后重试一次；仍失败则明确标记 schema 未就绪，
+  // 避免"进程已就绪但所有业务表缺失"的假健康状态（此前 P2028 超时被 catch 后服务照常启动，全站 P2021）。
   try {
     const { ensureDatabaseSchema, seedDefaultAdmin } = await import("@/lib/schemaInit");
-    const schema = await ensureDatabaseSchema();
-    if (schema.initialized) {
-      console.log(`[Instrumentation] database schema initialized (${schema.reason})`);
+    let schema;
+    try {
+      schema = await ensureDatabaseSchema();
+    } catch (first) {
+      console.error("[Instrumentation] schema init failed, retrying once:", first);
+      schema = await ensureDatabaseSchema();
     }
+    console.log(`[Instrumentation] database schema ready (${schema.reason})`);
     const seeded = await seedDefaultAdmin();
     if (seeded.seeded) {
       console.log("[Instrumentation] default admin seeded (首次启动；用默认账号登录后请立即修改密码)");
     }
   } catch (e) {
-    console.error("[Instrumentation] schema init / admin seed failed:", e);
+    console.error("[Instrumentation] FATAL: schema init / admin seed failed — 数据库表可能缺失，服务不可用:", e);
   }
   const { startScheduler } = await import("@/lib/gateway/jobs/scheduler");
   const { refreshRuntimeSettings } = await import("@/lib/gateway/config/runtimeSettings");

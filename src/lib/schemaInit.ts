@@ -129,7 +129,13 @@ export async function ensureDatabaseSchema(): Promise<SchemaInitResult> {
   return run;
 }
 
-/** 执行 init.sql 建表（事务内逐条 DDL，返回语句数）。init.sql 方言由 schema.prisma 的 provider 决定。 */
+/**
+ * 执行 init.sql 建表（事务内逐条 DDL，返回语句数）。init.sql 方言由 schema.prisma 的 provider 决定。
+ *
+ * v4.1.1 修复：原先未传事务选项，走 Prisma 默认 timeout=5000ms。init.sql 有 60+ 条 DDL，
+ * 在 Aiven 等跨区托管 PG 上单条往返就有数十毫秒，累计必然触发 P2028（transaction already closed），
+ * 整个事务回滚 → 表未建成 → 后续全部查询 P2021。此处按语句数放大超时上限，并打印进度便于排障。
+ */
 async function applyInitSql(reason: string, dbPath: string): Promise<number> {
   const initSqlPath = resolveInitSqlPath();
   if (!existsSync(initSqlPath)) {
@@ -137,18 +143,29 @@ async function applyInitSql(reason: string, dbPath: string): Promise<number> {
       `[SchemaInit] init.sql not found at ${initSqlPath}（构建镜像时需将 prisma/init.sql 复制进 standalone 产物）`
     );
   }
-  const statements = splitSqlStatements(readFileSync(initSqlPath, "utf8"));
+  const ddl = readFileSync(initSqlPath, "utf8");
+  let statements = splitSqlStatements(ddl);
   if (statements.length === 0) {
     throw new Error(`[SchemaInit] init.sql at ${initSqlPath} contains no executable statements`);
   }
   console.log(
     `[SchemaInit] ${reason}: initializing schema at ${dbPath} from ${initSqlPath} (${statements.length} statements)`
   );
-  await db.$transaction(async (tx) => {
-    for (const stmt of statements) {
-      await tx.$executeRawUnsafe(stmt);
-    }
-  });
+  // SQLite 事务极快，保持默认即可；PG 上按 2 秒/条预留，下限 5 分钟、上限 30 分钟。
+  const txTimeout = isSqlite ? 60_000 : Math.min(Math.max(statements.length * 2_000, 300_000), 1_800_000);
+  await db.$transaction(
+    async (tx) => {
+      let i = 0;
+      for (const stmt of statements) {
+        await tx.$executeRawUnsafe(stmt);
+        i += 1;
+        if (i % 10 === 0 || i === statements.length) {
+          console.log(`[SchemaInit] DDL ${i}/${statements.length}`);
+        }
+      }
+    },
+    { timeout: txTimeout, maxWait: 60_000 }
+  );
   // 回读核对（启动日志可直接核对建表数量）
   // 回读核对（启动日志可直接核对建表数量）。v4.1.0：按数据源方言选择系统表。
   const countSql = isSqlite
