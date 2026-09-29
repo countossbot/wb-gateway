@@ -1,94 +1,111 @@
+-- CreateSchema
+CREATE SCHEMA IF NOT EXISTS "public";
+
 -- CreateTable
 CREATE TABLE "SchemaVersion" (
-    "version" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "version" INTEGER NOT NULL,
     "name" TEXT NOT NULL,
-    "appliedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "appliedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "SchemaVersion_pkey" PRIMARY KEY ("version")
 );
 
 -- CreateTable
 CREATE TABLE "AdminUser" (
-    "id" TEXT NOT NULL PRIMARY KEY,
+    "id" TEXT NOT NULL,
     "username" TEXT NOT NULL,
     "passwordHash" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "AdminUser_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "Session" (
-    "id" TEXT NOT NULL PRIMARY KEY,
+    "id" TEXT NOT NULL,
     "tokenHash" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
-    "expiresAt" DATETIME NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "lastSeenAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "lastSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Session_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "LoginAudit" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "ip" TEXT NOT NULL,
     "userAgent" TEXT NOT NULL DEFAULT '',
     "success" BOOLEAN NOT NULL,
     "reason" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "LoginAudit_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "Provider" (
-    "id" TEXT NOT NULL PRIMARY KEY,
+    "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "type" TEXT NOT NULL,
     "enabled" BOOLEAN NOT NULL DEFAULT true,
     "sortOrder" INTEGER NOT NULL DEFAULT 0,
     "config" JSONB NOT NULL,
     "proxyOverride" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Provider_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "Account" (
-    "id" TEXT NOT NULL PRIMARY KEY,
+    "id" TEXT NOT NULL,
     "providerId" TEXT NOT NULL,
     "name" TEXT NOT NULL DEFAULT '',
     "enabled" BOOLEAN NOT NULL DEFAULT true,
     "credentials" JSONB NOT NULL,
     "balance" JSONB,
-    "cooldownUntil" DATETIME,
+    "cooldownUntil" TIMESTAMP(3),
     "cooldownStreak" INTEGER NOT NULL DEFAULT 0,
     "cooldownReason" TEXT,
-    "lastCheckinAt" DATETIME,
+    "lastCheckinAt" TIMESTAMP(3),
     "lastCheckinOk" BOOLEAN,
-    "lastRefreshAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
-    CONSTRAINT "Account_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "Provider" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+    "lastRefreshAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Account_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "ModelRoute" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "model" TEXT NOT NULL,
     "enabled" BOOLEAN NOT NULL DEFAULT true,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "ModelRoute_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "RouteCandidate" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "routeId" INTEGER NOT NULL,
     "providerId" TEXT NOT NULL,
     "model" TEXT NOT NULL,
     "enabled" BOOLEAN NOT NULL DEFAULT true,
     "sortOrder" INTEGER NOT NULL,
-    CONSTRAINT "RouteCandidate_routeId_fkey" FOREIGN KEY ("routeId") REFERENCES "ModelRoute" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+
+    CONSTRAINT "RouteCandidate_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "VirtualKey" (
-    "id" TEXT NOT NULL PRIMARY KEY,
+    "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "keyValue" TEXT NOT NULL,
     "keyPrefix" TEXT NOT NULL,
@@ -98,34 +115,40 @@ CREATE TABLE "VirtualKey" (
     "remark" TEXT,
     "dailyRequestLimit" INTEGER NOT NULL DEFAULT 0,
     "dailyTokenLimit" INTEGER NOT NULL DEFAULT 0,
-    "monthlyCostLimit" REAL NOT NULL DEFAULT 0,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "monthlyCostLimit" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "VirtualKey_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "SystemSetting" (
-    "key" TEXT NOT NULL PRIMARY KEY,
+    "key" TEXT NOT NULL,
     "value" JSONB NOT NULL,
-    "updatedAt" DATETIME NOT NULL
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "SystemSetting_pkey" PRIMARY KEY ("key")
 );
 
 -- CreateTable
 CREATE TABLE "CheckinLog" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "providerId" TEXT NOT NULL,
     "accountId" TEXT,
     "accountName" TEXT,
     "success" BOOLEAN NOT NULL,
     "manual" BOOLEAN NOT NULL DEFAULT false,
     "result" JSONB,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "CheckinLog_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "RequestLog" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "id" SERIAL NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "model" TEXT NOT NULL,
     "protocol" TEXT NOT NULL DEFAULT 'openai',
     "providerId" TEXT,
@@ -138,22 +161,26 @@ CREATE TABLE "RequestLog" (
     "cachedTokens" INTEGER,
     "apiKeyName" TEXT,
     "error" TEXT,
-    "usageExact" BOOLEAN
+    "usageExact" BOOLEAN,
+
+    CONSTRAINT "RequestLog_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "JobRun" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "job" TEXT NOT NULL,
     "triggered" TEXT NOT NULL DEFAULT 'cron',
     "success" BOOLEAN NOT NULL,
     "detail" JSONB,
-    "startedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "JobRun_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "UsageDaily" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "day" TEXT NOT NULL,
     "providerId" TEXT NOT NULL DEFAULT '',
     "apiKeyName" TEXT NOT NULL DEFAULT '',
@@ -163,39 +190,42 @@ CREATE TABLE "UsageDaily" (
     "inputTokens" INTEGER NOT NULL DEFAULT 0,
     "outputTokens" INTEGER NOT NULL DEFAULT 0,
     "cachedTokens" INTEGER NOT NULL DEFAULT 0,
-    "updatedAt" DATETIME NOT NULL
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "UsageDaily_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "ModelPricing" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "model" TEXT NOT NULL,
-    "inputPerMTok" REAL NOT NULL DEFAULT 0,
-    "outputPerMTok" REAL NOT NULL DEFAULT 0,
-    "cachedPerMTok" REAL NOT NULL DEFAULT 0,
-    "updatedAt" DATETIME NOT NULL,
-    "updatedBy" TEXT NOT NULL DEFAULT 'admin'
-);
+    "inputPerMTok" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "outputPerMTok" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "cachedPerMTok" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "updatedBy" TEXT NOT NULL DEFAULT 'admin',
 
--- CreateIndex
-CREATE UNIQUE INDEX "ModelPricing_model_key" ON "ModelPricing"("model");
+    CONSTRAINT "ModelPricing_pkey" PRIMARY KEY ("id")
+);
 
 -- CreateTable
 CREATE TABLE "BalanceSnapshot" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "day" TEXT NOT NULL,
     "providerId" TEXT NOT NULL,
     "accountId" TEXT NOT NULL,
     "accountName" TEXT NOT NULL DEFAULT '',
-    "balance" REAL NOT NULL DEFAULT 0,
-    "total" REAL NOT NULL DEFAULT 0,
+    "balance" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "total" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "success" BOOLEAN NOT NULL DEFAULT true,
-    "updatedAt" DATETIME NOT NULL
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "BalanceSnapshot_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "AuditLog" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "id" SERIAL NOT NULL,
     "action" TEXT NOT NULL,
     "entity" TEXT NOT NULL,
     "entityId" TEXT NOT NULL DEFAULT '',
@@ -203,7 +233,9 @@ CREATE TABLE "AuditLog" (
     "detail" JSONB,
     "ip" TEXT NOT NULL DEFAULT '',
     "actor" TEXT NOT NULL DEFAULT 'admin',
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "AuditLog_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
@@ -261,6 +293,9 @@ CREATE INDEX "UsageDaily_day_idx" ON "UsageDaily"("day");
 CREATE UNIQUE INDEX "UsageDaily_day_providerId_apiKeyName_model_key" ON "UsageDaily"("day", "providerId", "apiKeyName", "model");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "ModelPricing_model_key" ON "ModelPricing"("model");
+
+-- CreateIndex
 CREATE INDEX "BalanceSnapshot_day_idx" ON "BalanceSnapshot"("day");
 
 -- CreateIndex
@@ -274,4 +309,10 @@ CREATE INDEX "AuditLog_createdAt_idx" ON "AuditLog"("createdAt");
 
 -- CreateIndex
 CREATE INDEX "AuditLog_entity_action_idx" ON "AuditLog"("entity", "action");
+
+-- AddForeignKey
+ALTER TABLE "Account" ADD CONSTRAINT "Account_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "Provider"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "RouteCandidate" ADD CONSTRAINT "RouteCandidate_routeId_fkey" FOREIGN KEY ("routeId") REFERENCES "ModelRoute"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 

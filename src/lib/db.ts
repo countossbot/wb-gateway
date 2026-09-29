@@ -58,7 +58,13 @@ const PRAGMA_KEY = "__uag_sqlite_pragmas_applied__"
  * 回读日志打印 journal_size_limit / wal_autocheckpoint 等实际生效值，
  * 供运维直接核对（验收：PRAGMA journal_size_limit 返回 67108864）。
  */
+/** 当前数据源是否为 SQLite。PG/Aiven 部署下所有 PRAGMA / WAL 逻辑整体跳过。 */
+export const isSqlite =
+  (process.env.DATABASE_URL ?? '').trim().startsWith('file:')
+
 export async function applySqlitePragmas(): Promise<void> {
+  // v4.1.0：PostgreSQL 无 PRAGMA 概念，非 file: 数据源直接跳过（否则每次启动刷 PRAGMA 报错日志）
+  if (!isSqlite) return
   const g = globalThis as unknown as Record<string, unknown>
   if (g[PRAGMA_KEY]) return
   g[PRAGMA_KEY] = true

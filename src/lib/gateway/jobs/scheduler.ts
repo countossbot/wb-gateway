@@ -12,7 +12,7 @@
 import { getRuntimeSettingsAsync } from "../config/runtimeSettings";
 import { getConfig } from "../config/configService";
 import { getProviderFleet } from "../core/fleet";
-import { db } from "@/lib/db";
+import { db, isSqlite } from "@/lib/db";
 import { statSync } from "node:fs";
 
 interface CronFields {
@@ -430,21 +430,25 @@ async function tick(): Promise<void> {
     //   b) 无条件执行（每小时）：周期性 TRUNCATE 兑底（低流量时 WAL 永远很小，臂 a 不触发）
     //   两者共用同一执行体：checkpoint 前在当前连接重设 per-connection pragma，
     //   TRUNCATE 把 -wal 直接收到 0 字节；失败仅 warn 不抛出。
-    const walNow = (() => {
-      try {
-        return statSync("db/custom.db-wal").size;
-      } catch {
-        return 0;
-      }
-    })();
+    // v4.1.0：PostgreSQL 无 WAL/PRAGMA 概念，非 SQLite 数据源整段跳过（walNow 恒 0 → 两臂都不触发）。
+    const walNow = isSqlite
+      ? (() => {
+          try {
+            return statSync("db/custom.db-wal").size;
+          } catch {
+            return 0;
+          }
+        })()
+      : 0;
     const walOverThreshold = walNow > WAL_TRUNCATE_THRESHOLD_BYTES && now.getTime() - lastWalThresholdCheckAt >= WAL_THRESHOLD_CHECK_INTERVAL_MS;
     const walHourlyDue = now.getTime() - lastWalCheckpointAt >= WAL_CHECKPOINT_INTERVAL_MS;
+    // v4.1.0：非 SQLite 数据源两臂恒不触发（walNow 为 0 时 walOverThreshold 已为 false，此处再兜一层）
+    const walDue = isSqlite && (walOverThreshold || walHourlyDue);
     if (walOverThreshold) lastWalThresholdCheckAt = now.getTime();
-    if (walOverThreshold || walHourlyDue) {
+    if (walDue) {
       lastWalCheckpointAt = now.getTime();
       try {
         await db.$queryRawUnsafe(`PRAGMA journal_size_limit = 67108864`);
-        await db.$queryRawUnsafe(`PRAGMA wal_autocheckpoint = 256`);
         const rows = (await db.$queryRawUnsafe(`PRAGMA wal_checkpoint(TRUNCATE)`)) as Array<Record<string, unknown>>;
         const r0 = rows[0] ?? {};
         console.log(`[Scheduler] WAL checkpoint(TRUNCATE) [${walOverThreshold ? "threshold" : "hourly"}]: pre=${walNow}B busy=${String(r0.busy)} wal_pages=${String(r0.log)} checkpointed=${String(r0.checkpointed)}`);

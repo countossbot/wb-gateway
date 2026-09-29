@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Universal AI Gateway · 控制台",
   description:
-    "通用 AI 统一网关：Anthropic ⇄ OpenAI 双向协议转译、多提供商容灾、WorkBuddy 签到与 Token 保活、SQLite 本地部署、Web 管理控制台。",
+    "通用 AI 统一网关：Anthropic ⇄ OpenAI 双向协议转译、多提供商容灾、WorkBuddy 签到与 Token 保活、PostgreSQL 云部署、Web 管理控制台。",
   keywords: [
     "ai-gateway",
     "universal-ai-gateway",
@@ -26,7 +26,7 @@ export const metadata: Metadata = {
     "cc-switch",
     "workbuddy",
     "nodejs",
-    "sqlite",
+    "postgresql",
   ],
   authors: [{ name: "Universal AI Gateway" }],
   icons: {
@@ -34,7 +34,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title: "Universal AI Gateway",
-    description: "Anthropic ⇄ OpenAI 双向转译的多提供商 AI 网关（Node.js + SQLite）",
+    description: "Anthropic ⇄ OpenAI 双向转译的多提供商 AI 网关（Node.js + PostgreSQL）",
     siteName: "Universal AI Gateway",
     type: "website",
   },

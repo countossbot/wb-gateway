@@ -151,8 +151,12 @@ function getDispatcher(proxyUrl: string): Dispatcher | null {
       },
       {
         ...t,
-        keepAliveTimeout: 60_000,
-        keepAliveMaxTimeout: 600_000,
+        // v4.3.0：SOCKS5 出口按「每个新连接随机选节点」语义工作，连接池复用会让节点
+        // 固定不变（实测：60s 保活窗口内出口 IP 恒定；超过窗口才换）。故此处禁用保活
+        // 与流水线，使每个请求都新建 TCP 连接，从而每次重新选节点。
+        keepAliveTimeout: 1,
+        keepAliveMaxTimeout: 1_000,
+        pipelining: 0,
       }
     ) as unknown as Dispatcher;
   } else {

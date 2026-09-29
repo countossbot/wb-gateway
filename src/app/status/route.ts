@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
       {
         service: "universal-ai-gateway",
         version: VERSION,
-        storage: "sqlite",
+        storage: "postgresql",
       },
       null,
       2

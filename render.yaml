@@ -1,0 +1,29 @@
+# Universal AI Gateway —— Render 部署描述文件
+#
+# 用法：Render Dashboard → New → Blueprint → 关联本仓库，Render 会读取本文件。
+#
+# 数据库：使用外部 Aiven PostgreSQL（非 Render 自建 PG），因此 DATABASE_URL 声明为
+# sync: false —— 首次部署时 Render 会提示你手工填入 Aiven 的 Service URI，之后可在
+# Dashboard → Environment 随时修改，不会进 Git。
+#
+# 首启行为：应用启动时 src/instrumentation.ts 会调用 ensureDatabaseSchema()，
+# 探测到空库后自动执行 prisma/init.sql（PostgreSQL 方言）建表，并播种默认管理员。
+# 幂等，重复部署不会重复执行，无需手工迁移。
+
+services:
+  - type: web
+    name: universal-ai-gateway
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter          # 免费层 15 分钟无流量会休眠，冷启动需等待建表完成
+    region: singapore      # 就近选择；Aiven 实例建议同区域以降低 RTT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false        # Aiven Service URI，含 ?sslmode=require，手工填入
+      - key: NODE_ENV
+        value: production
+      # Render 自动注入 PORT，应用按此监听，无需声明。
+      # Aiven 不限制连接数，如遇冷启动并发飙升可追加连接池参数：
+      #   DATABASE_URL=postgres://...?sslmode=require&connection_limit=10&pool_timeout=20

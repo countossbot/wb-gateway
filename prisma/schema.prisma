@@ -1,13 +1,13 @@
-// Universal-AI-Gateway 重构版 — SQLite 数据层
+// Universal-AI-Gateway 重构版 — PostgreSQL 数据层（Aiven 云托管 / 自建均可）
 // 按领域拆分（原项目把所有配置塞成单个 GATEWAY_CONFIG JSON blob，此处拆为关系表）。
-// 约束：凭据字段为 Json 明文存储，DB 文件权限 0600 保护（见 README「安全」章节）。
+// 约束：凭据字段为 Json 明文存储，依赖数据库侧访问控制与 TLS 保护（见 README「安全」章节）。
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

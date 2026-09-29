@@ -44,17 +44,13 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV HOSTNAME=0.0.0.0
 ENV PORT=18787
-ENV DATABASE_URL=file:/app/db/custom.db
+# DATABASE_URL 由平台注入（Render / Aiven / 自建 PG），镜像内不设默认值以免误连。
+# 仅 SQLite 单机部署时需要显式提供 file: 形式连接串。
 
-# Prisma's SQLite engine needs the system OpenSSL libraries; CA certificates are
-# needed for the gateway's outbound HTTPS requests.
+# Prisma 的 libssl 依赖 + 出站 HTTPS 所需 CA 证书。
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/*
-
-# SQLite database directory. The container runs as the non-root node user.
-RUN mkdir -p /app/db \
-    && chown node:node /app/db
 
 # Next.js standalone output already contains the traced production dependencies.
 # The build script has also placed static assets, public assets, and init.sql here.

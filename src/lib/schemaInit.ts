@@ -1,13 +1,14 @@
-// v4.0.0：容器首启自动建表 + 默认管理员播种。
+// v4.1.0：容器首启自动建表 + 默认管理员播种（PostgreSQL / SQLite 双方言）。
 //
 // 背景：容器化部署时 /app/db 挂载的具名卷初始为空，不再依赖本地预先生成的 db 文件；
 // /api/console/auth/setup 有防抢占设计（仅接受本机请求），容器化后访问者来自公网必然 403，
 // 不播种默认管理员就无法进入控制台。
 //
 // 两段职责（均幂等，重复重启不重复执行、不报错）：
-//   1. ensureDatabaseSchema() —— 检测 DATABASE_URL 指向的 SQLite 库是否存在/非空，
-//      空库则执行 prisma/init.sql（由 `prisma migrate diff --from-empty` 生成，
-//      纯 DDL 无业务数据；构建期随镜像分发，不提交任何 .db 文件进仓库）。
+//   1. ensureDatabaseSchema() —— 检测 DATABASE_URL 指向的库是否存在/非空。
+//      · PostgreSQL（Aiven 云托管）：查 information_schema.tables 判定，空库执行 PG 方言 init.sql。
+//      · SQLite：查 sqlite_master 判定，空库执行 SQLite 方言 init.sql。
+//      init.sql 由 `prisma migrate diff --from-empty` 生成（纯 DDL 无业务数据），构建期随镜像分发。
 //   2. seedDefaultAdmin() —— 仅当库内不存在任何管理员时创建默认管理员
 //      （用户名 admin / 密码 gateway-admin-2026，可用环境变量覆盖；
 //      生产环境应改为强口令）。已存在管理员则直接跳过，不覆盖不报错。
@@ -15,11 +16,12 @@
 // 调用时机：instrumentation.register() 最前（nodejs runtime），先于一切业务 DB 访问。
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { db } from "@/lib/db";
+import { db, isSqlite } from "@/lib/db";
 
-// ---- 进程内幂等标记（防 instrumentation 与并发 route 双重执行；HMR 重载沿用同一 globalThis） ----
 const SCHEMA_INIT_KEY = "__uag_schema_init_promise__";
 const SEED_ADMIN_KEY = "__uag_seed_admin_promise__";
+
+// ---- 进程内幂等标记（防 instrumentation 与并发 route 双重执行；HMR 重载沿用同一 globalThis） ----
 
 /** 解析 DATABASE_URL 中的 SQLite 文件路径（剥离 file: 前缀与 query 串） */
 function resolveDbFilePath(): string | null {
@@ -91,6 +93,18 @@ export async function ensureDatabaseSchema(): Promise<SchemaInitResult> {
   if (pending) return pending;
 
   const run = (async (): Promise<SchemaInitResult> => {
+    if (!isSqlite) {
+      // v4.1.0：PostgreSQL（Aiven 等）无文件概念，空库判定走 information_schema。
+      // 表存在即视为已初始化；空库则执行 PG 方言的 prisma/init.sql。
+      const tables = (await db.$queryRawUnsafe(
+        `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`
+      )) as Array<{ name: string }>;
+      if (tables.length > 0) {
+        return { initialized: false, reason: "already-initialized", statements: 0 };
+      }
+      const applied = await applyInitSql("empty-database", "(postgresql)");
+      return { initialized: true, reason: "empty-database", statements: applied };
+    }
     const dbPath = resolveDbFilePath();
     if (dbPath && !existsSync(dbPath)) {
       const applied = await applyInitSql("file-missing", dbPath);
@@ -115,7 +129,7 @@ export async function ensureDatabaseSchema(): Promise<SchemaInitResult> {
   return run;
 }
 
-/** 执行 init.sql 建表（事务内逐条 DDL，返回语句数） */
+/** 执行 init.sql 建表（事务内逐条 DDL，返回语句数）。init.sql 方言由 schema.prisma 的 provider 决定。 */
 async function applyInitSql(reason: string, dbPath: string): Promise<number> {
   const initSqlPath = resolveInitSqlPath();
   if (!existsSync(initSqlPath)) {
@@ -128,7 +142,7 @@ async function applyInitSql(reason: string, dbPath: string): Promise<number> {
     throw new Error(`[SchemaInit] init.sql at ${initSqlPath} contains no executable statements`);
   }
   console.log(
-    `[SchemaInit] ${reason}: initializing SQLite schema at ${dbPath} from ${initSqlPath} (${statements.length} statements)`
+    `[SchemaInit] ${reason}: initializing schema at ${dbPath} from ${initSqlPath} (${statements.length} statements)`
   );
   await db.$transaction(async (tx) => {
     for (const stmt of statements) {
@@ -136,9 +150,11 @@ async function applyInitSql(reason: string, dbPath: string): Promise<number> {
     }
   });
   // 回读核对（启动日志可直接核对建表数量）
-  const tables = (await db.$queryRawUnsafe(
-    `SELECT count(*) as n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`
-  )) as Array<{ n: number | bigint }>;
+  // 回读核对（启动日志可直接核对建表数量）。v4.1.0：按数据源方言选择系统表。
+  const countSql = isSqlite
+    ? `SELECT count(*) as n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`
+    : `SELECT count(*) as n FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`;
+  const tables = (await db.$queryRawUnsafe(countSql)) as Array<{ n: number | bigint }>;
   console.log(`[SchemaInit] schema ready: ${String(tables[0]?.n ?? "?")} tables created`);
   return statements.length;
 }
