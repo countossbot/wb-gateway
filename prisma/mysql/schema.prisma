@@ -1,4 +1,6 @@
-// Universal-AI-Gateway 重构版 — PostgreSQL 数据层（Aiven 云托管 / 自建均可）
+// Universal-AI-Gateway 重构版 — MySQL 数据层（远程 MySQL 8.x / MariaDB 10.5+）。
+// 本文件由 prisma/schema.prisma 派生（scripts/sync-schemas.ts 可校验一致性），
+// 与 PG 版唯一差异为 datasource.provider 与 generator.client.output。
 // 按领域拆分（原项目把所有配置塞成单个 GATEWAY_CONFIG JSON blob，此处拆为关系表）。
 // 约束：凭据字段为 Json 明文存储，依赖数据库侧访问控制与 TLS 保护（见 README「安全」章节）。
 
@@ -6,11 +8,11 @@ generator client {
   provider = "prisma-client-js"
   // 双数据库支持：PG client 生成到独立目录，与 MySQL client 共存（见 prisma/mysql/schema.prisma）。
   // 运行时由 src/lib/db.ts 依据 DATABASE_URL 协议动态选择。
-  output   = "../node_modules/.prisma-pg/client"
+  output   = "../../node_modules/.prisma-mysql/client"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 

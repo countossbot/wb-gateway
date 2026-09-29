@@ -2,11 +2,11 @@
 
 <div align="center">
 
-**通用全功能 AI 统一网关 —— 纯 Node.js 常驻进程 + PostgreSQL + Web 管理控制台**
+**通用全功能 AI 统一网关 —— 纯 Node.js 常驻进程 + PostgreSQL / MySQL + Web 管理控制台**
 
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.5-339933?logo=node.js&logoColor=white)]()
 [![Bun](https://img.shields.io/badge/Bun-1.3.4-000000?logo=bun&logoColor=white)]()
-[![Storage](https://img.shields.io/badge/Storage-PostgreSQL-4169E1?logo=postgresql&logoColor=white)]()
+[![Storage](https://img.shields.io/badge/Storage-PostgreSQL%20%7C%20MySQL-4169E1?logo=postgresql&logoColor=white)]()
 [![Protocol](https://img.shields.io/badge/Protocol-Anthropic%20%7C%20OpenAI-059669.svg)]()
 [![Port](https://img.shields.io/badge/Port-18787-D97706.svg)]()
 [![Deploy](https://img.shields.io/badge/Deploy-Render%20%7C%20Docker%20%7C%20systemd%20%7C%20launchd-2496ED.svg)]()
@@ -15,7 +15,7 @@
 
 > 本仓库是 [Ericsunsk/Universal-AI-Gateway](https://github.com/Ericsunsk/Universal-AI-Gateway) v2.4.0 的彻底重构：
 > 架构、目录、数据层、运行时全部重写为**纯 Node.js 常驻进程**（原 Cloudflare Workers + Vercel 双引擎），
-> 配置与状态存储由云 KV 迁移为**关系型数据库**（PostgreSQL，支持 Aiven 等云托管；同时保留 SQLite 单机模式），并新增自带 **Web 管理控制台**。
+> 配置与状态存储由云 KV 迁移为**关系型数据库**（PostgreSQL 或 MySQL，按 `DATABASE_URL` 协议自动选择），并新增自带 **Web 管理控制台**。
 > 原项目的全部业务能力（协议转译、路由容灾、上游提供商、鉴权、运维自动化）等价保留，对外 API 契约不变。
 >
 > 当前版本 **4.10.0**（[版本号定义](src/lib/gateway/config/configService.ts)，`/status` 端点实时返回）。
@@ -55,8 +55,8 @@
 | :--- | :--- | :--- |
 | **Node.js** | ≥ 22.5 | 运行时（standalone server）。未使用任何需本地编译的原生模块，刻意回避 `better-sqlite3` / `pg-native`——若 `ignore-scripts` 生效，原生模块会静默安装失败，本项目 Prisma 方案不受影响 |
 | **Bun** | 1.3.4 | **包管理器与 `start` 脚本运行时**。仓库锁定 `bun.lock`，请勿混用 npm / pnpm / yarn 锁文件 |
-| **PostgreSQL** | ≥ 13 | 数据层。云托管（Aiven / Neon / RDS）或自建均可；首发部署自动建表，无需手工迁移 |
-| **磁盘** | ≥ 500 MB | 依赖约 400 MB（SQLite 单机模式下另加单文件占用） |
+| **PostgreSQL** | ≥ 13 | 数据层（推荐）。云托管（Aiven / Neon / RDS）或自建均可；首发部署自动建表，无需手工迁移 |
+| **MySQL** | ≥ 8.0 | 数据层（备选，同样支持 MariaDB 10.5+）。设置 `DATABASE_URL=mysql://...` 即自动切换，无需改代码或重新构建 |
 | **内存** | ≥ 256 MB | 运行态常态 < 150 MB，容器编排建议限制 320 MB |
 
 > **为什么同时需要 Node 和 Bun**：`bun install` 负责依赖安装与 `prisma generate`，`next build` 与生产启动走 Node——避免 Bun 运行 standalone server 的兼容不确定性。安装 Bun：`curl -fsSL https://bun.sh/install | bash`。
@@ -75,7 +75,7 @@ cp .env.example .env
 # 编辑 .env，填入 PostgreSQL 连接串（Aiven 控制台复制 Service URI，保留 sslmode=require）：
 # DATABASE_URL=postgres://user:password@host:5432/dbname?sslmode=require
 
-# 4. 建表：无需手工迁移 —— 首次启动时自动检测空库并执行 prisma/init.sql
+# 4. 建表：无需手工迁移 —— 首次启动时自动检测空库并执行对应方言的 init SQL
 #   （见下方「启动自检」；如确需手工建表，可执行 bun run db:push）
 bun run db:push
 
@@ -97,7 +97,7 @@ bun run dev
 
 进程启动时（instrumentation 钩子）自动执行：
 
-- ✅ 数据库连通可写 —— 首启检测空库后自动执行 `prisma/init.sql` 建表（17 张表，幂等）
+- ✅ 数据库连通可写 —— 首启检测空库后自动执行 `prisma/init.{postgres,mysql}.sql` 建表（17 张表，幂等）
 - ✅ 定时任务调度器启动（签到 + Token 保活）
 - ✅ `master_key` / `cron_secret` 存在性检查（缺失则生成强随机值——**拒绝硬编码兜底**）
 
@@ -152,7 +152,7 @@ bun run dev
 
 - **免费层休眠**：Render 免费 Web 服务 15 分钟无流量即休眠，冷启动需等建表完成。生产建议 `starter` 及以上。
 - **连接数**：Aiven 不硬性限制，但 Serverless 冷启动并发高时建议在连接串追加 `&connection_limit=10&pool_timeout=20` 收敛。
-- **不依赖迁移文件**：仓库无 `prisma/migrations/`，建表由首启读 `prisma/init.sql` 完成；schema 变更后重新生成该文件（`bun run db:dump-schema`）即可。
+- **建表文件由 schema 生成**：仓库无 `prisma/migrations/`，建表由首启读取 `prisma/init.postgres.sql` / `prisma/init.mysql.sql` 完成；schema 变更后跑 `bun run db:dump-schema`（一次生成两份）即可。
 
 ### 方式一：裸机直接运行（推荐本地开发）
 
@@ -189,7 +189,7 @@ docker compose logs -f
 | 配置项 | 取值 | 作用 |
 | :--- | :--- | :--- |
 | `image` | `ghcr.io/<用户名>/<仓库名>:latest` | 只拉取不构建，小内存机器安全（镜像名以仓库内 `docker-compose.yml` 实际取值为准） |
-| `init.sql` 自动建表 | 空卷首启自动执行 | 无需人工跑迁移；重复重启幂等 |
+| `init.{postgres,mysql}.sql` 自动建表 | 空库首启自动执行（按 `DATABASE_URL` 方言） | 无需人工跑迁移；重复重启幂等 |
 | 默认管理员播种 | 仅当库内无管理员时 | 重复重启不覆盖不报错 |
 | `[::]:18787:18787` | 双栈监听 | IPv4 + IPv6 同时可达 |
 | `DATABASE_URL` 环境变量 | 指向云托管 PG | 数据与容器生命周期解绑，扩容/迁移无需搬数据卷 |
@@ -231,7 +231,7 @@ docker run -d \
   uag:local
 ```
 
-> 容器首启会自动执行 `prisma/init.sql` 建表（PostgreSQL 方言）并播种默认管理员（仅在库内无管理员时），无需手动跑迁移。库内已有管理员后，`UAG_DEFAULT_ADMIN_PASSWORD` 不再生效。
+> 容器首启会自动执行对应方言的 init SQL 建表（`prisma/init.postgres.sql` 或 `prisma/init.mysql.sql`，由 `DATABASE_URL` 决定）并播种默认管理员（仅在库内无管理员时），无需手动跑迁移。库内已有管理员后，`UAG_DEFAULT_ADMIN_PASSWORD` 不再生效。
 
 > **构建期无需 `DATABASE_URL`**：Prisma 在 `prisma generate` 阶段只读取 schema 的 provider，不建立连接。运行期连接串由平台（Render / Aiven）注入。
 
@@ -244,7 +244,7 @@ docker push registry.example.com/uag:4.10.0
 docker push registry.example.com/uag:latest
 ```
 
-**多阶段构建说明**（见仓库内 `Dockerfile`）：builder 阶段装 Bun 与依赖、跑 `prisma generate`、执行 `next build`（走 Node 而非 Bun）并把 static / public / init.sql 复制进 standalone 产物；runner 阶段仅保留 `node:22-bookworm-slim` + `ca-certificates` + `openssl` + standalone 产物，以非 root 的 `node` 用户运行，镜像内**不含 Bun、TypeScript、Prisma CLI 与源码树**。
+**多阶段构建说明**（见仓库内 `Dockerfile`）：builder 阶段装 Bun 与依赖、生成两份 Prisma Client（PG / MySQL）、执行 `next build`（走 Node 而非 Bun）并把 static / public / 两份 init SQL 复制进 standalone 产物；runner 阶段仅保留 `node:22-bookworm-slim` + `ca-certificates` + `openssl` + standalone 产物，以非 root 的 `node` 用户运行，镜像内**不含 Bun、TypeScript、Prisma CLI 与源码树**。
 
 **改用宿主目录绑定数据**时须先处理属主（容器以 UID 1000 运行）：
 
@@ -294,7 +294,7 @@ WantedBy=multi-user.target
 sudo useradd -r -s /usr/sbin/nologin uag
 sudo mkdir -p /opt/uag && sudo chown -R uag:uag /opt/uag
 # 将项目部署到 /opt/uag 并完成 build 后：
-# 数据库为外部 PG，无需本地文件权限（该行在 SQLite 模式下才需要：chmod 600 <db 文件>）
+# 数据库为外部 PG / MySQL，无需本地文件权限
 sudo systemctl daemon-reload
 sudo systemctl enable --now uag
 sudo journalctl -u uag -f
@@ -561,16 +561,16 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 
 ## 💾 数据存储
 
-- **驱动**：Prisma ORM + **PostgreSQL**（≥ 13）。选择理由：零原生编译依赖（规避 `ignore-scripts` 环境下原生模块静默安装失败），类型安全 schema，且与主流云托管（Aiven / Neon / RDS）无缝对接。
-- **部署形态**：生产推荐**外部托管 PG**（Aiven 等），应用容器保持无状态，扩容与迁移无需搬数据卷；亦支持 SQLite 单机模式（`DATABASE_URL=file:...`，需把 `prisma/schema.prisma` 的 provider 与 `init.sql` 方言同步改回 sqlite）。
-- **连接串**：由环境变量 `DATABASE_URL` 提供，形如 `postgres://user:pw@host:5432/db?sslmode=require`。**务必保留 `sslmode=require`**，云托管 PG 普遍拒绝非 TLS 连接。
-  - 云托管：Aiven / Neon / RDS 控制台复制 Service URI 即可
-  - 自建：`postgres://user:pw@127.0.0.1:5432/uag?sslmode=disable`（本机可免 TLS）
-- **模式**：WAL 日志模式 + 合理 busy timeout（长连接流式请求、定时任务与后台令牌续签并发写入安全）。
-- **表结构初始化**：两种幂等路径——裸机构建流程用 `bun run db:push`；容器首启用 `prisma/init.sql` 自动建表（`SchemaInit` 检测空库后执行）。
+- **驱动**：Prisma ORM + **PostgreSQL**（≥ 13，推荐）或 **MySQL**（≥ 8.0 / MariaDB 10.5+）。选择理由：零原生编译依赖（规避 `ignore-scripts` 环境下原生模块静默安装失败），类型安全 schema，且与主流云托管（Aiven / Neon / RDS / 云 MySQL）无缝对接。两份 Prisma schema（`prisma/schema.prisma` 与 `prisma/mysql/schema.prisma`）除 provider 外完全一致，构建时各生成一份 Client，运行时按 `DATABASE_URL` 协议加载。
+- **部署形态**：生产推荐**外部托管数据库**（Aiven PostgreSQL 或云 MySQL），应用容器保持无状态，扩容与迁移无需搬数据卷。数据源由 `DATABASE_URL` 协议决定，两种库共用同一份构建产物——切换只需改环境变量，**无需改 schema、无需重新构建**。
+- **连接串**：由环境变量 `DATABASE_URL` 提供，**仅此一个变量即可切换数据源**：
+  - PostgreSQL：`postgres://user:pw@host:5432/db?sslmode=require`（**务必保留 `sslmode=require`**，云托管 PG 普遍拒绝非 TLS 连接；本机自建可用 `sslmode=disable`）
+  - MySQL：`mysql://user:pw@host:3306/db`（需要 TLS 时在控制台侧要求，或加 `?sslaccept=strict`）
+  - 云托管：Aiven / Neon / RDS / 云 MySQL 控制台复制连接 URI 即可
+- **方言差异处理**：空库探测按方言选择 `information_schema` 的当前库表达式（PG `current_schema()` / MySQL `DATABASE()`），init SQL 也分两份；业务代码无需区分。
 - **表结构按领域拆分**（不再把配置塞成单个 JSON blob）：`AdminUser` / `Session` / `LoginAudit` / `Provider` / `Account`（含冷却状态与余额快照）/ `ModelRoute` / `RouteCandidate` / `VirtualKey` / `SystemSetting` / `CheckinLog` / `RequestLog` / `UsageDaily` / `ModelPricing` / `JobRun` / `SchemaVersion`。
-- **凭据存储方式**：**明文 + 文件权限保护**（`credentials` JSON 字段 + DB 文件 `0600`）。取舍说明：网关必须向上游还原明文凭据才能发请求，对称加密只是把「文件权限」换成「口令保管」——忘记口令即数据不可恢复，且进程内仍需持有解密密钥（防护面未实质扩大）。如需更强隔离，建议整盘加密 + 严格文件权限。
-- **备份**：控制台「设置 → 数据备份」一键导出全库 JSON（含凭据，仅属主保存）；恢复可用 KV 迁移工具的导入模式，或直接替换 DB 文件（**替换前先停进程**，避免 WAL 不一致）。
+- **凭据存储方式**：**明文 + 数据库访问控制保护**（`credentials` JSON 字段）。取舍说明：网关必须向上游还原明文凭据才能发请求，对称加密只是把「数据库权限」换成「口令保管」——忘记口令即数据不可恢复，且进程内仍需持有解密密钥（防护面未实质扩大）。如需更强隔离，建议启用云数据库的静态加密 + 严格账号权限 + 强制 TLS。
+- **备份**：控制台「设置 → 数据备份」一键导出全库 JSON（含凭据，仅属主保存）；恢复可用 KV 迁移工具的导入模式，或用 `pg_dump` / `mysqldump` 直接备份对应数据库。
 - **配置防御性行为**：写入前 schema 校验返回明确 `400`；`config_version` 乐观锁冲突返回 `409`；缺失关键密钥拒绝硬编码兜底；代码默认路由自动回填存量配置缺失条目（仅当引用的 provider 全部存在）。
 
 ---

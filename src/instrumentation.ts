@@ -1,7 +1,7 @@
 // Instrumentation —— Next.js 启动钩子：进程就绪时启动定时任务调度器（签到 / Token 保活）。
 // 原 Cloudflare Cron Triggers 的 Node 常驻等价物；调度配置存 SQLite，热生效。
 // v3.0.7：启动时自动执行 UsageDaily 历史回填（幂等，已有行的天跳过）。
-// v4.0.0：容器首启自动建表（prisma/init.sql）+ 默认管理员播种（幂等），先于一切业务 DB 访问。
+// v4.0.0：容器首启自动建表（prisma/init.postgres.sql 或 prisma/init.mysql.sql，按 DATABASE_URL 方言）+ 默认管理员播种（幂等），先于一切业务 DB 访问。
 import { applySqlitePragmas } from "@/lib/db";
 
 export async function register() {

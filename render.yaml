@@ -2,12 +2,16 @@
 #
 # 用法：Render Dashboard → New → Blueprint → 关联本仓库，Render 会读取本文件。
 #
-# 数据库：使用外部 Aiven PostgreSQL（非 Render 自建 PG），因此 DATABASE_URL 声明为
-# sync: false —— 首次部署时 Render 会提示你手工填入 Aiven 的 Service URI，之后可在
-# Dashboard → Environment 随时修改，不会进 Git。
+# 数据库：v4.2.0 起支持外部 PostgreSQL 与 MySQL，按 DATABASE_URL 协议自动识别。
+# 下面 DATABASE_URL 声明为 sync: false —— 首次部署时 Render 会提示手工填入连接串，
+# 之后可在 Dashboard → Environment 随时修改，不会进 Git。
+#   推荐 Aiven PostgreSQL: postgresql://user:pw@host:5432/db?sslmode=require
+#   亦可远程 MySQL:        mysql://user:pw@host:3306/db
 #
 # 首启行为：应用启动时 src/instrumentation.ts 会调用 ensureDatabaseSchema()，
-# 探测到空库后自动执行 prisma/init.sql（PostgreSQL 方言）建表，并播种默认管理员。
+# 探测到空库后自动执行对应方言的 init SQL（PG: prisma/init.postgres.sql /
+# MySQL: prisma/init.mysql.sql）建表，并播种默认管理员。
+# 幂等，重复部署不会重复执行，无需手工迁移。
 # 幂等，重复部署不会重复执行，无需手工迁移。
 
 services:
