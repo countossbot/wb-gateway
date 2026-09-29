@@ -16,7 +16,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter          # 免费层 15 分钟无流量会休眠，冷启动需等待建表完成
-    region: singapore      # 就近选择；Aiven 实例建议同区域以降低 RTT
+    region: oregon         # 与 Aiven 实例同区域：Aiven「California」= AWS us-west-2，选 Oregon 得 ~5-15ms RTT
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:

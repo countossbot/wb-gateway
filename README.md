@@ -1,24 +1,24 @@
-# ⚡ Universal-AI-Gateway（Node.js 重构版 v4.9.0）
+# ⚡ Universal-AI-Gateway（Node.js 重构版 v4.10.0）
 
 <div align="center">
 
-**通用全功能 AI 统一网关 —— 纯 Node.js 常驻进程 + SQLite + Web 管理控制台**
+**通用全功能 AI 统一网关 —— 纯 Node.js 常驻进程 + PostgreSQL + Web 管理控制台**
 
 [![Node](https://img.shields.io/badge/Node-%3E%3D22.5-339933?logo=node.js&logoColor=white)]()
 [![Bun](https://img.shields.io/badge/Bun-1.3.4-000000?logo=bun&logoColor=white)]()
-[![Storage](https://img.shields.io/badge/Storage-SQLite-003B57?logo=sqlite&logoColor=white)]()
+[![Storage](https://img.shields.io/badge/Storage-PostgreSQL-4169E1?logo=postgresql&logoColor=white)]()
 [![Protocol](https://img.shields.io/badge/Protocol-Anthropic%20%7C%20OpenAI-059669.svg)]()
 [![Port](https://img.shields.io/badge/Port-18787-D97706.svg)]()
-[![Deploy](https://img.shields.io/badge/Deploy-Docker%20%7C%20systemd%20%7C%20launchd-2496ED.svg)]()
+[![Deploy](https://img.shields.io/badge/Deploy-Render%20%7C%20Docker%20%7C%20systemd%20%7C%20launchd-2496ED.svg)]()
 
 </div>
 
 > 本仓库是 [Ericsunsk/Universal-AI-Gateway](https://github.com/Ericsunsk/Universal-AI-Gateway) v2.4.0 的彻底重构：
 > 架构、目录、数据层、运行时全部重写为**纯 Node.js 常驻进程**（原 Cloudflare Workers + Vercel 双引擎），
-> 配置与状态存储由云 KV 迁移为**本地 SQLite 单文件**，并新增自带 **Web 管理控制台**。
+> 配置与状态存储由云 KV 迁移为**关系型数据库**（PostgreSQL，支持 Aiven 等云托管；同时保留 SQLite 单机模式），并新增自带 **Web 管理控制台**。
 > 原项目的全部业务能力（协议转译、路由容灾、上游提供商、鉴权、运维自动化）等价保留，对外 API 契约不变。
 >
-> 当前版本 **4.9.0**（[版本号定义](src/lib/gateway/config/configService.ts)，`/status` 端点实时返回）。
+> 当前版本 **4.10.0**（[版本号定义](src/lib/gateway/config/configService.ts)，`/status` 端点实时返回）。
 > 📘 **从零搭建操作手册**：[`docs/搭建指南.md`](docs/搭建指南.md) —— 安装 → WorkBuddy 凭证导入 → 路由 → 客户端接入 → 验证 → 运维。
 
 ---
@@ -27,6 +27,7 @@
 
 - [快速开始](#-快速开始)
 - [部署方式](#-部署方式)
+  - [方式零：Render + Aiven（推荐云部署）](#方式零render--aiven推荐云部署)
   - [方式一：裸机直接运行](#方式一裸机直接运行推荐本地开发)
   - [方式二：Docker Compose（推荐生产）](#方式二docker-compose推荐生产)
   - [方式三：从源码构建 Docker 镜像](#方式三从源码构建-docker-镜像)
@@ -52,9 +53,10 @@
 
 | 组件 | 版本 | 说明 |
 | :--- | :--- | :--- |
-| **Node.js** | ≥ 22.5 | 运行时（standalone server）。未使用任何需本地编译的原生模块，刻意回避 `better-sqlite3`——若 `ignore-scripts` 生效，原生模块会静默安装失败，本项目 Prisma + SQLite 方案不受影响 |
+| **Node.js** | ≥ 22.5 | 运行时（standalone server）。未使用任何需本地编译的原生模块，刻意回避 `better-sqlite3` / `pg-native`——若 `ignore-scripts` 生效，原生模块会静默安装失败，本项目 Prisma 方案不受影响 |
 | **Bun** | 1.3.4 | **包管理器与 `start` 脚本运行时**。仓库锁定 `bun.lock`，请勿混用 npm / pnpm / yarn 锁文件 |
-| **磁盘** | ≥ 500 MB | 依赖约 400 MB + SQLite 单文件 |
+| **PostgreSQL** | ≥ 13 | 数据层。云托管（Aiven / Neon / RDS）或自建均可；首发部署自动建表，无需手工迁移 |
+| **磁盘** | ≥ 500 MB | 依赖约 400 MB（SQLite 单机模式下另加单文件占用） |
 | **内存** | ≥ 256 MB | 运行态常态 < 150 MB，容器编排建议限制 320 MB |
 
 > **为什么同时需要 Node 和 Bun**：`bun install` 负责依赖安装与 `prisma generate`，`next build` 与生产启动走 Node——避免 Bun 运行 standalone server 的兼容不确定性。安装 Bun：`curl -fsSL https://bun.sh/install | bash`。
@@ -68,12 +70,13 @@ bun install --frozen-lockfile
 # 2. 生成 Prisma Client（首次，或 schema.prisma 变更后）
 bun run db:generate
 
-# 3. 配置数据库路径
+# 3. 配置数据库连接（云托管或本地 PG）
 cp .env.example .env
-# 编辑 .env：本地部署建议改为相对路径
-# DATABASE_URL=file:./db/custom.db
+# 编辑 .env，填入 PostgreSQL 连接串（Aiven 控制台复制 Service URI，保留 sslmode=require）：
+# DATABASE_URL=postgres://user:password@host:5432/dbname?sslmode=require
 
-# 4. 初始化 SQLite 表结构（首次）
+# 4. 建表：无需手工迁移 —— 首次启动时自动检测空库并执行 prisma/init.sql
+#   （见下方「启动自检」；如确需手工建表，可执行 bun run db:push）
 bun run db:push
 
 # 5. 构建并启动（默认端口 18787）
@@ -94,7 +97,7 @@ bun run dev
 
 进程启动时（instrumentation 钩子）自动执行：
 
-- ✅ SQLite 数据库可写（`SELECT 1` + 密钥初始化写入）
+- ✅ 数据库连通可写 —— 首启检测空库后自动执行 `prisma/init.sql` 建表（17 张表，幂等）
 - ✅ 定时任务调度器启动（签到 + Token 保活）
 - ✅ `master_key` / `cron_secret` 存在性检查（缺失则生成强随机值——**拒绝硬编码兜底**）
 
@@ -104,19 +107,62 @@ bun run dev
 
 ## 🏭 部署方式
 
-六种部署形态，按使用场景选用。**对外端点路径与响应结构不因部署方式变化而改变**。
+七种部署形态，按使用场景选用。**对外端点路径与响应结构不因部署方式变化而改变**。
+
+### 方式零：Render + Aiven（推荐云部署）
+
+适用：托管到云端、免运维。仓库内置 [`render.yaml`](render.yaml)，数据库使用 Aiven PostgreSQL（外部托管，非 Render 自建 PG）。
+
+**步骤**：
+
+1. **建 Aiven PostgreSQL** —— Aiven 控制台创建服务，记录 **Cloud/Region**（California 对应 AWS `us-west-2`）。
+2. **Render 建 Blueprint** —— Dashboard → New → Blueprint → 关联本仓库，Render 读取 `render.yaml` 自动创建 Web 服务。
+3. **填环境变量**（Dashboard → Environment）：
+
+| 键 | 必填 | 说明 |
+| :--- | :--- | :--- |
+| `DATABASE_URL` | 是 | Aiven 的 Service URI，形如 `postgres://avnadmin:...@host:port/defaultdb?sslmode=require`，**保留 `sslmode=require`** |
+| `UAG_DEFAULT_ADMIN_PASSWORD` | 是 | 覆盖默认口令 `gateway-admin-2026`。公网网关不填等于开门 |
+| `UAG_DEFAULT_ADMIN_USERNAME` | 否 | 默认 `admin` |
+| `RETRY_BASE_MS` | 否 | 上游重试基准延迟，默认 `600` |
+| `PRISMA_LOG_QUERIES` / `UAG_SSE_DEBUG` | 否 | 排障用（设为 `1`），平时勿开 |
+
+`PORT` 由 Render 自动注入，代码按它监听，无需手工设置；`NODE_ENV` 已在 `render.yaml` 固定为 `production`。
+**切勿设置 `ALLOW_INSECURE_COOKIE=1`** —— `production` 下它会放开非 HTTPS Cookie，等于关闭该防护。
+
+4. **选区域** —— `render.yaml` 的 `region` 需与 Aiven 实例同区域或最近邻：
+
+| Aiven 区域 | Render 建议 | 预期 DB RTT |
+| :--- | :--- | :--- |
+| California | **Oregon (US West)** | ~5–15 ms |
+| Ohio / Virginia | Ohio 或 Virginia (US East) | ~5–15 ms |
+| Frankfurt | Frankfurt (EU Central) | ~5–15 ms |
+| Singapore | Singapore (Southeast Asia) | ~5–15 ms |
+
+区域错配代价：DB 延迟按每请求多次往返叠加（鉴权查 key → 查路由 → 记用量 → 写日志，典型 4–5 次），跨洋错配 ~70 ms 即**每请求多 300 ms**。这比用户侧延迟重要得多——用户只有 1 次往返，DB 有 N 次。
+
+5. **部署** —— 首启自动建表，日志出现以下两行即就绪：
+
+```
+[SchemaInit] schema ready: 17 tables created
+[SchemaInit] default admin seeded
+```
+
+**注意事项**：
+
+- **免费层休眠**：Render 免费 Web 服务 15 分钟无流量即休眠，冷启动需等建表完成。生产建议 `starter` 及以上。
+- **连接数**：Aiven 不硬性限制，但 Serverless 冷启动并发高时建议在连接串追加 `&connection_limit=10&pool_timeout=20` 收敛。
+- **不依赖迁移文件**：仓库无 `prisma/migrations/`，建表由首启读 `prisma/init.sql` 完成；schema 变更后重新生成该文件（`bun run db:dump-schema`）即可。
 
 ### 方式一：裸机直接运行（推荐本地开发）
 
 适用：本机使用、需要改代码、调试。
 
-```bash
-bun install --frozen-lockfile
-bun run db:generate
-bun run db:push
-bun run build
+DATABASE_URL='postgres://user:pw@host:5432/db?sslmode=require' bun run build
 PORT=18787 bun start
 ```
+
+说明：`bun install` 已完成依赖安装与 `prisma generate`（postinstall）；schema 变更后单独执行 `bun run db:generate`。
 
 优点：零容器开销，改代码即时生效（`bun run dev`）。缺点：无进程守护，终端关闭即停。
 
@@ -133,11 +179,10 @@ docker compose up -d
 
 # 3. 跟踪首启日志，看到以下两行即就绪
 docker compose logs -f
-#   [SchemaInit] schema ready
+#   [SchemaInit] schema ready: 17 tables created
 #   [SchemaInit] default admin seeded
-```
 
-浏览器访问 `http://<主机>:18787`，用默认账号 `admin` / `gateway-admin-2026` 登录，**登录后立即修改密码**。
+浏览器访问 `http://<主机>:18787`，用默认账号 `admin` / `gateway-admin-2026` 登录，**登录后立即修改密码**（或在部署前用 `UAG_DEFAULT_ADMIN_PASSWORD` 覆盖默认口令）。
 
 **已内置的生产级保障**（见 [docker-compose.yml](docker-compose.yml)）：
 
@@ -147,18 +192,13 @@ docker compose logs -f
 | `init.sql` 自动建表 | 空卷首启自动执行 | 无需人工跑迁移；重复重启幂等 |
 | 默认管理员播种 | 仅当库内无管理员时 | 重复重启不覆盖不报错 |
 | `[::]:18787:18787` | 双栈监听 | IPv4 + IPv6 同时可达 |
-| `uag-data` 具名卷 | 挂载 `/app/db` | 数据与容器生命周期解绑 |
+| `DATABASE_URL` 环境变量 | 指向云托管 PG | 数据与容器生命周期解绑，扩容/迁移无需搬数据卷 |
 | `mem_limit: 320m` | — | 小内存 VPS 保护 |
 | `security_opt: no-new-privileges` | — | 禁止提权 |
 | `healthcheck` | 接受 200 与 503 | 空库 degraded 状态不误判为不健康 |
 | 日志轮转 | 10 MB × 3 | 防止日志撑爆磁盘 |
 
-**切换到宿主目录绑定**（数据更易备份）时注意权限——容器以非 root 的 `node` 用户运行，宿主目录若为 root 属主会报 `readonly database`：
-
-```bash
-mkdir -p ./data && sudo chown -R 1000:1000 ./data
-# 然后改 docker-compose.yml：- ./data:/app/db
-```
+> **数据库是外部 PG**，容器本身无状态——不再需要挂载数据卷。方式二/三的 `docker-compose.yml` 与 `docker run` 里的 `-v` 参数已不适用；如需本地 PG，可自行追加一个 `postgres:16` service 并把 `DATABASE_URL` 指向它。
 
 **常用运维命令**：
 
@@ -185,28 +225,22 @@ docker build -t uag:local .
 docker run -d \
   --name uag \
   -p 127.0.0.1:18787:18787 \
-  -v uag-data:/app/db \
   --restart unless-stopped \
+  -e DATABASE_URL='postgres://user:pw@host:5432/db?sslmode=require' \
   -e UAG_DEFAULT_ADMIN_PASSWORD='<强口令>' \
   uag:local
 ```
 
-> 容器首启会自动执行 `prisma/init.sql` 建表并播种默认管理员（仅在库内无管理员时），无需手动跑迁移。库内已有管理员后，`UAG_DEFAULT_ADMIN_PASSWORD` 不再生效。
+> 容器首启会自动执行 `prisma/init.sql` 建表（PostgreSQL 方言）并播种默认管理员（仅在库内无管理员时），无需手动跑迁移。库内已有管理员后，`UAG_DEFAULT_ADMIN_PASSWORD` 不再生效。
 
-**自定义构建参数**（可选）：
-
-```bash
-docker build \
-  --build-arg DATABASE_URL=file:/app/db/custom.db \   # 构建期 Prisma 生成所用路径
-  -t uag:local .
-```
+> **构建期无需 `DATABASE_URL`**：Prisma 在 `prisma generate` 阶段只读取 schema 的 provider，不建立连接。运行期连接串由平台（Render / Aiven）注入。
 
 **推送到自建 / 私有 registry**：
 
 ```bash
-docker tag uag:local registry.example.com/uag:4.9.0
+docker tag uag:local registry.example.com/uag:4.10.0
 docker tag uag:local registry.example.com/uag:latest
-docker push registry.example.com/uag:4.9.0
+docker push registry.example.com/uag:4.10.0
 docker push registry.example.com/uag:latest
 ```
 
@@ -240,7 +274,7 @@ Group=uag
 WorkingDirectory=/opt/uag
 Environment=NODE_ENV=production
 Environment=PORT=18787
-Environment=DATABASE_URL=file:/opt/uag/db/custom.db
+Environment=DATABASE_URL=postgres://user:pw@host:5432/db?sslmode=require
 ExecStart=/usr/local/bin/bun start
 Restart=on-failure
 RestartSec=5
@@ -260,7 +294,7 @@ WantedBy=multi-user.target
 sudo useradd -r -s /usr/sbin/nologin uag
 sudo mkdir -p /opt/uag && sudo chown -R uag:uag /opt/uag
 # 将项目部署到 /opt/uag 并完成 build 后：
-sudo chmod 600 /opt/uag/db/custom.db
+# 数据库为外部 PG，无需本地文件权限（该行在 SQLite 模式下才需要：chmod 600 <db 文件>）
 sudo systemctl daemon-reload
 sudo systemctl enable --now uag
 sudo journalctl -u uag -f
@@ -287,7 +321,7 @@ sudo journalctl -u uag -f
   <dict>
     <key>PORT</key><string>18787</string>
     <key>NODE_ENV</key><string>production</string>
-    <key>DATABASE_URL</key><string>file:/opt/uag/db/custom.db</string>
+    <key>DATABASE_URL</key><string>postgres://user:pw@host:5432/db?sslmode=require</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -375,13 +409,13 @@ server {
 | :--- | :--- |
 | **双向协议转译** | `/v1/messages`（Anthropic）⇄ `/v1/chat/completions`（OpenAI）全双工转译；另支持 `/v1/responses`（OpenAI Responses API，Codex CLI 入站）。流式 SSE（thinking 思维链块、tool_use / tool_result、ping 心跳保活）与非流式共享同一套 extractors，零分叉 |
 | **请求侧净化** | 客户端指纹脱敏（规避腾讯 11128 拦截）、消息序列归一（修复 tool_calls 顺序，规避 11148）、推理强度解析（模型名后缀 `[high]` / Anthropic thinking / `reasoning_effort` / 通用 reasoning 四源统一） |
-| **路由与容灾** | 模型名 → 有序候选列表路由表；候选级自动故障转移；多账号池轮换；**会话粘性**（同一会话固定账号，保住上游前缀缓存）；账号级指数退避冷却（1→2→4→8 分钟封顶，**SQLite 持久化，重启不丢**）；错误三分类（冷却 / 重试 / 致命）与风控挑战页识别 |
+| **路由与容灾** | 模型名 → 有序候选列表路由表；候选级自动故障转移；多账号池轮换；**会话粘性**（同一会话固定账号，保住上游前缀缓存）；账号级指数退避冷却（1→2→4→8 分钟封顶，**持久化落库，重启不丢**）；错误三分类（冷却 / 重试 / 致命）与风控挑战页识别 |
 | **账号调度模式** | 负载均衡 / 顺序调度可配置 |
 | **上游提供商** | WorkBuddy 腾讯云代码助手（国内站 + 国际站双 region，CN 30 模型 / INTL 18 模型）、OpenAI 兼容（OpenRouter / DeepSeek / 硅基流动）、Anthropic 兼容。**新增提供商 = 新目录 + 一行注册** |
 | **用量与成本** | 请求日志六视图成本估算（`ModelPricing` 单价表）；虚拟密钥月度成本预算（超预算入口 429 + `X-Budget-*` 头组，下月 1 日重置）；总览月度账单卡（按密钥分组 + byModel 明细 + 环比 + CSV 导出） |
 | **多用户与 RBAC** | 管理员 / 成员角色，成员管理与成员级密钥归属；日志与用量按 owner 维度过滤；路由候选模型目录支持真实上游拉取 |
 | **鉴权体系** | 多把虚拟密钥（模型白名单 / 启停 / 角色）、管理主密钥、定时任务专用密钥（降权语义）、常量时间比较（抗时序攻击） |
-| **运维自动化** | AccessToken 401 无感续签（写回 SQLite）、每日定时签到、余额并发聚合、上游前缀缓存命中统计 |
+| **运维自动化** | AccessToken 401 无感续签（写回数据库）、每日定时签到、余额并发聚合、上游前缀缓存命中统计 |
 | **上下文控制** | 最大上下文轮数截断（可设 0 = 不限）+ RTK 工具输出净化（ANSI 清洗 / 测试折叠 / 渐进退火） |
 | **流式零缓冲** | `x-accel-buffering: no` + `Cache-Control: no-cache no-transform` + 每块即时下发，首字延迟不退化 |
 | **Web 控制台** | 登录 / 初始化引导 / 总览 / 账号管理（导入导出闭环）/ API 中转 / 虚拟密钥 / 模型路由（拖拽排序）/ 定时任务 / 运行日志 / 成员管理 / 设置（代理 / 备份 / KV 迁移） |
@@ -527,10 +561,11 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 
 ## 💾 数据存储
 
-- **驱动**：Prisma ORM + SQLite。选择理由：零原生编译依赖（规避 `ignore-scripts` 环境下 `better-sqlite3` 类模块静默安装失败），跨平台开箱即用，且 Prisma 提供类型安全的 schema 与迁移工具。
-- **位置**：默认 `db/custom.db`，环境变量 `DATABASE_URL` 覆盖（**注意是 `file:` 前缀 + 绝对或相对路径**）；已加入 `.gitignore`；文件权限建议 `chmod 600 db/custom.db`。
-  - 裸机 / systemd / launchd：`file:/opt/uag/db/custom.db` 或 `file:./db/custom.db`
-  - Docker：`file:/app/db/custom.db`（落在具名卷内）
+- **驱动**：Prisma ORM + **PostgreSQL**（≥ 13）。选择理由：零原生编译依赖（规避 `ignore-scripts` 环境下原生模块静默安装失败），类型安全 schema，且与主流云托管（Aiven / Neon / RDS）无缝对接。
+- **部署形态**：生产推荐**外部托管 PG**（Aiven 等），应用容器保持无状态，扩容与迁移无需搬数据卷；亦支持 SQLite 单机模式（`DATABASE_URL=file:...`，需把 `prisma/schema.prisma` 的 provider 与 `init.sql` 方言同步改回 sqlite）。
+- **连接串**：由环境变量 `DATABASE_URL` 提供，形如 `postgres://user:pw@host:5432/db?sslmode=require`。**务必保留 `sslmode=require`**，云托管 PG 普遍拒绝非 TLS 连接。
+  - 云托管：Aiven / Neon / RDS 控制台复制 Service URI 即可
+  - 自建：`postgres://user:pw@127.0.0.1:5432/uag?sslmode=disable`（本机可免 TLS）
 - **模式**：WAL 日志模式 + 合理 busy timeout（长连接流式请求、定时任务与后台令牌续签并发写入安全）。
 - **表结构初始化**：两种幂等路径——裸机构建流程用 `bun run db:push`；容器首启用 `prisma/init.sql` 自动建表（`SchemaInit` 检测空库后执行）。
 - **表结构按领域拆分**（不再把配置塞成单个 JSON blob）：`AdminUser` / `Session` / `LoginAudit` / `Provider` / `Account`（含冷却状态与余额快照）/ `ModelRoute` / `RouteCandidate` / `VirtualKey` / `SystemSetting` / `CheckinLog` / `RequestLog` / `UsageDaily` / `ModelPricing` / `JobRun` / `SchemaVersion`。
@@ -562,7 +597,7 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 
 ---
 
-## 🏗️ 架构变更说明（原 v2.4.0 → v4.9.0）
+## 🏗️ 架构变更说明（原 v2.4.0 → v4.10.0）
 
 ### 已删除（云端产物与适配层）
 
@@ -574,10 +609,10 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 | `vercel.json` | 无需替代 |
 | `api/` 目录（Vercel Serverless 入口） | Next.js App Router 路由（`src/app/**/route.ts`） |
 | `wrangler` 开发依赖 | 移除 |
-| Cloudflare KV 绑定（`GATEWAY_KV` / `WORKBUDDY_KV`）与读写代码 | Prisma + SQLite（`src/lib/gateway/config/configService.ts`） |
+| Cloudflare KV 绑定（`GATEWAY_KV` / `WORKBUDDY_KV`）与读写代码 | Prisma + PostgreSQL（`src/lib/gateway/config/configService.ts`） |
 | Cloudflare Cron Triggers（`scheduled` handler） | 进程内调度器（`src/lib/gateway/jobs/scheduler.ts`，自研 5 字段 cron + 时区） |
-| 内存 KV 降级实现（无 KV 绑定时的 fallback） | SQLite 恒可用 |
-| Upstash Redis 适配（如曾配置） | SQLite 恒可用 |
+| 内存 KV 降级实现（无 KV 绑定时的 fallback） | 数据库恒可用 |
+| Upstash Redis 适配（如曾配置） | 数据库恒可用 |
 | 云平台环境变量白名单机制（secrets 面板） | dotenv 风格 `.env` + 启动自检 + DB 设置（控制台热改） |
 | Cloudflare / Vercel 部署文档章节 | 本 README 的部署章节 |
 | opencode / qwenweb 内置提供商预设与适配器（4.9.0 移除） | 历史 DB 数据继续可见但运行时不再支持 |
@@ -593,7 +628,7 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 
 - Web 管理控制台（`/`）+ 控制台后端（`/api/console/*`）
 - 管理员密码 + Cookie 会话体系（scrypt / 登录锁定 / 审计）
-- SQLite 按领域拆表 + 请求日志 / 签到日志 / 任务执行记录落库
+- 关系表按领域拆分 + 请求日志 / 签到日志 / 任务执行记录落库
 - 全局代理层（协议扩展 + 两层覆盖 + 实测）
 - 账号导入导出闭环、KV 迁移工具、数据备份
 - Docker 部署套件（standalone 多阶段构建 + GHCR 多架构 CI）+ 容器首启自动建表与默认管理员播种
@@ -604,7 +639,7 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 
 ### 唯一的契约级差异（附兼容方案）
 
-`/status` 响应中的 `kvEnabled: boolean` 字段改为 `storage: "sqlite"`——该字段语义为「持久层是否可用」，原自动化脚本若依赖 `kvEnabled` 请改为检查 `storage`。其余端点的路径、方法、状态码、响应结构均未改变。
+`/status` 响应中的 `kvEnabled: boolean` 字段改为 `storage: "postgresql"`——该字段语义为「持久层是否可用」，原自动化脚本若依赖 `kvEnabled` 请改为检查 `storage`。其余端点的路径、方法、状态码、响应结构均未改变。
 
 ---
 
@@ -623,7 +658,7 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 代理层缓冲所致。nginx 必须 `proxy_buffering off;` + `proxy_cache off;`，Caddy 默认不缓冲无需额外配置。
 
 **Q: 凭据忘记备份、DB 文件损坏怎么办？**
-凭据明文存储于 SQLite——**没有备份就无法恢复**（这是「明文 + 文件权限」方案的明确取舍）。请定期使用「设置 → 数据备份」导出 JSON 并妥善加密保存。
+凭据明文存储于数据库——**没有备份就无法恢复**（这是「明文 + 依赖数据库侧访问控制与 TLS」方案的明确取舍）。请定期使用「设置 → 数据备份」导出 JSON 并妥善加密保存。
 
 **Q: 多个代理怎么配？**
 设置页代理池每行一个地址（支持 `http://u:p@h:port,socks5://h2:port`）；或某提供商单独覆盖（「API 中转 → 编辑 → 代理覆盖」）。
