@@ -14,12 +14,13 @@ RUN apt-get update \
 # Bun is used because this project is locked with bun.lock.
 RUN --mount=type=cache,target=/root/.npm npm install --global bun@1.3.4
 
-# Dependency layer for maximum BuildKit cache reuse.
+# 缓存键必须包含 prisma/schema.prisma：Prisma Client 会把 datasource provider 与 schema
+# 指纹编译进 node_modules/.prisma/client。若 schema 在 install 之后才 COPY，改动 schema
+# 而 package.json/bun.lock 未变时，BuildKit 会命中 install 缓存层并跳过 regenerate，
+# 导致镜像内残留旧方言的 Client（表现为运行时读到旧 provider，如 PG 项目报「必须 file:」）。
 COPY package.json bun.lock ./
-RUN --mount=type=cache,target=/root/.bun/install/cache bun install --frozen-lockfile
-
-# Prisma Client must be generated for the target architecture during that architecture's build.
 COPY prisma ./prisma
+RUN --mount=type=cache,target=/root/.bun/install/cache bun install --frozen-lockfile
 RUN bunx prisma generate
 
 # Build with Node directly; Bun is only used for dependency installation and Prisma generation.
