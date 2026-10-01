@@ -87,6 +87,7 @@ CREATE TABLE "ModelRoute" (
     "enabled" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "prompt" TEXT,
 
     CONSTRAINT "ModelRoute_pkey" PRIMARY KEY ("id")
 );

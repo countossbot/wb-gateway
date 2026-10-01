@@ -526,6 +526,8 @@ export interface RouteRow {
   model: string;
   enabled: boolean;
   candidates: RouteCandidateRow[];
+  /** v4.6.0：路由级系统提示词（null = 未配置） */
+  prompt: string | null;
 }
 
 export interface RoutesData {

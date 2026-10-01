@@ -56,6 +56,9 @@ export interface GatewayConfig {
   usage_provider_id?: string;
   providers: ProviderConfig[];
   routes: Record<string, RouteCandidateConfig[]>;
+  // v4.6.0：路由级系统提示词（model → 模板字符串）。与 routes 平级，避免污染候选数组
+  // （候选链是拖拽全量重写，挂在候选上易被丢弃）。仅在 dispatch 层注入，追加不覆盖。
+  routePrompts?: Record<string, string>;
   virtual_keys: Record<string, VirtualKeyEntry>;
   [key: string]: unknown;
 }

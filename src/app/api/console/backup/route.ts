@@ -108,6 +108,7 @@ interface BackupRoute {
   id?: number;
   model: string;
   enabled?: boolean;
+  prompt?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -310,6 +311,9 @@ export async function POST(request: NextRequest) {
             data: {
               model: r.model,
               enabled: r.enabled !== false,
+              // v4.6.0：提示词随备份还原（缺失/空视为未配置）
+              prompt:
+                typeof r.prompt === "string" && r.prompt.trim() ? r.prompt.trim() : null,
               ...(toDateOrThrow(r.createdAt) ? { createdAt: toDateOrThrow(r.createdAt) } : {}),
             },
           });

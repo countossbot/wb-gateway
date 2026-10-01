@@ -25,6 +25,8 @@ export async function GET(request: NextRequest) {
       id: r.id,
       model: r.model,
       enabled: r.enabled,
+      // v4.6.0：路由级系统提示词（null = 未配置）
+      prompt: r.prompt ?? null,
       candidates: r.candidates.map((c) => ({
         id: c.id,
         providerId: c.providerId,
@@ -43,6 +45,7 @@ export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => ({}))) as {
     model?: string;
     candidates?: Array<{ providerId?: string; provider?: string; model?: string }>;
+    prompt?: string | null;
   };
   if (!body.model || !/^[a-zA-Z0-9._/\[\]-]{1,128}$/.test(body.model)) {
     return fail("模型名不合法（1-128 位字母数字与 . _ / [ ] -）");
@@ -50,7 +53,10 @@ export async function POST(request: NextRequest) {
   const exists = await db.modelRoute.findUnique({ where: { model: body.model } });
   if (exists) return fail(`路由 "${body.model}" 已存在`, 409);
 
-  const route = await db.modelRoute.create({ data: { model: body.model, enabled: true } });
+  const promptText = typeof body.prompt === "string" && body.prompt.trim() ? body.prompt.trim() : null;
+  const route = await db.modelRoute.create({
+    data: { model: body.model, enabled: true, prompt: promptText },
+  });
   let order = 0;
   for (const c of body.candidates || []) {
     const providerId = c.providerId || c.provider;
@@ -80,6 +86,7 @@ export async function PUT(request: NextRequest) {
     model?: string;
     enabled?: boolean;
     candidates?: Array<{ providerId?: string; provider?: string; model?: string; enabled?: boolean }>;
+    prompt?: string | null;
   };
   if (!body.id) return fail("缺少路由 id");
   const existing = await db.modelRoute.findUnique({
@@ -93,11 +100,22 @@ export async function PUT(request: NextRequest) {
     if (dup) return fail(`模型名 "${body.model}" 已被占用`, 409);
   }
 
+  // v4.6.0：prompt 仅在请求显式携带该字段时更新（undefined = 保持原值，
+  // 空串/null = 清除注入），避免其他调用方漏传字段时静默清空提示词。
+  const promptPatch =
+    body.prompt === undefined
+      ? {}
+      : {
+          prompt:
+            typeof body.prompt === "string" && body.prompt.trim() ? body.prompt.trim() : null,
+        };
+
   await db.modelRoute.update({
     where: { id: body.id },
     data: {
       model: body.model ?? existing.model,
       enabled: body.enabled ?? existing.enabled,
+      ...promptPatch,
     },
   });
 
@@ -135,6 +153,13 @@ export async function PUT(request: NextRequest) {
       candidates: Array.isArray(body.candidates)
         ? body.candidates.map((c) => ({ providerId: c.providerId || c.provider, model: c.model, enabled: c.enabled !== false }))
         : undefined,
+      // v4.6.0：只记变更标志与长度，避免长提示词全文撑爆审计表
+      promptChanged:
+        body.prompt === undefined
+          ? undefined
+          : (body.prompt?.trim() || null) !== (existing.prompt?.trim() || null),
+      promptLength:
+        body.prompt === undefined ? undefined : (body.prompt?.trim().length ?? 0),
     },
     request
   );

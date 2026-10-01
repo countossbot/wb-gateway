@@ -11,6 +11,7 @@ import { recordRequestLog } from "../config/requestLog";
 import { getRuntimeSettings } from "../config/runtimeSettings";
 import type { ProviderFleet } from "../core/fleet";
 import type { GatewayConfig, RouteCandidateConfig } from "../core/types";
+import { renderRoutePrompt, injectRoutePrompt } from "./promptInject";
 
 export interface DispatchParams {
   protocol: "anthropic" | "openai";
@@ -178,10 +179,31 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
       const nativeAnthropic = hasCallMessages(provider);
       let upstreamRes: Response | null = null;
 
+      // v4.6.0：路由级系统提示词注入 —— 在三条转译分支之前统一注入，保证
+      // 「原生 Anthropic / Anthropic→OpenAI / OpenAI→原生 Anthropic」路径行为一致，
+      // 且每次故障转移重试都基于同一份已注入 body（不重复叠加）。
+      // 追加式：与客户端自带 system 共存，绝不覆盖。
+      const routePromptTpl = config.routePrompts?.[model];
+      const injectedBody: typeof body = routePromptTpl
+        ? (() => {
+            const rendered = renderRoutePrompt(routePromptTpl, {
+              model,
+              provider: candidate.provider,
+              upstreamModel: candidate.model,
+              apiKeyName: apiKeyName ?? undefined,
+            });
+            if (!rendered) return body;
+            const next = { ...(body as Record<string, unknown>) };
+            // 单次分发：按 body 形态二选一，避免 system 字段与 system 消息双重注入
+            if (!injectRoutePrompt(next, rendered)) return body;
+            return next as typeof body;
+          })()
+        : body;
+
       try {
         if (isAnthropic && nativeAnthropic) {
           const anthropicPayload = applyReasoningToPayload(
-            { ...body, model: candidate.model },
+            { ...injectedBody, model: candidate.model },
             reasoningIntent,
             "anthropic",
             candidate.model
@@ -195,12 +217,12 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
           try {
             openaiPayload = isAnthropic
               ? transformAnthropicToOpenAI(
-                  body as never,
+                  injectedBody as never,
                   candidate.model,
                   config,
                   reasoningIntent
                 )
-              : { ...body, model: candidate.model };
+              : { ...injectedBody, model: candidate.model };
           } catch (err) {
             // 参数校验失败（400 / 404）：直接返回，不进行故障转移
             if (err instanceof HttpError && (err.status === 400 || err.status === 404)) {

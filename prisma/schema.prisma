@@ -95,9 +95,11 @@ model ModelRoute {
   id        Int      @id @default(autoincrement())
   model     String   @unique // 对外模型名
   enabled   Boolean  @default(true)
+  // 不覆盖原有提示词；支持 {{model}} {{provider}} {{upstreamModel}} {{apiKeyName}}
+  // {{date}} {{time}} {{datetime}} 模板变量，未识别变量原样保留。
+  prompt    String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
   candidates RouteCandidate[]
 }
 

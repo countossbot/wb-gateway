@@ -90,6 +90,7 @@ CREATE TABLE `ModelRoute` (
     `enabled` BOOLEAN NOT NULL DEFAULT true,
     `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `updatedAt` DATETIME(3) NOT NULL,
+    `prompt` TEXT,
 
     UNIQUE INDEX `ModelRoute_model_key`(`model`),
     PRIMARY KEY (`id`)

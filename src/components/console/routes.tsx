@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
 import {
   EmptyState,
   ErrorAlert,
@@ -368,6 +369,8 @@ export function RoutesModule() {
   const [modelName, setModelName] = React.useState("");
   const [routeEnabled, setRouteEnabled] = React.useState(true);
   const [candidates, setCandidates] = React.useState<CandidateDraft[]>([]);
+  // v4.6.0：路由级系统提示词注入（追加式，不覆盖客户端自带 system）
+  const [prompt, setPrompt] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [formError, setFormError] = React.useState("");
 
@@ -382,9 +385,9 @@ export function RoutesModule() {
 
   const openCreate = () => {
     setEditing(null);
-    setModelName("");
     setRouteEnabled(true);
     setCandidates([newDraft()]);
+    setPrompt("");
     setFormError("");
     setDialogOpen(true);
   };
@@ -396,6 +399,7 @@ export function RoutesModule() {
     setCandidates(r.candidates.map((c) => newDraft(c.providerId, c.model)));
     if (r.candidates.length === 0) setCandidates([newDraft()]);
     setFormError("");
+    setPrompt(r.prompt ?? "");
     setDialogOpen(true);
   };
 
@@ -429,6 +433,8 @@ export function RoutesModule() {
     try {
       const payload = {
         model: modelName.trim(),
+        // v4.6.0：空串 → null（后端据此清除注入）
+        prompt: prompt.trim() ? prompt.trim() : null,
         candidates: valid.map((c) => ({ providerId: c.providerId, model: c.model.trim() })),
       };
       if (editing) {
@@ -529,6 +535,11 @@ export function RoutesModule() {
                     {r.model}
                   </code>
                   {!r.enabled && <Badge variant="outline" className="shrink-0 text-[10px] text-stone-500">停用</Badge>}
+                  {r.prompt && (
+                    <Badge variant="outline" className="shrink-0 text-[10px] text-stone-600">
+                      提示词
+                    </Badge>
+                  )}
                 </div>
 
                 <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
@@ -602,6 +613,26 @@ export function RoutesModule() {
                   <Label htmlFor="rt-enabled" className="font-normal text-muted-foreground">启用该路由</Label>
                 </div>
               )}
+
+              {/* v4.6.0：路由级系统提示词注入 —— 置于候选链之上，作用于整条路由 */}
+              <div className="space-y-2">
+                <Label htmlFor="rt-prompt">系统提示词注入（可选）</Label>
+                <Textarea
+                  id="rt-prompt"
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder={"例：回答保持简洁。当前模型 {{model}} 由 {{provider}} 提供。"}
+                  className="min-h-[96px] font-mono text-xs"
+                />
+                <p className="text-xs text-muted-foreground">
+                  以「追加」方式并入请求，不会覆盖客户端自带的系统提示词。可用变量：
+                  {" "}
+                  <code>{"{{model}}"}</code> <code>{"{{provider}}"}</code>{" "}
+                  <code>{"{{upstreamModel}}"}</code> <code>{"{{date}}"}</code>{" "}
+                  <code>{"{{time}}"}</code> <code>{"{{datetime}}"}</code>{" "}
+                  <code>{"{{apiKeyName}}"}</code>；未识别的变量原样保留。留空则不注入。
+                </p>
+              </div>
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">

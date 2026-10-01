@@ -389,6 +389,16 @@ async function dbToConfigRaw(): Promise<GatewayConfig> {
     list.push({ provider: c.providerId, model: c.model });
     candidatesByRoute.set(c.routeId, list);
   }
+  // v4.6.0：routePrompts —— 与 routes 同源遍历，但只收集 prompt 非空且路由启用的项。
+  // 保持「空 prompt 完全不注入」的语义；无 prompt 时不产生该键。
+  const routePromptsMap: Record<string, string> = {};
+  for (const r of routes) {
+    if (!r.enabled) continue;
+    const p = typeof r.prompt === "string" ? r.prompt.trim() : "";
+    if (!p) continue;
+    const list = candidatesByRoute.get(r.id);
+    if (list && list.length > 0) routePromptsMap[r.model] = p;
+  }
   for (const r of routes) {
     if (!r.enabled) continue;
     const list = candidatesByRoute.get(r.id);
@@ -420,6 +430,7 @@ async function dbToConfigRaw(): Promise<GatewayConfig> {
     usage_provider_id: (settingsMap.usage_provider_id as string) || "workbuddy",
     providers: providerConfigs,
     routes: routesMap,
+    ...(Object.keys(routePromptsMap).length > 0 ? { routePrompts: routePromptsMap } : {}),
     virtual_keys: virtualKeysMap,
   };
   return config;
@@ -628,8 +639,14 @@ async function persistConfigToDb(config: GatewayConfig): Promise<void> {
   await db.modelRoute.deleteMany({});
   for (const [model, routeList] of Object.entries(config.routes || {})) {
     if (!Array.isArray(routeList) || routeList.length === 0) continue;
+    // v4.6.0：prompt 随路由一并写回（全量重建语义，漏写即丢）。
+    const promptText = config.routePrompts?.[model];
     const route = await db.modelRoute.create({
-      data: { model, enabled: true },
+      data: {
+        model,
+        enabled: true,
+        prompt: typeof promptText === "string" && promptText.trim() ? promptText.trim() : null,
+      },
     });
     let candOrder = 0;
     for (const rc of routeList) {

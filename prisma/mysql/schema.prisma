@@ -97,6 +97,8 @@ model ModelRoute {
   id        Int      @id @default(autoincrement())
   model     String   @unique // 对外模型名
   enabled   Boolean  @default(true)
+  // v4.6.0：路由级系统提示词注入（可选），追加式，不覆盖客户端自带 system。
+  prompt    String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
