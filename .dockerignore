@@ -13,4 +13,8 @@ mini-services
 .env.*
 !.env.example
 .DS_Store
+*.tar.gz
+*.tgz
+public/uag-project-src-*
+*.tsbuildinfo
 worklog.md

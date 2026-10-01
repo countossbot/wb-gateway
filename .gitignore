@@ -77,3 +77,8 @@ backups/
 
 # 本地调试脚本（含内网探测逻辑，不入库）
 workbuddy_global_hy3_test.sh
+# 源码打包产物（曾误入库并随镜像发布，禁止再次入库）
+*.tar.gz
+*.tgz
+/public/uag-project-src-*
+*.tsbuildinfo
