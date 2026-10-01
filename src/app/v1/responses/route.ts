@@ -21,7 +21,11 @@ import {
   tooLargeResponse,
 } from "@/lib/gateway/http/bodyGuard";
 import { authorizeModelForPrincipal } from "@/lib/gateway/auth/auth";
-import { enforceVirtualKeyQuota, releaseQuotaSlot } from "@/lib/gateway/auth/quota";
+import {
+  enforceVirtualKeyQuota,
+  releaseQuotaSlot,
+  bindQuotaSlotToResponse,
+} from "@/lib/gateway/auth/quota";
 import { HttpError } from "@/lib/gateway/exchange/transform";
 import { translateResponsesRequest } from "@/lib/gateway/responses/translate";
 import {
@@ -162,14 +166,18 @@ export async function POST(request: NextRequest) {
         signal: request.signal,
         pingIntervalMs: 10_000, // 客户端空闲保活（SSE 注释行，零语义影响）
       });
-      return new Response(stream, {
-        status: 200,
-        headers: responsesSseHeaders({
-          ...corsHeadersFor(request),
-          ...gatewayHeaders,
-          ...droppedToolsHeader,
+      // F1-3 修正（审查发现）：流式响应 body 尚未消费，占位改由 body 结束/取消时释放
+      return bindQuotaSlotToResponse(
+        new Response(stream, {
+          status: 200,
+          headers: responsesSseHeaders({
+            ...corsHeadersFor(request),
+            ...gatewayHeaders,
+            ...droppedToolsHeader,
+          }),
         }),
-      });
+        auth.auth
+      );
     }
 
     // ---- 非流式：chat JSON → Responses response 对象 ----
@@ -214,13 +222,12 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (err) {
+    // 失败/异常：该次不计入用量，立即归还占位（成功路径交由 requestLog flush 结算）
+    releaseQuotaSlot(auth.auth);
     return new Response(JSON.stringify({ error: { message: (err as Error).message } }), {
       status: 500,
       headers: { "Content-Type": "application/json", ...corsHeadersFor(request), ...droppedToolsHeader },
     });
-  } finally {
-    // F1 修复配套：所有出口归还配额占位（含异常与流式早退），避免额度被永久占用
-    releaseQuotaSlot(auth.auth);
   }
 }
 

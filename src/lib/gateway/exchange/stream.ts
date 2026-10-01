@@ -121,7 +121,11 @@ export interface ParsedChunk {
       reasoning_content?: string;
       reasoning?: string;
       tool_calls?: Array<{
+        // 审查发现：上游 SSE 的 delta.tool_calls 按 index 归并，原类型缺失该字段，
+        // 导致聚合逻辑只能靠类型断言（运行时 JSON 保留 index，故行为正确但类型不完整）。
+        index?: number;
         id?: string;
+        type?: string;
         function?: { name?: string; arguments?: string };
       }>;
     };
@@ -131,7 +135,9 @@ export interface ParsedChunk {
       reasoning_content?: string;
       reasoning?: string;
       tool_calls?: Array<{
+        index?: number;
         id?: string;
+        type?: string;
         function?: { name?: string; arguments?: string };
       }>;
     };
@@ -1201,20 +1207,15 @@ export async function formatOpenAIToAnthropicJson(
    */
   const toolCallsByIndex = new Map<number, { id: string | null; name: string; args: string }>();
   const absorbToolDelta = (
-    tcs: NonNullable<NonNullable<ParsedChunk["choices"]>[number]>["delta"] extends infer D
-      ? D extends { tool_calls?: infer T }
-        ? T
-        : never
-      : never
+    tcs: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>
   ) => {
     if (!Array.isArray(tcs)) return;
-    for (const tc of tcs as Array<{
-      index?: number;
-      id?: string;
-      function?: { name?: string; arguments?: string };
-    }>) {
+    for (const tc of tcs) {
       const idx = tc.index ?? 0;
-      const cur = toolCallsByIndex.get(idx) ?? { id: null as string | null, name: "tool", args: "" };
+      // 审查指出：原实现把缺失 name 的占位符写成字面量 "tool"，上游只给 id/arguments
+      // 时会静默产出一个不存在的工具名。改为空串占位，收尾时对空名做「不产出该块」处理，
+      // 避免向客户端下发错误工具名（宁可少一个块，也不伪造）。
+      const cur = toolCallsByIndex.get(idx) ?? { id: null as string | null, name: "", args: "" };
       if (tc.id) cur.id = tc.id;
       if (tc.function?.name) cur.name = tc.function.name;
       if (tc.function?.arguments) cur.args += tc.function.arguments;
@@ -1276,7 +1277,9 @@ export async function formatOpenAIToAnthropicJson(
           id: v.id,
           name: v.name,
           args: v.args || "{}",
-        }));
+        }))
+        // 空名（上游只给了 id/arguments 而从未给 name）不产出，避免伪造工具名
+        .filter((t) => t.name !== "");
     }
 
     const bufferTail = scanner.drainRemainder();

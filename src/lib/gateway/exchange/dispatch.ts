@@ -8,6 +8,7 @@ import { runFailover, type FailOutcome } from "../core/failover";
 import { transformAnthropicToOpenAI, HttpError } from "./transform";
 import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson, aggregateOpenAIToChatJson, passthroughSseWithKeepAlive, passthroughUsageFromJson, type StreamUsageReport } from "./stream";
 import { recordRequestLog } from "../config/requestLog";
+import { noteQuotaTokenUsage } from "../auth/quota";
 import { getRuntimeSettings } from "../config/runtimeSettings";
 import type { ProviderFleet } from "../core/fleet";
 import type { GatewayConfig, RouteCandidateConfig } from "../core/types";
@@ -52,6 +53,13 @@ export async function dispatchExchange(params: DispatchParams): Promise<Response
   const writeLog = (status: number, usage?: StreamUsageReport, error?: string | null) => {
     if (logWritten) return; // 防重复（流式回调与竞态收尾双保险）
     logWritten = true;
+    // F1 配套（token 维度）：请求一结束就把实际 token 用量登记为「下次入口预估基准」。
+    // 不能等 requestLog 的 30s flush —— 实测 key-quota-e2e B 组：flush 前到达的第 3 次请求
+    // 因预估值为 0 被放行（限额 100、每请求 55tk，本该在累计 110 时拒绝）。
+    // 这里只登记预估基准，不结算占位（占位仍由 flush 成功后 settleQuotaPending 抵扣）。
+    if (usage && apiKeyName) {
+      noteQuotaTokenUsage(apiKeyName, (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0));
+    }
     loggedStatus = status;
     recordRequestLog({
       model,

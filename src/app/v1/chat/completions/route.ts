@@ -12,7 +12,11 @@ import {
   tooLargeResponse,
 } from "@/lib/gateway/http/bodyGuard";
 import { authorizeModelForPrincipal } from "@/lib/gateway/auth/auth";
-import { enforceVirtualKeyQuota, releaseQuotaSlot } from "@/lib/gateway/auth/quota";
+import {
+  enforceVirtualKeyQuota,
+  releaseQuotaSlot,
+  bindQuotaSlotToResponse,
+} from "@/lib/gateway/auth/quota";
 import { corsPreflightResponse } from "@/lib/gateway/http/headers";
 
 export const dynamic = "force-dynamic";
@@ -54,10 +58,12 @@ export async function POST(request: NextRequest) {
   if (!quotaCheck.ok) return quotaCheck.response;
 
   // F1 修复配套：占位在 enforceVirtualKeyQuota 内完成，必须在所有出口归还（含异常），
-  // 否则一次失败请求会把该 key 的额度永久占用一格。
+  // F1 修复配套：占位在 enforceVirtualKeyQuota 内完成，必须在所有出口归还（含异常）。
+  // F1-3 修正（审查发现）：流式请求返回的 Response 其 body 尚未消费，若在此处无条件归还，
+  // 整段流式期间占位归零、超发窗口依旧敞开 —— 故流式交由 body 结束/取消时释放。
   try {
     const fleet = getProviderFleet(auth.config);
-    return await dispatchExchange({
+    const upstream = await dispatchExchange({
       protocol: "openai",
       model: requestModel,
       body,
@@ -67,13 +73,15 @@ export async function POST(request: NextRequest) {
       // v3.0.4：调用方密钥名落请求日志（虚拟密钥名 / Master Admin / Cron Trigger）
       apiKeyName: auth.auth.ok ? (auth.auth.principal?.name ?? null) : null,
     });
+    // 流式：占位随 body 生命周期释放；非流式：由下面的 finally 释放
+    return bindQuotaSlotToResponse(upstream, auth.auth);
   } catch (err) {
+    // 失败/异常：该次不计入用量，立即归还占位
+    releaseQuotaSlot(auth.auth);
     return new Response(JSON.stringify({ error: { message: (err as Error).message } }), {
       status: 500,
       headers: { "Content-Type": "application/json", ...corsHeadersFor(request) },
     });
-  } finally {
-    releaseQuotaSlot(auth.auth);
   }
 }
 
