@@ -4,7 +4,6 @@
 // v4.2.3：聚合维度增加 model（模型健康/Top 模型排行的跨滚动窗口根本解）。
 import { db } from "@/lib/db";
 import { loadPricingMap, estimateRowCost } from "@/lib/console/pricing";
-import { settleQuotaPending } from "@/lib/gateway/auth/quota";
 import type { Prisma } from "@/lib/db";
 
 export interface RequestLogEntry {
@@ -237,17 +236,6 @@ export async function flushUsageDaily(): Promise<number> {
               },
             })
           )
-        );
-      }
-      // F1 配套：用量已成功落库，按 cell 抵扣本进程对应的 pending 占位。
-      // 语义：占位从「入口放行」存活到「用量真正计入 UsageDaily」，两者不重叠计数。
-      // 放在事务成功之后才抵扣：若上面抛错走 rebuffer 分支，占位继续保留（避免凭空放宽）。
-      for (const cell of batch) {
-        settleQuotaPending(
-          cell.apiKeyName,
-          cell.requests,
-          // 取该 cell 本批实际消耗的 token，作为下次入口预估基准
-          (cell.inputTokens ?? 0) + (cell.outputTokens ?? 0)
         );
       }
       return batch.length;

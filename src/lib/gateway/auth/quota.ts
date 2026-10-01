@@ -165,105 +165,6 @@ function budgetResponse(request: Request, message: string, snapshot: QuotaSnapsh
     }
   );
 }
-/**
- * F1 修复（并发配额超发）—— 原子预占层。
- *
- * 原缺陷：enforceVirtualKeyQuota 是「读快照 → 判定」两步，二者之间没有任何互斥；
- * 而用量真正落库要到响应结束后（dispatch 的 onUsage → requestLog 的 30s 内存缓冲）才发生。
- * 于是 N 个并发请求会同时读到同一个 used 值、同时通过判定，日配额/月预算可被成倍突破。
- *
- * 修复策略（不新增表、不改 schema、零方言分支）：
- *   1) 进程内为每个 key 维护「已在本进程内放行但尚未反映到统计的请求数」= pending；
- *   2) 用一把按 key 共享的串行队列，把「读统计 + 合并 pending + 判定 + 占位」压成一个临界区，
- *      同一 key 的并发请求在网关内排队通过，判定依据始终是最新的 used+pending；
- *   3) 请求结束后（含异常）由 release 归还占位——成功时用量已被 requestLog 计入，释放即可；
- *      失败/异常时同样释放，保证不会因异常把额度永久锁死。
- *
- * 边界说明：多进程/多实例部署下，本层只能约束单进程内的并发；跨进程仍需数据库侧的
- * 原子扣减（条件 UPDATE）才能彻底闭合。但相较于修复前「同一进程内也完全无保护」，
- * 已是把超发窗口从「无界」收敛到「实例数 × 单请求」的量级。
- */
-/**
- * 在途占位桶：count = 未结算的请求数；tokens = 这些请求的预估 token 占用。
- *
- * token 维度必须在入口就预扣，否则与请求次维度会出现不一致的保护力度：
- * 实测（key-quota-e2e B 组）token 限额 100、每请求 55tk 时，第 3 次仍被放行，
- * 因为 tokens 只按「已落库 + 本进程已 flush」统计，第 2 次的 55 还在 30s 缓冲里。
- * 由于响应 token 数在返回前未知，这里按「上次同 key 实际用量」（无历史则 0）保守预估，
- * 使第二次请求即可感知到累计接近上限。预估偏低只影响拦截时点，不会造成超发。
- */
-type PendingBucket = { day: string; count: number; tokens: number };
-/** 各 key 上次实际 token 用量（用于入口 token 预估，进程内、跨日自然覆盖） */
-const lastTokenUsageByKey = new Map<string, number>();
-const pendingByKey = new Map<string, PendingBucket>();
-const keyLocks = new Map<string, Promise<void>>();
-
-/** 取某 key 当前 pending（跨日自动归零，避免昨天的占位泄漏到今天） */
-function pendingCount(keyName: string): number {
-  const b = pendingByKey.get(keyName);
-  if (!b || b.day !== localDayKey()) return 0;
-  return b.count;
-}
-
-/** 取某 key 当前在途 token 预估 */
-function pendingTokens(keyName: string): number {
-  const b = pendingByKey.get(keyName);
-  if (!b || b.day !== localDayKey()) return 0;
-  return b.tokens;
-}
-
-/** 占位 +1（tokens 为本次预估占用） */
-function acquireSlot(keyName: string, tokens = 0): void {
-  const day = localDayKey();
-  const b = pendingByKey.get(keyName);
-  if (!b || b.day !== day) pendingByKey.set(keyName, { day, count: 1, tokens });
-  else {
-    b.count += 1;
-    b.tokens += tokens;
-  }
-}
-
-/** 归还占位（幂等保护：计数不为负、不跨日串味） */
-function releaseSlot(keyName: string, tokens = 0): void {
-  const b = pendingByKey.get(keyName);
-  if (!b || b.day !== localDayKey()) return;
-  b.count = Math.max(0, b.count - 1);
-  b.tokens = Math.max(0, b.tokens - tokens);
-  if (b.count === 0) pendingByKey.delete(keyName);
-}
-
-/** 按 key 串行化：把「读+判+占」放进临界区（前一任务无论成功失败都解锁） */
-/**
- * 请求已结束（但可能还没到 flush）：仅解除「在途请求数」标记。
- * 保留 tokens 预估，直到 settleQuotaPending（flush 成功）才真正结算。
- */
-function endInflight(keyName: string): void {
-  const b = pendingByKey.get(keyName);
-  if (!b || b.day !== localDayKey()) return;
-  b.count = Math.max(0, b.count - 1);
-  // 注意：count 归零时不删除 bucket —— tokens 预估需要继续存活到 flush 结算
-  if (b.count === 0 && b.tokens === 0) pendingByKey.delete(keyName);
-}
-
-/** 按 key 串行化：把「读+判+占」放进临界区（前一任务无论成功失败都解锁） */
-async function withKeyLock<T>(keyName: string, fn: () => Promise<T>): Promise<T> {
-  const prev = keyLocks.get(keyName) ?? Promise.resolve();
-  let unlock!: () => void;
-  const gate = new Promise<void>((resolve) => (unlock = resolve));
-  // 只创建一次队尾 Promise 并持有引用：审查发现原写法 `prev.then(() => gate)` 在 set 与
-  // finally 里各调用一次，两次返回的是不同对象，`===` 恒为 false → keyLocks 永不清理
-  // （每个用过的 key 名永久驻留，内存逐日增长）。实测：50 并发后 Map size=13 且不归零。
-  const tail = prev.then(() => gate);
-  keyLocks.set(keyName, tail);
-  await prev.catch(() => {});
-  try {
-    return await fn();
-  } finally {
-    unlock();
-    // 仅当自己仍是队尾时才清理；若后面已有排队者，交由它负责，避免误删他人队列
-    if (keyLocks.get(keyName) === tail) keyLocks.delete(keyName);
-  }
-}
 
 /**
  * 入口配额预检（虚拟密钥主体）。调用点：body 读取 + 模型白名单复检之后、dispatch 之前——
@@ -285,162 +186,41 @@ export async function enforceVirtualKeyQuota(
   if (requestLimit <= 0 && tokenLimit <= 0 && monthlyCostLimit <= 0) return { ok: true, snapshot: null }; // 未设限额零查询直通
 
   const keyName = auth.principal.name || "";
+  const { requests, tokens } = await sumTodayUsage(keyName);
+  const monthCost = monthlyCostLimit > 0 ? await sumMonthCost(keyName) : 0;
+  const snapshot: QuotaSnapshot = { requests, tokens, requestLimit, tokenLimit, monthCost, monthlyCostLimit };
 
-  // F1 修复：判定与占位必须在同一临界区内完成，并计入本进程已放行但未落库的 pending。
-  const verdict = await withKeyLock(keyName, async () => {
-    const { requests, tokens } = await sumTodayUsage(keyName);
-    const monthCost = monthlyCostLimit > 0 ? await sumMonthCost(keyName) : 0;
-
-    const pending = pendingCount(keyName);
-    // token 预估：优先取上次同 key 的实际用量（本地内存表），否则用已累计的均值兜底。
-    // 目的：让 token 维度在入口就有与请求次维度一致的并发/连续保护（B 组实测缺口）。
-    const lastTokens = lastTokenUsageByKey.get(keyName) ?? 0;
-    const pendingTok = pendingTokens(keyName);
-    // 判定口径：已落库 + 本进程在途。请求维度按「每请求占 1」计入，避免并发全部踩线通过。
-    const requestSnapshot = {
-      requests: requests + pending,
-      tokens: tokens + pendingTok,
-      requestLimit,
-      tokenLimit,
-      monthCost,
-      monthlyCostLimit,
+  if (requestLimit > 0 && requests >= requestLimit) {
+    return {
+      ok: false,
+      response: quotaResponse(
+        request,
+        `Daily request quota exhausted for API key "${keyName}": ${requests}/${requestLimit} requests today. Limit resets at local midnight.`,
+        snapshot,
+        "requests"
+      ),
     };
-
-    if (requestLimit > 0 && requests + pending >= requestLimit) {
-      return {
-        ok: false as const,
-        response: quotaResponse(
-          request,
-          `Daily request quota exhausted for API key "${keyName}": ${requests + pending}/${requestLimit} requests today. Limit resets at local midnight.`,
-          requestSnapshot,
-          "requests"
-        ),
-      };
-    }
-    // 严格口径：已落库 + 在途预估 + 本次预估（本次至少与前次同量）
-    if (tokenLimit > 0 && tokens + pendingTok + lastTokens * 2 >= tokenLimit) {
-      return {
-        ok: false as const,
-        response: quotaResponse(
-          request,
-          `Daily token quota exhausted for API key "${keyName}": ${tokens.toLocaleString()}/${tokenLimit.toLocaleString()} tokens today. Limit resets at local midnight.`,
-          requestSnapshot,
-          "tokens"
-        ),
-      };
-    }
-    if (monthlyCostLimit > 0 && monthCost >= monthlyCostLimit) {
-      return {
-        ok: false as const,
-        response: budgetResponse(
-          request,
-          `Monthly cost budget exhausted for API key "${keyName}": estimated $${monthCost.toFixed(4)} of $${monthlyCostLimit.toFixed(2)} this month (model pricing table basis; unpriced models excluded). Budget resets at start of next local month.`,
-          requestSnapshot
-        ),
-      };
-    }
-
-    // 通过：立即占位，使并发后继请求看到 +1
-    acquireSlot(keyName, lastTokens);
-    return { ok: true as const, snapshot: requestSnapshot };
-  });
-
-  return verdict;
-}
-
-/**
- * F1 配套：归还 enforceVirtualKeyQuota 占用的额度位 —— 仅用于**失败 / 异常**路径。
- *
- * 重要设计修正（e2e 实测发现）：成功请求**不得**在此归还。
- * 因为用量经 requestLog 的 30s 内存缓冲才落库，若成功即归还，则下次请求读到的
- * `requests + pending` 会回落到 0 —— 修复前能拦住的串行超额，反而被放行
- * （实测：limit=3 时第 4 次返回 200，账本记到 4）。
- *
- * 因此占位遵循「占用直到用量真正计入统计」：
- *   - 失败/异常（含上游 4xx/5xx）→ 本函数立即归还（该次不计入尝试）；
- *   - 成功（含流式结束）→ 由 requestLog 在 flush 时把用量计入 UsageDaily；
- *     flush 会同步把本进程 pending 抵扣掉（见 requestLog 的 settleQuotaPending 回调）。
- */
-export function releaseQuotaSlot(auth: AuthResult): void {
-  const vk = auth.principal?.virtualKey;
-  if (!vk) return;
-  const keyName = auth.principal?.name || "";
-  if (!keyName) return;
-  releaseSlot(keyName);
-}
-
-export function settleQuotaPending(apiKeyName: string, reqCount = 1, tokens = 0): void {
-  if (!apiKeyName) return;
-  // 占位使命结束：抵扣在途计数与 token 预估（用量此时已真实落库，不会重复计数）
-  for (let i = 0; i < reqCount; i++) releaseSlot(apiKeyName, tokens);
-}
-
-/**
- * 登记某 key 最近一次实际 token 用量，作为下次入口的预估基准。
- * 由 dispatch 在请求结束（拿到 upstream usage）时调用 —— 不能等 UsageDaily 的 30s flush，
- * 否则 flush 窗口内到达的请求会因预估值为 0 而被放行。
- */
-export function noteQuotaTokenUsage(apiKeyName: string, tokens: number): void {
-  if (!apiKeyName || tokens <= 0) return;
-  lastTokenUsageByKey.set(apiKeyName, tokens);
-}
-
-/**
- * F1-3 修复（审查发现）：流式请求的占位提前释放。
- *
- * 原缺陷：dispatchExchange 对流式请求返回的是「body 尚未消费」的 Response
- * （见 dispatch.ts:321，body 直接接上游 ReadableStream）。路由的 finally 在
- * handler 返回瞬间就执行、占位被归还，而流还要持续数秒到数分钟。
- * 结果是：整个流式期间 pending 归零而 used 尚未落库 —— 配额的超发窗口并未真正关闭，
- * 并发长流式请求仍可全部放行。
- *
- * 修复：把「占位」的生命周期与响应 body 绑定 —— 用 ReadableStream 包一层，
- * 在流正常结束（flush）或消费者取消（cancel）时释放；两者都能覆盖「上游出错」路径。
- * 非流式响应（无 body）无需包装，直接保留路由 finally 的释放语义。
- */
-export function bindQuotaSlotToResponse(response: Response, auth: AuthResult): Response {
-  const vk = auth.principal?.virtualKey;
-  if (!vk || !response.body) return response;
-  const keyName = auth.principal?.name || "";
-  if (!keyName) return response;
-
-  let released = false;
-  const releaseOnce = () => {
-    if (released) return;
-    released = true;
-    // 只解除「请求已结束」的进行中标记，不释放 token 预估占位。
-    // token 预估必须存活到 flush 真实落库（settleQuotaPending）—— 否则连续请求的
-    // 第 3 次会读到预估 0 而被放行（key-quota-e2e B 组实测缺口）。
-    endInflight(keyName);
-  };
-
-  // TransformStream 的 Transformer 无 cancel 钩子（仅 flush），故手写 ReadableStream
-  // 包装：pull 透传数据，cancel 覆盖客户端断开，流正常关闭时在 done 分支释放。
-  const reader = response.body.getReader();
-  const wrapped = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          controller.close();
-          releaseOnce();
-          return;
-        }
-        controller.enqueue(value);
-      } catch (err) {
-        releaseOnce();
-        controller.error(err);
-      }
-    },
-    cancel() {
-      releaseOnce();
-      return reader.cancel().catch(() => {});
-    },
-  });
-
-  return new Response(wrapped, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
+  }
+  if (tokenLimit > 0 && tokens >= tokenLimit) {
+    return {
+      ok: false,
+      response: quotaResponse(
+        request,
+        `Daily token quota exhausted for API key "${keyName}": ${tokens.toLocaleString()}/${tokenLimit.toLocaleString()} tokens today. Limit resets at local midnight.`,
+        snapshot,
+        "tokens"
+      ),
+    };
+  }
+  if (monthlyCostLimit > 0 && monthCost >= monthlyCostLimit) {
+    return {
+      ok: false,
+      response: budgetResponse(
+        request,
+        `Monthly cost budget exhausted for API key "${keyName}": estimated $${monthCost.toFixed(4)} of $${monthlyCostLimit.toFixed(2)} this month (model pricing table basis; unpriced models excluded). Budget resets at start of next local month.`,
+        snapshot
+      ),
+    };
+  }
+  return { ok: true, snapshot };
 }

@@ -12,11 +12,7 @@ import {
   tooLargeResponse,
 } from "@/lib/gateway/http/bodyGuard";
 import { authorizeModelForPrincipal } from "@/lib/gateway/auth/auth";
-import {
-  enforceVirtualKeyQuota,
-  releaseQuotaSlot,
-  bindQuotaSlotToResponse,
-} from "@/lib/gateway/auth/quota";
+import { enforceVirtualKeyQuota } from "@/lib/gateway/auth/quota";
 import { corsPreflightResponse } from "@/lib/gateway/http/headers";
 
 export const dynamic = "force-dynamic";
@@ -56,10 +52,9 @@ export async function POST(request: NextRequest) {
   const quotaCheck = await enforceVirtualKeyQuota(request, auth.auth);
   if (!quotaCheck.ok) return quotaCheck.response;
 
-  // F1-3 修正（审查发现）：流式响应 body 尚未消费，占位改由 body 结束/取消时释放。
   try {
     const fleet = getProviderFleet(auth.config);
-    const upstream = await dispatchExchange({
+    return await dispatchExchange({
       protocol: "anthropic",
       model: requestModel,
       body,
@@ -69,10 +64,7 @@ export async function POST(request: NextRequest) {
       // v3.0.4：调用方密钥名落请求日志（虚拟密钥名 / Master Admin / Cron Trigger）
       apiKeyName: auth.auth.ok ? (auth.auth.principal?.name ?? null) : null,
     });
-    return bindQuotaSlotToResponse(upstream, auth.auth);
   } catch (err) {
-    // 失败/异常：该次不计入用量，立即归还占位（成功路径交由 requestLog flush 结算）
-    releaseQuotaSlot(auth.auth);
     return new Response(JSON.stringify({ error: { message: (err as Error).message } }), {
       status: 500,
       headers: { "Content-Type": "application/json", ...corsHeadersFor(request) },
