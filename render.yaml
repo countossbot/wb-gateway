@@ -21,7 +21,10 @@ services:
     dockerfilePath: ./Dockerfile
     plan: starter          # 免费层 15 分钟无流量会休眠，冷启动需等待建表完成
     region: oregon         # 与 Aiven 实例同区域：Aiven「California」= AWS us-west-2，选 Oregon 得 ~5-15ms RTT
-    healthCheckPath: /api/health
+    # 必须用 /healthz/live（纯存活探针，恒 200）。不要用 /healthz：它在未配置任何 provider
+    # 时返回 503（degraded），而 Render 只把 2xx 判为健康，会导致部署永远卡在 deploying。
+    # 业务就绪状态请访问 /healthz 查看。
+    healthCheckPath: /healthz/live
     autoDeploy: true
     envVars:
       - key: DATABASE_URL
