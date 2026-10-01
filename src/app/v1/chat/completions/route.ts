@@ -12,7 +12,7 @@ import {
   tooLargeResponse,
 } from "@/lib/gateway/http/bodyGuard";
 import { authorizeModelForPrincipal } from "@/lib/gateway/auth/auth";
-import { enforceVirtualKeyQuota } from "@/lib/gateway/auth/quota";
+import { enforceVirtualKeyQuota, releaseQuotaSlot } from "@/lib/gateway/auth/quota";
 import { corsPreflightResponse } from "@/lib/gateway/http/headers";
 
 export const dynamic = "force-dynamic";
@@ -53,6 +53,8 @@ export async function POST(request: NextRequest) {
   const quotaCheck = await enforceVirtualKeyQuota(request, auth.auth);
   if (!quotaCheck.ok) return quotaCheck.response;
 
+  // F1 修复配套：占位在 enforceVirtualKeyQuota 内完成，必须在所有出口归还（含异常），
+  // 否则一次失败请求会把该 key 的额度永久占用一格。
   try {
     const fleet = getProviderFleet(auth.config);
     return await dispatchExchange({
@@ -70,6 +72,8 @@ export async function POST(request: NextRequest) {
       status: 500,
       headers: { "Content-Type": "application/json", ...corsHeadersFor(request) },
     });
+  } finally {
+    releaseQuotaSlot(auth.auth);
   }
 }
 

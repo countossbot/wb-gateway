@@ -21,7 +21,7 @@ import {
   tooLargeResponse,
 } from "@/lib/gateway/http/bodyGuard";
 import { authorizeModelForPrincipal } from "@/lib/gateway/auth/auth";
-import { enforceVirtualKeyQuota } from "@/lib/gateway/auth/quota";
+import { enforceVirtualKeyQuota, releaseQuotaSlot } from "@/lib/gateway/auth/quota";
 import { HttpError } from "@/lib/gateway/exchange/transform";
 import { translateResponsesRequest } from "@/lib/gateway/responses/translate";
 import {
@@ -218,6 +218,9 @@ export async function POST(request: NextRequest) {
       status: 500,
       headers: { "Content-Type": "application/json", ...corsHeadersFor(request), ...droppedToolsHeader },
     });
+  } finally {
+    // F1 修复配套：所有出口归还配额占位（含异常与流式早退），避免额度被永久占用
+    releaseQuotaSlot(auth.auth);
   }
 }
 

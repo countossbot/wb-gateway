@@ -12,7 +12,7 @@ import {
   tooLargeResponse,
 } from "@/lib/gateway/http/bodyGuard";
 import { authorizeModelForPrincipal } from "@/lib/gateway/auth/auth";
-import { enforceVirtualKeyQuota } from "@/lib/gateway/auth/quota";
+import { enforceVirtualKeyQuota, releaseQuotaSlot } from "@/lib/gateway/auth/quota";
 import { corsPreflightResponse } from "@/lib/gateway/http/headers";
 
 export const dynamic = "force-dynamic";
@@ -69,6 +69,9 @@ export async function POST(request: NextRequest) {
       status: 500,
       headers: { "Content-Type": "application/json", ...corsHeadersFor(request) },
     });
+  } finally {
+    // F1 修复配套：所有出口归还配额占位（含异常），避免额度被永久占用
+    releaseQuotaSlot(auth.auth);
   }
 }
 
