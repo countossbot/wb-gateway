@@ -31,10 +31,21 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // F4 修复：虚拟密钥的模型白名单必须作用到目录接口。
+  // 原缺陷：本接口只做 requireGatewayAuth，未做模型级收敛，受限 Key 能枚举全量模型目录（信息越权）。
+  // 语义与 authorizeModelForPrincipal 完全一致：仅虚拟密钥主体受限，master / cron 主体仍看全量；
+  // 白名单含 "*" 视为不限制。
+  const keyObj = auth.auth.principal?.virtualKey;
+  const whitelist =
+    keyObj && Array.isArray(keyObj.models) && !keyObj.models.includes("*")
+      ? new Set(keyObj.models)
+      : null;
+  const visibleModels = whitelist ? configuredModels.filter((m) => whitelist.has(m)) : configuredModels;
+
   return new Response(
     JSON.stringify({
       object: "list",
-      data: configuredModels.map((id) => ({
+      data: visibleModels.map((id) => ({
         id,
         object: "model",
         created: Math.floor(Date.now() / 1000),

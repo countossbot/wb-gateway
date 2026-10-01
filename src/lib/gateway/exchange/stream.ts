@@ -1187,6 +1187,40 @@ export async function formatOpenAIToAnthropicJson(
   let accumulatedToolCalls: Array<{ id: string | null; name: string; args: string }> = [];
   const scanner = new ChunkLineScanner(); // v3.9.3：chunk 数组 + 增量扫描（替代全量拼接/全量 slice）
   let inputTokens = 20;
+
+  /**
+   * v4.10.1 修复（F3）：流式 delta.tool_calls 增量聚合。
+   *
+   * 原缺陷：本函数的流式循环只读 delta.content / delta.reasoning，完全忽略 delta.tool_calls；
+   * 只有非流式 message.tool_calls 分支（见下方）会填充 accumulatedToolCalls。
+   * 后果：上游以 SSE 返回工具调用时（正常情况），本函数返回的 Anthropic 响应里没有 tool_use 块，
+   * 客户端看不到任何工具调用；OpenAI 流式 → Anthropic 非流式聚合路径下功能直接失效。
+   *
+   * 修复：与同文件 aggregateOpenAIToChatJson 的既有做法（按 index 归并：首帧给 id/name，
+   * 后续帧只给 arguments 片段）保持一致，用 Map 按 index 累积。
+   */
+  const toolCallsByIndex = new Map<number, { id: string | null; name: string; args: string }>();
+  const absorbToolDelta = (
+    tcs: NonNullable<NonNullable<ParsedChunk["choices"]>[number]>["delta"] extends infer D
+      ? D extends { tool_calls?: infer T }
+        ? T
+        : never
+      : never
+  ) => {
+    if (!Array.isArray(tcs)) return;
+    for (const tc of tcs as Array<{
+      index?: number;
+      id?: string;
+      function?: { name?: string; arguments?: string };
+    }>) {
+      const idx = tc.index ?? 0;
+      const cur = toolCallsByIndex.get(idx) ?? { id: null as string | null, name: "tool", args: "" };
+      if (tc.id) cur.id = tc.id;
+      if (tc.function?.name) cur.name = tc.function.name;
+      if (tc.function?.arguments) cur.args += tc.function.arguments;
+      toolCallsByIndex.set(idx, cur);
+    }
+  };
   let outputTokens = 1;
   let usageFromUpstream = false; // v3.0.2：上游是否提供了精确 usage（决定是否估算兑底）
   let accumulatedFinishReason: string | null = null;
@@ -1211,6 +1245,13 @@ export async function formatOpenAIToAnthropicJson(
           }
           const reasoning = parsed.choices?.[0]?.delta?.reasoning_content || parsed.choices?.[0]?.delta?.reasoning;
           if (reasoning) accumulatedThinking += reasoning;
+          // F3 修复：流式帧里的 tool_calls 增量（首帧 id/name，后续仅 arguments 片段）
+          const toolDelta = parsed.choices?.[0]?.delta?.tool_calls;
+          if (toolDelta) absorbToolDelta(toolDelta);
+          // F3 附带修复：流式帧的 finish_reason 此前完全未采集（只在残行分支赋值），
+          // 导致流式路径的 stop_reason 恒为 end_turn，即使上游以 tool_calls 结束。
+          const fr = parsed.choices?.[0]?.finish_reason;
+          if (fr) accumulatedFinishReason = fr;
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) accumulated += delta;
           const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
@@ -1224,6 +1265,18 @@ export async function formatOpenAIToAnthropicJson(
         }
       }
       // v3.9.3：残行保留在 scanner 内（已消费 chunk 已移出），无需 slice 拷贝
+    }
+
+    // F3 修复：流式聚合结束，把按 index 归并的工具调用展开为最终数组。
+    // 仅当流式路径没有产出时兜底（非流式残行分支可能已 push，避免重复）。
+    if (toolCallsByIndex.size > 0 && accumulatedToolCalls.length === 0) {
+      accumulatedToolCalls = [...toolCallsByIndex.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([, v]) => ({
+          id: v.id,
+          name: v.name,
+          args: v.args || "{}",
+        }));
     }
 
     const bufferTail = scanner.drainRemainder();
