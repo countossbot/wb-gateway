@@ -16,8 +16,16 @@
  * Turbopack 无法静态分析动态 require（构建期报 "expression is too dynamic"），
  * 也无法把它们追踪进 .next/standalone 产物。
  */
-import { PrismaClient as PgPrismaClient } from '.prisma-pg/client'
+import { PrismaClient as PgPrismaClient, Prisma } from '.prisma-pg/client'
 import { PrismaClient as MysqlPrismaClient } from '.prisma-mysql/client'
+
+/**
+ * v4.2+ 修复：双 schema 生成到自定义 output 后，`@prisma/client` 不再导出 `Prisma` 命名空间
+ * （它只 re-export 默认 output 的那个 Client）。两处调用方（backup 路由的 JsonNull、
+ * requestLog 的 WhereInput 过滤类型）原本从 '@prisma/client' 取 `Prisma`，导致 TS2305。
+ * 统一改从本模块转发：方言无关的纯类型/哨兵值，取 PG 侧与 `db` 的类型断言保持同源。
+ */
+export { Prisma }
 
 export type DbDialect = 'postgresql' | 'mysql'
 

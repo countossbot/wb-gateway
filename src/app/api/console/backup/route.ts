@@ -12,7 +12,7 @@
 // 安全：导入属破坏性/关键操作，整次写入后落一条审计（restore/system，含分区计数摘要）；
 //       事务超时放宽至 60s（备份日志可达千条量级，默认 5s 不够）。
 import { NextRequest } from "next/server";
-import { Prisma } from "@prisma/client";
+import { Prisma } from "@/lib/db";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
 import { recordAudit } from "@/lib/gateway/console/auditService";

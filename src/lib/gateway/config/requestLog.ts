@@ -4,7 +4,7 @@
 // v4.2.3：聚合维度增加 model（模型健康/Top 模型排行的跨滚动窗口根本解）。
 import { db } from "@/lib/db";
 import { loadPricingMap, estimateRowCost } from "@/lib/console/pricing";
-import type { Prisma } from "@prisma/client";
+import type { Prisma } from "@/lib/db";
 
 export interface RequestLogEntry {
   model: string;
