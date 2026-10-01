@@ -14,8 +14,13 @@
  */
 const BASE = "http://127.0.0.1:3000";
 const UPSTREAM = "http://127.0.0.1:3041/v1";
-const ADMIN_USER = "admin";
-const ADMIN_PASS = "gateway-admin-2026";
+const ADMIN_USER = process.env.UAG_ADMIN_USER ?? "admin";
+const ADMIN_PASS = process.env.UAG_ADMIN_PASSWORD ?? "";
+if (!ADMIN_PASS) {
+  console.log("缺少 UAG_ADMIN_PASSWORD 环境变量，无法登录控制台。");
+  console.log("用法：UAG_ADMIN_PASSWORD=... bun run scripts/verify-quota-real-http.ts");
+  process.exit(2);
+}
 
 let failed = 0;
 const check = (n: string, c: boolean, e = "") => {

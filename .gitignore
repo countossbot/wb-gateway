@@ -82,3 +82,6 @@ workbuddy_global_hy3_test.sh
 *.tgz
 /public/uag-project-src-*
 *.tsbuildinfo
+
+# 工作日志（含历史会话中的明文凭据，绝不入库）
+worklog.md
