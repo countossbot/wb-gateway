@@ -52,15 +52,22 @@ async function pollShared(): Promise<void> {
 
 function subscribe(fn: RawInfoSubscriber): () => void {
   subscribers.add(fn);
+  // 以 subscribers 而非 sharedTimer 作为「是否需要轮询」的唯一真值源，避免两个状态互相失配。
+  // 定时器仅在其失效且仍有订阅者时补建；每次新订阅都先取一次最新值（singleflight 合并并发，不额外打接口）。
   if (!sharedTimer) {
-    void pollShared();
-    sharedTimer = setInterval(() => void pollShared(), POLL_INTERVAL_MS);
-  } else {
-    // 已有轮询在跑：新订阅者立即拿一次最新值（走 singleflight，不会额外打接口）
-    void fetchInfo().then((r) => {
-      if (subscribers.has(fn)) fn(r);
-    });
+    sharedTimer = setInterval(() => {
+      // 防御：若订阅者已清空（异常路径漏了 clearInterval），本轮自停，避免孤儿定时器常驻。
+      if (subscribers.size === 0) {
+        if (sharedTimer) clearInterval(sharedTimer);
+        sharedTimer = null;
+        return;
+      }
+      void pollShared();
+    }, POLL_INTERVAL_MS);
   }
+  void fetchInfo().then((r) => {
+    if (subscribers.has(fn)) fn(r);
+  });
   return () => {
     subscribers.delete(fn);
     if (subscribers.size === 0 && sharedTimer) {
