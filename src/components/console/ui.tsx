@@ -89,7 +89,8 @@ export function StatCard({
     </>
   );
   if (!clickable) {
-    return <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-xs">{content}</div>;
+    // r3：统一交互质感 —— 不可点击卡片也带轻微 hover 边框过渡（可点击卡已有 emerald 反馈）
+    return <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-xs transition-colors hover:border-stone-300">{content}</div>;
   }
   return (
     <button

@@ -14,6 +14,21 @@ import { getConfig } from "../config/configService";
 import { getProviderFleet } from "../core/fleet";
 import { db, isSqlite } from "@/lib/db";
 import { statSync } from "node:fs";
+import path from "node:path";
+
+/**
+ * v4.11.0-local：从 DATABASE_URL 派生 SQLite WAL 文件路径（<db>-wal）。
+ * 支持 file:/abs/path.db、file:./rel.db、file:../db/custom.db 三种形态；
+ * Prisma 对相对路径以 schema 所在目录（prisma/）为基准解析，这里保持同一基准。
+ * 非 SQLite 方言或解析失败返回不可能存在的路径（statSync catch → 0，两臂不触发）。
+ */
+function sqliteWalPath(): string {
+  const url = (process.env.DATABASE_URL ?? "").trim();
+  if (!url.startsWith("file:")) return "/__nonexistent__/custom.db-wal";
+  const raw = url.slice("file:".length).split("?")[0];
+  const dbPath = raw.startsWith("/") ? raw : path.resolve(process.cwd(), "prisma", raw);
+  return `${dbPath}-wal`;
+}
 
 interface CronFields {
   minute: number[];
@@ -431,10 +446,11 @@ async function tick(): Promise<void> {
     //   两者共用同一执行体：checkpoint 前在当前连接重设 per-connection pragma，
     //   TRUNCATE 把 -wal 直接收到 0 字节；失败仅 warn 不抛出。
     // v4.1.0：PostgreSQL 无 WAL/PRAGMA 概念，非 SQLite 数据源整段跳过（walNow 恒 0 → 两臂都不触发）。
+    // v4.11.0-local：WAL 文件路径从 DATABASE_URL 派生（支持绝对路径与相对路径，不再硬编码 db/custom.db）。
     const walNow = isSqlite
       ? (() => {
           try {
-            return statSync("db/custom.db-wal").size;
+            return statSync(sqliteWalPath()).size;
           } catch {
             return 0;
           }

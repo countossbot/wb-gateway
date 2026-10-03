@@ -26,6 +26,8 @@ export interface RuntimeHealth {
   rssHuman: string;
   uptimeSec: number;
   uptimeHuman: string;
+  /** 数据库方言（v4.11.0-local：侧边栏徽标从 system-info 真实读取，不再依赖客户端不可用的服务端 env） */
+  dbDialect: string;
   /** 健康度分级：< 50% ok / 50-75% warn / > 75% danger */
   level: HealthLevel;
   /** RSS / 4GB 上限百分比（0-100） */
@@ -104,6 +106,7 @@ interface RawInfo {
   rssHuman: string;
   uptimeSec: number;
   uptimeHuman: string;
+  dbDialect: string;
 }
 
 // 全局 singleflight：同 1s 内并发的 fetchInfo 调用合并为一次
@@ -123,12 +126,14 @@ async function fetchInfo(): Promise<RawInfo | null> {
       const data = await apiGet<{
         memory: { rssBytes: number; rssHuman: string };
         runtime: { uptimeSec: number; uptimeHuman: string };
+        db: { dialect: string };
       }>("/api/console/system-info");
       return {
         rssBytes: data.memory.rssBytes,
         rssHuman: data.memory.rssHuman,
         uptimeSec: data.runtime.uptimeSec,
         uptimeHuman: data.runtime.uptimeHuman,
+        dbDialect: data.db?.dialect ?? "",
       };
     } catch {
       return null;
@@ -175,6 +180,7 @@ export function useRuntimeHealth(): RuntimeHealth {
     rssHuman: info?.rssHuman ?? formatBytes(rssBytes),
     uptimeSec: info?.uptimeSec ?? 0,
     uptimeHuman: info?.uptimeHuman ?? formatUptime(0),
+    dbDialect: info?.dbDialect ?? "",
     level,
     percent,
     loading,

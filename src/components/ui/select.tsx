@@ -12,6 +12,9 @@ function Select({
   return <SelectPrimitive.Root data-slot="select" {...props} />
 }
 
+/** v4.9.12-local-r7：ItemText 直通（配合 SelectRichItem 指定触发器回显文本） */
+const SelectItemText = SelectPrimitive.ItemText
+
 function SelectGroup({
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Group>) {
@@ -122,6 +125,37 @@ function SelectItem({
   )
 }
 
+/**
+ * SelectRichItem（v4.9.12-local-r7 新增）：富内容下拉项 ——
+ * SelectItem 把全部 children 包进 ItemText（触发器会显示 textContent）,
+ * 不适合两行富条目；本组件让 ItemText 只包含 `text`（即触发器显示文本），
+ * 其余 children 仅在下拉面板内渲染（模型画像/描述/徽标等）。
+ * 注意：children 内必须自行包含 <SelectItemText> 以指定触发器回显文本所在位置。
+ */
+function SelectRichItem({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Item>) {
+  return (
+    <SelectPrimitive.Item
+      data-slot="select-rich-item"
+      className={cn(
+        "focus:bg-accent focus:text-accent-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-default items-start rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        className
+      )}
+      {...props}
+    >
+      <span className="absolute top-1/2 right-2 flex size-3.5 -translate-y-1/2 items-center justify-center">
+        <SelectPrimitive.ItemIndicator>
+          <CheckIcon className="size-4" />
+        </SelectPrimitive.ItemIndicator>
+      </span>
+      {children}
+    </SelectPrimitive.Item>
+  )
+}
+
 function SelectSeparator({
   className,
   ...props
@@ -176,7 +210,9 @@ export {
   SelectContent,
   SelectGroup,
   SelectItem,
+  SelectItemText,
   SelectLabel,
+  SelectRichItem,
   SelectScrollDownButton,
   SelectScrollUpButton,
   SelectSeparator,

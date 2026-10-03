@@ -85,3 +85,8 @@ workbuddy_global_hy3_test.sh
 
 # 工作日志（含历史会话中的明文凭据，绝不入库）
 worklog.md
+
+# 沙箱环境专属文件（不入仓库）
+skills/
+/download/
+/--full-page

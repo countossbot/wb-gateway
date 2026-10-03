@@ -533,6 +533,23 @@ export interface RouteRow {
 export interface RoutesData {
   routes: RouteRow[];
   providers: Array<{ id: string; name: string; type: string; enabled: boolean }>;
+  /** v4.9.12-local-r4：近 24h 每路由调用统计（键 = 路由模型名；零流量路由不出现在键集中） */
+  stats24h?: Record<string, RouteStat24h>;
+  /** v4.9.12-local-r5：近 24h 按最终命中提供商聚合（键 = providerId；用于候选芯片 ×N 计数。
+   *  RequestLog 仅记录最终服务的 provider，failover 中间失败不计入候选命中） */
+  providerStats24h?: Record<string, { requests: number; errors: number; avgDurationMs: number | null }>;
+}
+
+/** v4.9.12-local-r4：路由 24h 调用统计（RequestLog 按路由模型名聚合） */
+export interface RouteStat24h {
+  requests: number;
+  errors: number;
+  /** 成功请求平均耗时（ms）；无成功样本时为 null */
+  avgDurationMs: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  /** 最近一次调用时间（ISO）；窗口内无调用时为 null */
+  lastCallAt: string | null;
 }
 
 // ---- 定时任务 ----

@@ -5,7 +5,9 @@
 import * as React from "react";
 import {
   AlertTriangle,
+  BarChart3,
   Check,
+  Code2,
   Gauge,
   KeyRound,
   Loader2,
@@ -37,6 +39,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   CopyButton,
@@ -51,7 +54,7 @@ import {
 } from "@/components/console/ui";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
 import { absoluteTime, fmtUsd } from "@/lib/console/format";
-import type { CreatedKey, KeysData, VirtualKeyRow } from "@/lib/console/types";
+import type { BillingData, CreatedKey, KeysData, VirtualKeyRow } from "@/lib/console/types";
 import { QuickTestPanel } from "@/components/console/quick-test-panel";
 
 /** v3.5.0：密钥名 → 近 7 天逐日用量（sparkline 数据源）；v4.4.0：附带当日估算成本（$，未计价行不计） */
@@ -300,6 +303,10 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
   // 删除
   const [delTarget, setDelTarget] = React.useState<VirtualKeyRow | null>(null);
   const [delSaving, setDelSaving] = React.useState(false);
+  // v4.9.12-local-r2：接入示例 Dialog（按密钥生成 cURL / Python / Node.js / 环境变量代码片段）
+  const [sampleKey, setSampleKey] = React.useState<VirtualKeyRow | null>(null);
+  // v4.9.12-local-r6：密钥月度用量明细
+  const [usageKey, setUsageKey] = React.useState<VirtualKeyRow | null>(null);
 
   // v3.5.0：近 7 天用量 sparkline 数据（UsageDaily 按密钥名 × 日聚合；一次拉取全局复用）
   const [usage7d, setUsage7d] = React.useState<Usage7dMap | null>(null);
@@ -569,8 +576,9 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                   {/* v3.7.0：最后使用时间（RequestLog 滚动窗口 MAX(createdAt)） */}
                   <TableHead className="hidden lg:table-cell">最后使用</TableHead>
                   {/* v3.5.0：近 7 天用量 sparkline；v4.4.0：附带估算成本（≈$） */}
-                  <TableHead className="hidden lg:table-cell">近 7 天用量</TableHead>
-                  <TableHead className="hidden lg:table-cell">备注</TableHead>
+                  <TableHead className="hidden xl:table-cell">近 7 天用量</TableHead>
+                  {/* r3：xl→2xl（1280-1535px 视口 12 列过宽，备注列被截断；上移断点后 1440px 免横向滚动） */}
+                  <TableHead className="hidden 2xl:table-cell">备注</TableHead>
                   <TableHead>启用</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
@@ -667,7 +675,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                       {/* v3.8.0：改用共享 LastUsedCell（与账号页「最后调用」同款组件，样式统一） */}
                       <LastUsedCell at={k.lastUsedAt} noun="调用" />
                     </TableCell>
-                    <TableCell className="hidden lg:table-cell">
+                    <TableCell className="hidden xl:table-cell">
                       {(() => {
                         const days = usage7d?.get(k.name);
                         if (!usage7d || !days) return <MiniBars values={[0, 0, 0, 0, 0, 0, 0]} ariaLabel={`密钥 ${k.name} 近 7 天用量`} />;
@@ -699,7 +707,7 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                         );
                       })()}
                     </TableCell>
-                    <TableCell className="hidden max-w-44 truncate text-xs text-muted-foreground lg:table-cell" title={k.remark || undefined}>
+                    <TableCell className="hidden max-w-44 truncate text-xs text-muted-foreground 2xl:table-cell" title={k.remark || undefined}>
                       {k.remark || "—"}
                     </TableCell>
                     <TableCell>
@@ -707,6 +715,12 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        <Button variant="ghost" size="icon" onClick={() => setUsageKey(k)} aria-label={`查看 ${k.name} 的月度用量明细`} title="月度用量明细（分模型 token/成本）">
+                          <BarChart3 className="text-stone-500" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => setSampleKey(k)} aria-label={`查看 ${k.name} 的接入示例`} title="接入示例（cURL / Python / Node.js）">
+                          <Code2 className="text-stone-500" />
+                        </Button>
                         <Button variant="ghost" size="icon" onClick={() => openEdit(k)} aria-label="编辑密钥">
                           <Pencil className="text-stone-500" />
                         </Button>
@@ -908,8 +922,375 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* v4.9.12-local-r2：接入示例 Dialog —— 按密钥生成四种语言的接入代码片段 */}
+      <IntegrationSamplesDialog sampleKey={sampleKey} onClose={() => setSampleKey(null)} />
+      <KeyUsageDialog usageKey={usageKey} onClose={() => setUsageKey(null)} />
+
       {/* v4.9.8：快速测试面板 —— 粘贴密钥 + 选模型 + 发送请求 + 看响应 */}
       <QuickTestPanel />
     </div>
+  );
+}
+
+/**
+ * v4.9.12-local-r2：接入示例 Dialog。
+ * 按所选协议（OpenAI / Anthropic 兼容）生成 cURL / Python / Node.js / 环境变量 四类片段，
+ * 供管理员快速把客户端接入网关。密钥仅显示掩码 —— 示例统一使用占位符，
+ * 提醒替换为创建密钥时保存的完整密钥（明文不回传，符合密钥治理口径）。
+ */
+const SAMPLE_MODEL = "glm-4.6"; // 网关当前主力路由；新建其他路由后可自行替换
+const KEY_PLACEHOLDER = "sk-uag-【替换为完整密钥】";
+
+function buildSamples(origin: string, protocol: "openai" | "anthropic"): { curl: string; python: string; node: string; env: string } {
+  const userMsg = "你好，用一句话介绍你自己";
+  if (protocol === "openai") {
+    return {
+      curl: `curl -X POST ${origin}/v1/chat/completions \\
+  -H "Authorization: Bearer ${KEY_PLACEHOLDER}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${SAMPLE_MODEL}",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "${userMsg}"}]
+  }'`,
+      python: `# pip install openai>=1.0
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="${origin}/v1",   # 网关 OpenAI 兼容端点
+    api_key="${KEY_PLACEHOLDER}",
+)
+
+resp = client.chat.completions.create(
+    model="${SAMPLE_MODEL}",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "${userMsg}"}],
+)
+print(resp.choices[0].message.content)
+print(resp.usage)  # 网关透传的真实 token 用量`,
+      node: `// Node.js 18+（原生 fetch）
+const res = await fetch("${origin}/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer ${KEY_PLACEHOLDER}",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "${SAMPLE_MODEL}",
+    max_tokens: 1024,
+    messages: [{ role: "user", content: "${userMsg}" }],
+  }),
+});
+const data = await res.json();
+console.log(data.choices[0].message.content);
+console.log(data.usage);`,
+      env: `# OpenAI 兼容 SDK / 通用工具（LangChain、LobeChat、Open WebUI 等）
+OPENAI_BASE_URL=${origin}/v1
+OPENAI_API_KEY=${KEY_PLACEHOLDER}`,
+    };
+  }
+  return {
+    curl: `curl -X POST ${origin}/v1/messages \\
+  -H "Authorization: Bearer ${KEY_PLACEHOLDER}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${SAMPLE_MODEL}",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "${userMsg}"}]
+  }'`,
+    python: `# pip install anthropic
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="${origin}",      # 网关 Anthropic 兼容端点
+    auth_token="${KEY_PLACEHOLDER}",
+)
+
+msg = client.messages.create(
+    model="${SAMPLE_MODEL}",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "${userMsg}"}],
+)
+print(msg.content[0].text)
+print(msg.usage)`,
+    node: `// Node.js 18+（原生 fetch · Anthropic 协议）
+const res = await fetch("${origin}/v1/messages", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer ${KEY_PLACEHOLDER}",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "${SAMPLE_MODEL}",
+    max_tokens: 1024,
+    messages: [{ role: "user", content: "${userMsg}" }],
+  }),
+});
+const data = await res.json();
+console.log(data.content[0].text);
+console.log(data.usage);`,
+    env: `# Anthropic 兼容（Claude Code / Claude SDK）
+ANTHROPIC_BASE_URL=${origin}
+ANTHROPIC_AUTH_TOKEN=${KEY_PLACEHOLDER}`,
+  };
+}
+
+function IntegrationSamplesDialog({ sampleKey, onClose }: { sampleKey: VirtualKeyRow | null; onClose: () => void }) {
+  const [protocol, setProtocol] = React.useState<"openai" | "anthropic">("openai");
+  const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
+  const samples = React.useMemo(() => buildSamples(origin, protocol), [origin, protocol]);
+
+  React.useEffect(() => {
+    if (sampleKey) setProtocol("openai");
+  }, [sampleKey]);
+
+  const tabs: Array<{ id: string; label: string; code: string }> = [
+    { id: "curl", label: "cURL", code: samples.curl },
+    { id: "python", label: "Python", code: samples.python },
+    { id: "node", label: "Node.js", code: samples.node },
+    { id: "env", label: "环境变量", code: samples.env },
+  ];
+
+  return (
+    <Dialog open={!!sampleKey} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Code2 className="size-4.5 text-stone-600" />
+            接入示例 · {sampleKey?.name}
+          </DialogTitle>
+          <DialogDescription>
+            复制片段后把 {KEY_PLACEHOLDER} 替换为创建该密钥时保存的完整密钥（列表中仅显示掩码，明文不可回溯）。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {/* 协议切换 + 端点说明 */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div role="tablist" aria-label="接入协议" className="flex rounded-lg border border-stone-200 bg-stone-50 p-0.5">
+              {(["openai", "anthropic"] as const).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  role="tab"
+                  aria-selected={protocol === p}
+                  onClick={() => setProtocol(p)}
+                  className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                    protocol === p ? "bg-white text-stone-900 shadow-sm" : "text-stone-500 hover:text-stone-700"
+                  }`}
+                >
+                  {p === "openai" ? "OpenAI 兼容" : "Anthropic 兼容"}
+                </button>
+              ))}
+            </div>
+            <code className="rounded bg-stone-100 px-2 py-1 font-mono text-[10px] text-stone-500">
+              POST {protocol === "openai" ? "/v1/chat/completions" : "/v1/messages"}
+            </code>
+          </div>
+
+          <Tabs defaultValue="curl" key={protocol}>
+            <TabsList className="h-8 w-full justify-start gap-0.5 bg-stone-100 p-0.5">
+              {tabs.map((t) => (
+                <TabsTrigger key={t.id} value={t.id} className="h-7 px-2.5 text-[11px] data-[state=active]:bg-white data-[state=active]:shadow-sm">
+                  {t.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {tabs.map((t) => (
+              <TabsContent key={t.id} value={t.id} className="mt-2">
+                <div className="relative">
+                  <div className="absolute right-2 top-2 z-10">
+                    <CopyButton text={t.code} size="sm" variant="outline" label="复制" />
+                  </div>
+                  <pre className="max-h-72 overflow-auto rounded-lg border border-stone-700 bg-stone-900 p-3 pt-9 text-[11px] leading-relaxed text-stone-100 [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-stone-600 [&::-webkit-scrollbar]:w-1.5">
+                    <code>{t.code}</code>
+                  </pre>
+                </div>
+              </TabsContent>
+            ))}
+          </Tabs>
+
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            两种协议共用同一把虚拟密钥与路由（网关自动转译请求/响应格式）；鉴权同时支持 <code className="rounded bg-stone-100 px-1 font-mono">Authorization: Bearer</code> 与 <code className="rounded bg-stone-100 px-1 font-mono">x-api-key</code> 头。
+            示例模型 {SAMPLE_MODEL} 需已在「模型路由」中配置，其他模型名按路由清单替换。
+          </p>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            关闭
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---- v4.9.12-local-r6：密钥月度用量明细对话框 ----
+// 复用 /api/console/usage/billing（月度账单按密钥 × 模型聚合），零后端改动：
+// 展示该密钥本月分模型的请求/token/缓存/估算成本，支持切换历史月份（≤12 个月）。
+function KeyUsageDialog({ usageKey, onClose }: { usageKey: VirtualKeyRow | null; onClose: () => void }) {
+  const [data, setData] = React.useState<BillingData | null>(null);
+  const [month, setMonth] = React.useState<string>("");
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  const load = React.useCallback(async (m?: string) => {
+    setLoading(true);
+    setError("");
+    try {
+      const d = await apiGet<BillingData>(`/api/console/usage/billing${m ? `?month=${encodeURIComponent(m)}` : ""}`);
+      setData(d);
+      setMonth(d.month);
+    } catch (e) {
+      setError(errMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (usageKey) void load();
+  }, [usageKey, load]);
+
+  const row = data?.rows.find((r) => r.apiKeyName === usageKey?.name);
+  const monthLabel = (m: string) => `${parseInt(m.slice(0, 10).slice(0, 4), 10)} 年 ${parseInt(m.slice(5, 7), 10)} 月${m === data?.month && m === data?.prevMonth ? "" : ""}`;
+  const pricedCoverage = row && row.requests > 0 ? Math.round((row.cost.pricedRequests / row.requests) * 100) : null;
+  const budgetPct = row && row.monthlyCostLimit > 0 ? Math.min(100, Math.round((row.cost.cost / row.monthlyCostLimit) * 100)) : null;
+
+  return (
+    <Dialog open={!!usageKey} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <BarChart3 className="size-4.5 text-stone-600" />
+            月度用量明细 · {usageKey?.name}
+          </DialogTitle>
+          <DialogDescription>
+            分模型 token 与估算成本（模型单价表口径，非计费）；预算护栏进度同步展示。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {/* 月份切换 */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Select
+              value={month}
+              onValueChange={(v) => void load(v)}
+              disabled={loading || !data || data.months.length === 0}
+            >
+              <SelectTrigger className="w-44 text-xs">
+                <SelectValue placeholder="选择月份" />
+              </SelectTrigger>
+              <SelectContent>
+                {(data?.months ?? []).map((m) => (
+                  <SelectItem key={m} value={m} className="text-xs">
+                    {monthLabel(m)}{m === data?.month ? "（本月）" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {loading && <Loader2 className="size-4 animate-spin text-stone-400" />}
+          </div>
+
+          <ErrorAlert message={error} onRetry={() => void load(month || undefined)} />
+
+          {loading && !data ? (
+            <LoadingBlock rows={4} />
+          ) : !row || row.requests === 0 ? (
+            <div className="rounded-lg border border-dashed border-stone-300 bg-stone-50/60 px-4 py-8 text-center">
+              <BarChart3 className="mx-auto size-5 text-stone-300" />
+              <p className="mt-2 text-xs font-medium text-stone-400">{monthLabel(month)}无调用记录</p>
+              <p className="mt-1 text-[11px] text-stone-300">该密钥当月未产生任何请求</p>
+            </div>
+          ) : (
+            <>
+              {/* 汇总 chips */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant="outline" className="border-stone-200 bg-stone-50 px-1.5 py-0 text-[10px] tabular-nums text-stone-600">
+                  {row.requests} 次请求
+                </Badge>
+                {row.successRate != null && (
+                  <Badge variant="outline" className="border-stone-200 bg-stone-50 px-1.5 py-0 text-[10px] tabular-nums text-stone-600">
+                    成功率 {row.successRate}%
+                  </Badge>
+                )}
+                <Badge variant="outline" className="border-stone-200 bg-stone-50 px-1.5 py-0 text-[10px] tabular-nums text-stone-600">
+                  ↑ {row.inputTokens.toLocaleString()} / ↓ {row.outputTokens.toLocaleString()} tok
+                </Badge>
+                {row.cachedTokens > 0 && (
+                  <Badge variant="outline" className="border-stone-200 bg-stone-50 px-1.5 py-0 text-[10px] tabular-nums text-stone-600">
+                    缓存 {row.cachedTokens.toLocaleString()}
+                  </Badge>
+                )}
+                <Badge variant="outline" className="border-lime-200 bg-lime-50 px-1.5 py-0 text-[10px] tabular-nums text-lime-700">
+                  ≈ {fmtUsd(row.cost.cost)}
+                </Badge>
+                {pricedCoverage != null && pricedCoverage < 100 && (
+                  <Badge variant="outline" className="border-amber-200 bg-amber-50 px-1.5 py-0 text-[10px] tabular-nums text-amber-700" title={`${row.cost.unpricedRequests} 次请求的模型未配置单价，不计入成本估算`}>
+                    计价覆盖 {pricedCoverage}%
+                  </Badge>
+                )}
+              </div>
+
+              {/* 预算进度（仅设置了月度预算时） */}
+              {budgetPct != null && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px] text-stone-500">
+                    <span>月度预算 {fmtUsd(row.monthlyCostLimit)}</span>
+                    <span className="tabular-nums">{budgetPct}%</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-stone-100">
+                    <div className={`h-full rounded-full ${budgetBarClass(budgetPct)}`} style={{ width: `${budgetPct}%` }} />
+                  </div>
+                </div>
+              )}
+
+              {/* 分模型明细表 */}
+              <div className="overflow-hidden rounded-lg border border-stone-200">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-stone-50/80">
+                      <TableHead className="text-xs">模型</TableHead>
+                      <TableHead className="text-right text-xs">请求</TableHead>
+                      <TableHead className="text-right text-xs">输入 tok</TableHead>
+                      <TableHead className="text-right text-xs">输出 tok</TableHead>
+                      <TableHead className="hidden text-right text-xs sm:table-cell">缓存</TableHead>
+                      <TableHead className="text-right text-xs">估算成本</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {row.byModel.map((m) => (
+                      <TableRow key={m.model}>
+                        <TableCell>
+                          <code className="block max-w-40 truncate font-mono text-xs text-stone-800" title={m.model}>
+                            {m.model}
+                          </code>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums text-stone-600">{m.requests}</TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums text-stone-600">{m.inputTokens.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums text-stone-600">{m.outputTokens.toLocaleString()}</TableCell>
+                        <TableCell className="hidden text-right font-mono text-xs tabular-nums text-stone-400 sm:table-cell">
+                          {m.cachedTokens > 0 ? m.cachedTokens.toLocaleString() : "—"}
+                        </TableCell>
+                        <TableCell className={`text-right font-mono text-xs tabular-nums ${m.cost.cost > 0 ? "text-lime-700" : "text-stone-300"}`}>
+                          {m.cost.cost > 0 ? fmtUsd(m.cost.cost) : "—"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            关闭
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

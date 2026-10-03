@@ -20,7 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { RuntimeHealthBadge } from "@/components/console/runtime-health-badge";
 import { RssAlertBanner } from "@/components/console/rss-alert-banner";
-import { dbDialect } from "@/lib/db";
+import { useRuntimeHealth } from "@/lib/console/useRuntimeHealth";
 import { cn } from "@/lib/utils";
 
 export type ConsoleTab =
@@ -43,6 +43,25 @@ export const TAB_ITEMS: Array<{ id: ConsoleTab; label: string; icon: React.Eleme
   { id: "logs", label: "运行日志", icon: ScrollText },
   { id: "settings", label: "设置", icon: Settings },
 ];
+
+/**
+ * v4.11.0-local：数据库方言徽标 —— 从 /api/console/system-info 真实读取。
+ * 原实现直接 import 服务端 @/lib/db 的 dbDialect（客户端 bundle 中 process.env.DATABASE_URL
+ * 不会被内联，恒为空 → 回落 'postgresql'），在 SQLite 本地部署下显示错误标签。
+ */
+function DatabaseBadge() {
+  const { dbDialect, loading } = useRuntimeHealth();
+  const label =
+    dbDialect === "mysql" ? "MySQL" : dbDialect === "sqlite" ? "SQLite" : dbDialect === "postgresql" ? "PostgreSQL" : loading ? "…" : "—";
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-[11px] font-medium uppercase tracking-wide text-stone-500">数据库</span>
+      <Badge variant="outline" className="border-emerald-200 bg-emerald-50 px-1.5 py-0 text-[10px] text-emerald-700">
+        {label}
+      </Badge>
+    </div>
+  );
+}
 
 function NavList({
   active,
@@ -131,12 +150,7 @@ export function ConsoleShell({
                   v{version}
                 </Badge>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium uppercase tracking-wide text-stone-500">数据库</span>
-                <Badge variant="outline" className="border-emerald-200 bg-emerald-50 px-1.5 py-0 text-[10px] text-emerald-700">
-                  {dbDialect === "mysql" ? "MySQL" : "PostgreSQL"}
-                </Badge>
-              </div>
+              <DatabaseBadge />
               <RuntimeHealthBadge />
             </div>
             <p className="text-center text-[10px] leading-tight text-stone-400">

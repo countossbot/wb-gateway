@@ -49,6 +49,8 @@ export interface AnthropicRequestBody {
   temperature?: number;
   max_tokens?: number;
   top_p?: number;
+  /** v4.9.12-local-r8：Anthropic 停止序列（转译为 OpenAI stop；此前被静默丢弃） */
+  stop_sequences?: string[];
   thinking?: Record<string, unknown>;
   [key: string]: unknown;
 }
@@ -384,6 +386,12 @@ export function transformAnthropicToOpenAI(
   if (body.temperature !== undefined) payload.temperature = body.temperature;
   if (body.max_tokens !== undefined) payload.max_tokens = body.max_tokens;
   if (body.top_p !== undefined) payload.top_p = body.top_p;
+  // v4.9.12-local-r8：stop_sequences → stop 透传（此前被静默丢弃，与 r5 llm-upstream 吞 stop 同类缺陷；
+  // 实测：Anthropic 协议请求 stop_sequences:["END"] 上游完全不截断）。类型收敛：仅保留非空字符串，上限 4。
+  if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) {
+    const stop = body.stop_sequences.filter((s): s is string => typeof s === "string" && s.length > 0).slice(0, 4);
+    if (stop.length > 0) payload.stop = stop;
+  }
 
   // 共享思维链与推理强度调度器：统一解析与注入
   const reasoningIntent = intent || parseReasoningIntent({ model: body.model || model, body: body as never });

@@ -38,9 +38,11 @@ const CORE_TABLES = [
 /**
  * 定位当前方言对应的 init.sql（dev 与容器 standalone 均以 cwd 为基准）。
  * v4.2.0：按 DATABASE_URL 方言选择 prisma/init.postgres.sql 或 prisma/init.mysql.sql。
+ * v4.11.0-local：新增 SQLite 方言 → prisma/init.sqlite.sql（本地单机部署）。
  */
 function resolveInitSqlPath(): string {
-  const fileName = dbDialect === "mysql" ? "init.mysql.sql" : "init.postgres.sql";
+  const fileName =
+    dbDialect === "mysql" ? "init.mysql.sql" : dbDialect === "sqlite" ? "init.sqlite.sql" : "init.postgres.sql";
   const candidates = [
     path.join(process.cwd(), "prisma", fileName),
     path.join(process.cwd(), ".next", "standalone", "prisma", fileName), // 从项目根以 node .next/standalone/server.js 直启的防呆兜底
@@ -135,9 +137,14 @@ async function findMissingColumnAlters(): Promise<string[]> {
   if (declared.size === 0) return []
 
   const schemaExpr = dbDialect === "mysql" ? "DATABASE()" : "current_schema()"
-  const rows = (await db.$queryRawUnsafe(
-    `SELECT table_name AS t, column_name AS c FROM information_schema.columns WHERE table_schema = ${schemaExpr}`
-  )) as Array<{ t: string; c: string }>
+  // v4.11.0-local：SQLite 无 information_schema，改查 sqlite_master + pragma_table_info（表值函数）
+  const rows = dbDialect === "sqlite"
+    ? ((await db.$queryRawUnsafe(
+        `SELECT m.name AS t, p.name AS c FROM sqlite_master m JOIN pragma_table_info(m.name) p ON 1 WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'`
+      )) as Array<{ t: string; c: string }>)
+    : ((await db.$queryRawUnsafe(
+        `SELECT table_name AS t, column_name AS c FROM information_schema.columns WHERE table_schema = ${schemaExpr}`
+      )) as Array<{ t: string; c: string }>)
   // 比对用小写 key（MySQL 表名大小写敏感性随 lower_case_table_names 变化），但生成 SQL
   // 必须用数据库返回的「真实名」——lower_case_table_names=0（Linux 默认）下表名区分大小写，
   // 用小写名 ALTER 会报「表不存在」。
@@ -182,10 +189,14 @@ export async function ensureDatabaseSchema(): Promise<SchemaInitResult> {
     // 旧的 tables.length > 0 判据会把这种库误判为已初始化 → 永远跳过建表 →
     // 后续所有查询 P2021 且重启无法自愈。此处改为校验核心表集合，缺失则补齐
     // （replay init SQL 并忽略「已存在」错误，见 applyInitSql 的容错执行）。
-    const schemaExpr = dbDialect === "mysql" ? "DATABASE()" : "current_schema()";
-    const rows = (await db.$queryRawUnsafe(
-      `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = ${schemaExpr} AND table_type = 'BASE TABLE'`
-    )) as Array<{ name: string }>;
+    // v4.11.0-local：SQLite 无 information_schema，改查 sqlite_master。
+    const rows = dbDialect === "sqlite"
+      ? ((await db.$queryRawUnsafe(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`
+        )) as Array<{ name: string }>)
+      : ((await db.$queryRawUnsafe(
+          `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = ${dbDialect === "mysql" ? "DATABASE()" : "current_schema()"} AND table_type = 'BASE TABLE'`
+        )) as Array<{ name: string }>)
     const existing = new Set(rows.map((r) => (dbDialect === "mysql" ? r.name.toLowerCase() : r.name)));
     const missing = (CORE_TABLES as readonly string[]).filter((t) =>
       dbDialect === "mysql" ? !existing.has(t.toLowerCase()) : !existing.has(t)
@@ -268,8 +279,11 @@ async function applyInitSql(reason: string, dbPath: string): Promise<number> {
     { timeout: txTimeout, maxWait: 60_000 }
   );
   // 回读核对（启动日志可直接核对建表数量）。v4.2.0：PG 与 MySQL 均走 information_schema。
-  const countSchemaExpr = dbDialect === "mysql" ? "DATABASE()" : "current_schema()";
-  const countSql = `SELECT count(*) as n FROM information_schema.tables WHERE table_schema = ${countSchemaExpr} AND table_type = 'BASE TABLE'`;
+  // v4.11.0-local：SQLite 走 sqlite_master。
+  const countSql =
+    dbDialect === "sqlite"
+      ? `SELECT count(*) as n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`
+      : `SELECT count(*) as n FROM information_schema.tables WHERE table_schema = ${dbDialect === "mysql" ? "DATABASE()" : "current_schema()"} AND table_type = 'BASE TABLE'`;
   const tables = (await db.$queryRawUnsafe(countSql)) as Array<{ n: number | bigint }>;
   console.log(`[SchemaInit] schema ready: ${String(tables[0]?.n ?? "?")} tables created`);
   return statements.length;

@@ -1,6 +1,6 @@
 // /api/console/routes —— 模型路由管理（模型名 → 有序候选列表）。
-// GET：路由 + 候选 + 可选提供商清单（前端拖拽排序）；POST：新增路由；
-// PUT：更新（含候选拖拽后的新顺序）；DELETE ?model=：删除路由。
+// GET：路由 + 候选 + 可选提供商清单（前端拖拽排序）+ 近 24h 每路由调用统计；
+// POST：新增路由；PUT：更新（含候选拖拽后的新顺序）；DELETE ?model=：删除路由。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
@@ -20,6 +20,64 @@ export async function GET(request: NextRequest) {
     // 提供商按 sortOrder 升序（与「API 中转」及原生配置展示顺序一致）
     db.provider.findMany({ select: { id: true, name: true, type: true, enabled: true }, orderBy: { sortOrder: "asc" } }),
   ]);
+
+  // v4.9.12-local-r4：近 24h 每路由调用统计（RequestLog.model = 客户端请求的路由模型名）。
+  // 单条 groupBy 查询覆盖全部路由，无 N+1；零流量路由不出现在结果中（前端按缺省渲染「24h 无调用」）。
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const grouped = await db.requestLog.groupBy({
+    by: ["model"],
+    where: { createdAt: { gte: since24h } },
+    _count: { _all: true },
+    _sum: { inputTokens: true, outputTokens: true },
+    _avg: { durationMs: true },
+    _max: { createdAt: true },
+  });
+  // 错误数需要单独统计（groupBy 无法同时按 status 细分出错误行）
+  const errGrouped = await db.requestLog.groupBy({
+    by: ["model"],
+    where: { createdAt: { gte: since24h }, status: { gte: 400 } },
+    _count: { _all: true },
+  });
+  const errCountByModel = new Map(errGrouped.map((g) => [g.model, g._count._all]));
+  const stats: Record<string, {
+    requests: number; errors: number; avgDurationMs: number | null;
+    inputTokens: number; outputTokens: number; lastCallAt: string | null;
+  }> = {};
+  for (const g of grouped) {
+    stats[g.model] = {
+      requests: g._count._all,
+      errors: errCountByModel.get(g.model) ?? 0,
+      avgDurationMs: g._avg.durationMs != null ? Math.round(g._avg.durationMs) : null,
+      inputTokens: g._sum.inputTokens ?? 0,
+      outputTokens: g._sum.outputTokens ?? 0,
+      lastCallAt: g._max.createdAt ? g._max.createdAt.toISOString() : null,
+    };
+  }
+
+  // v4.9.12-local-r5：按「最终命中提供商」聚合（RequestLog 仅记录最终服务的 provider，
+  // failover 中间失败不计入候选命中）。用于路由候选芯片的 24h 命中计数 ×N。
+  const provGrouped = await db.requestLog.groupBy({
+    by: ["providerId"],
+    where: { createdAt: { gte: since24h }, providerId: { not: null } },
+    _count: { _all: true },
+    _avg: { durationMs: true },
+  });
+  const provErrGrouped = await db.requestLog.groupBy({
+    by: ["providerId"],
+    where: { createdAt: { gte: since24h }, providerId: { not: null }, status: { gte: 400 } },
+    _count: { _all: true },
+  });
+  const provErrById = new Map(provErrGrouped.map((g) => [g.providerId as string, g._count._all]));
+  const providerStats24h: Record<string, { requests: number; errors: number; avgDurationMs: number | null }> = {};
+  for (const g of provGrouped) {
+    if (!g.providerId) continue;
+    providerStats24h[g.providerId] = {
+      requests: g._count._all,
+      errors: provErrById.get(g.providerId) ?? 0,
+      avgDurationMs: g._avg.durationMs != null ? Math.round(g._avg.durationMs) : null,
+    };
+  }
+
   return ok({
     routes: routes.map((r) => ({
       id: r.id,
@@ -36,6 +94,10 @@ export async function GET(request: NextRequest) {
       })),
     })),
     providers,
+    // v4.9.12-local-r4：24h 统计（键 = 路由模型名）
+    stats24h: stats,
+    // v4.9.12-local-r5：24h 最终命中提供商统计（键 = providerId）
+    providerStats24h,
   });
 }
 

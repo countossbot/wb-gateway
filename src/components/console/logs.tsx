@@ -4,11 +4,15 @@
 // v3.0.6：筛选七维 —— 新增账号（提供商 × 账号组合键，防跨提供商同名 default 串扰）与自定义起止时间
 // （datetime-local 输入，起止均空 = 全部、仅填起始 = 起始到现在、仅填截止 = 截止之前）；账号徽标跳转第四通道。
 // v3.0.8：CSV 导出 —— 按当前七维筛选导出全部匹配行（上限 5000，BOM + RFC 4180 转义，Excel 直接打开）。
+// v4.9.12-local-r7：行内展开详情 —— 点击行/箭头展开完整请求画像（时间/状态/耗时/协议/流式/密钥/命中链路/
+// Token 用量来源/成本/错误全文），移动端被隐藏的列在展开区全部可读；支持复制行 JSON 便于排障工单。
 "use client";
 
 import * as React from "react";
 import {
+  Braces,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -38,7 +42,7 @@ import {
 import { apiGet, authHeaders, errMessage } from "@/lib/console/api";
 import { absoluteTime, fmtNum, fmtUsd, statusColor, tokenUsage } from "@/lib/console/format";
 import { buildDeepLink, parseLogsFilters, syncLogsFiltersToUrl } from "@/lib/console/urlState";
-import type { LogsData } from "@/lib/console/types";
+import type { LogRow, LogsData } from "@/lib/console/types";
 
 const PAGE_SIZE = 50;
 
@@ -191,6 +195,52 @@ function CopyableError({ text }: { text: string }) {
   );
 }
 
+/** v4.9.12-local-r7：展开详情字段（上方小标签 + 值） */
+function DetailField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[10px] font-medium tracking-wide text-stone-400">{label}</p>
+      <div className="mt-0.5 flex min-w-0 flex-wrap items-center text-[11px] text-stone-700">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * v4.9.12-local-r7：行详情「复制 JSON」按钮（含 execCommand 兜底；stopPropagation 防触发行展开切换）。
+ */
+function CopyRowJsonButton({ row }: { row: LogRow }) {
+  const [copied, setCopied] = React.useState(false);
+  const onCopy = React.useCallback(async () => {
+    const json = JSON.stringify(row, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = json;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  }, [row]);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        void onCopy();
+      }}
+      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-stone-500 transition-colors hover:bg-stone-200/60 hover:text-stone-800"
+      title="复制该行完整审计字段为 JSON（排障工单用）"
+    >
+      {copied ? <Check className="size-3 text-emerald-600" aria-hidden /> : <Braces className="size-3" aria-hidden />}
+      {copied ? "已复制" : "复制 JSON"}
+    </button>
+  );
+}
+
 export function LogsModule({
   initialProvider,
   initialKeyName,
@@ -226,6 +276,16 @@ export function LogsModule({
   // v3.9.1：自动刷新默认开启 —— 修复「日志卡死」感知：此前默认关闭，新请求产生后页面永远不动，
   // 看起来像卡死；现在进入日志页即自动跟随，可手动关闭。
   const [autoRefresh, setAutoRefresh] = React.useState(true);
+  // v4.9.12-local-r7：行内展开详情的日志 id 集合（翻页/刷新后保留命中仍可见的展开态）
+  const [expandedIds, setExpandedIds] = React.useState<Set<number>>(new Set());
+  const toggleExpanded = React.useCallback((id: number) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
   const [lastUpdatedAt, setLastUpdatedAt] = React.useState<number | null>(null);
   // v3.0.6：自定义起止时间输入（datetime-local 值；YYYY-MM-DDTHH:mm）
   const [customFromInput, setCustomFromInput] = React.useState("");
@@ -935,6 +995,9 @@ export function LogsModule({
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-8">
+                      <span className="sr-only">展开详情</span>
+                    </TableHead>
                     <TableHead className="w-40">时间</TableHead>
                     <TableHead>模型</TableHead>
                     <TableHead className="hidden md:table-cell">协议</TableHead>
@@ -949,8 +1012,28 @@ export function LogsModule({
                 <TableBody>
                   {items.map((l) => {
                     const durSlow = (l.durationMs ?? 0) > 3000;
+                    const expanded = expandedIds.has(l.id);
                     return (
-                      <TableRow key={l.id} className={l.error ? "bg-red-50/40" : undefined}>
+                      [
+                        <TableRow
+                          key={l.id}
+                          onClick={() => toggleExpanded(l.id)}
+                          className={`cursor-pointer ${l.error ? "bg-red-50/40" : ""} hover:bg-stone-50/80`}
+                        >
+                        <TableCell className="w-8 pr-1">
+                          <button
+                            type="button"
+                            aria-expanded={expanded}
+                            aria-label={expanded ? `收起请求 #${l.id} 详情` : `展开请求 #${l.id} 详情`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleExpanded(l.id);
+                            }}
+                            className="rounded p-1 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700"
+                          >
+                            {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                          </button>
+                        </TableCell>
                         <TableCell className="whitespace-nowrap text-xs text-muted-foreground" title={absoluteTime(l.createdAt)}>
                           {absoluteTime(l.createdAt)}
                         </TableCell>
@@ -978,7 +1061,10 @@ export function LogsModule({
                           {l.apiKeyName && (
                             <button
                               type="button"
-                              onClick={() => changeKey(l.apiKeyName as string)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                changeKey(l.apiKeyName as string);
+                              }}
                               className="ml-1 rounded bg-stone-100 px-1 text-[10px] text-stone-500 transition-colors hover:bg-emerald-50 hover:text-emerald-700"
                               title={`按密钥「${l.apiKeyName}」筛选日志`}
                             >
@@ -1048,14 +1134,95 @@ export function LogsModule({
                             ) : null}
                           </div>
                         </TableCell>
-                        <TableCell className="hidden max-w-52 md:table-cell">
+                        <TableCell className="hidden max-w-52 md:table-cell" onClick={(e) => e.stopPropagation()}>
                           {l.error ? (
                             <CopyableError text={l.error} />
                           ) : (
                             <span className="text-xs text-muted-foreground">—</span>
                           )}
                         </TableCell>
-                      </TableRow>
+                      </TableRow>,
+                      expanded && (
+                        <TableRow key={`${l.id}-detail`} className="hover:bg-transparent">
+                          <TableCell colSpan={10} className="p-0">
+                            <div className="border-t border-stone-200/60 bg-stone-50/70 px-4 py-3">
+                              <div className="mb-2 flex items-center justify-between gap-2">
+                                <span className="text-[10px] font-semibold uppercase tracking-wider text-stone-400">
+                                  请求详情 · #{l.id}
+                                </span>
+                                <CopyRowJsonButton row={l} />
+                              </div>
+                              <div className="grid grid-cols-2 gap-x-6 gap-y-2.5 md:grid-cols-4">
+                                <DetailField label="时间（完整）">
+                                  <span className="tabular-nums" title={l.createdAt}>
+                                    {new Date(l.createdAt).toLocaleString("zh-CN", { hour12: false })}
+                                  </span>
+                                </DetailField>
+                                <DetailField label="状态 / 耗时">
+                                  <span className={`font-mono font-semibold ${statusColor(l.status)}`}>{l.status ?? "—"}</span>
+                                  <span className="ml-1.5 tabular-nums text-stone-600">
+                                    {l.durationMs != null ? `${l.durationMs} ms` : "—"}
+                                  </span>
+                                </DetailField>
+                                <DetailField label="协议 / 流式">
+                                  <span className="font-mono">{l.protocol}</span>
+                                  {l.stream && <span className="ml-1.5 text-[10px] text-teal-700">SSE</span>}
+                                </DetailField>
+                                <DetailField label="模型">
+                                  <code className="block truncate font-mono" title={l.model}>{l.model}</code>
+                                </DetailField>
+                                <DetailField label="调用方密钥">
+                                  {l.apiKeyName ? (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        changeKey(l.apiKeyName as string);
+                                      }}
+                                      className="rounded bg-stone-200/70 px-1 font-mono text-[10px] text-stone-600 transition-colors hover:bg-emerald-50 hover:text-emerald-700"
+                                      title={`按密钥「${l.apiKeyName}」筛选日志`}
+                                    >
+                                      {l.apiKeyName}
+                                    </button>
+                                  ) : (
+                                    <span className="text-stone-400">—</span>
+                                  )}
+                                </DetailField>
+                                <DetailField label="命中链路（提供商 / 账号）">
+                                  <span className="font-mono" title={`${l.providerId || "—"} / ${l.accountId || "—"}`}>
+                                    {l.providerId || "—"} / {l.accountId || "—"}
+                                  </span>
+                                </DetailField>
+                                <DetailField label="Token 用量（入 / 出 / 缓存）">
+                                  <span className="font-mono tabular-nums">
+                                    {l.inputTokens ?? "—"} / {l.outputTokens ?? "—"} / {l.cachedTokens ?? "—"}
+                                  </span>
+                                  {l.usageExact === true && (
+                                    <span className="ml-1.5 rounded bg-emerald-50 px-1 text-[9px] text-emerald-700 ring-1 ring-emerald-200 ring-inset">精确</span>
+                                  )}
+                                  {l.usageExact === false && (
+                                    <span className="ml-1.5 rounded bg-amber-50 px-1 text-[9px] text-amber-700 ring-1 ring-amber-200 ring-inset">估算</span>
+                                  )}
+                                </DetailField>
+                                <DetailField label="估算成本">
+                                  {l.cost != null && l.cost > 0 ? (
+                                    <span className="tabular-nums text-lime-700">≈ {fmtUsd(l.cost)}</span>
+                                  ) : (
+                                    <span className="text-stone-400">—</span>
+                                  )}
+                                </DetailField>
+                              </div>
+                              {l.error && (
+                                <div className="mt-2.5 rounded-md border border-red-200 bg-red-50/70 px-2.5 py-2">
+                                  <p className="text-[10px] font-medium text-red-500">错误全文</p>
+                                  <p className="mt-0.5 break-all font-mono text-[11px] leading-relaxed text-red-700">{l.error}</p>
+                                </div>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ),
+                    ]
                     );
                   })}
                 </TableBody>

@@ -1,4 +1,4 @@
-# ⚡ Universal-AI-Gateway（Node.js 重构版 v4.10.0）
+# ⚡ Universal-AI-Gateway（Node.js 重构版 v4.9.11）
 
 <div align="center">
 
@@ -18,7 +18,7 @@
 > 配置与状态存储由云 KV 迁移为**关系型数据库**（PostgreSQL 或 MySQL，按 `DATABASE_URL` 协议自动选择），并新增自带 **Web 管理控制台**。
 > 原项目的全部业务能力（协议转译、路由容灾、上游提供商、鉴权、运维自动化）等价保留，对外 API 契约不变。
 >
-> 当前版本 **4.10.0**（[版本号定义](src/lib/gateway/config/configService.ts)，`/status` 端点实时返回）。
+> 当前版本 **4.9.11**（[版本号定义](src/lib/gateway/config/configService.ts)，`/status` 端点实时返回）。
 > 📘 **从零搭建操作手册**：[`docs/搭建指南.md`](docs/搭建指南.md) —— 安装 → WorkBuddy 凭证导入 → 路由 → 客户端接入 → 验证 → 运维。
 
 ---
@@ -238,9 +238,9 @@ docker run -d \
 **推送到自建 / 私有 registry**：
 
 ```bash
-docker tag uag:local registry.example.com/uag:4.10.0
+docker tag uag:local registry.example.com/uag:4.9.11
 docker tag uag:local registry.example.com/uag:latest
-docker push registry.example.com/uag:4.10.0
+docker push registry.example.com/uag:4.9.11
 docker push registry.example.com/uag:latest
 ```
 
@@ -597,7 +597,7 @@ curl -X POST -H "Authorization: Bearer <CRON_SECRET>" http://127.0.0.1:18787/che
 
 ---
 
-## 🏗️ 架构变更说明（原 v2.4.0 → v4.10.0）
+## 🏗️ 架构变更说明（原 v2.4.0 → v4.9.11）
 
 ### 已删除（云端产物与适配层）
 

@@ -579,12 +579,12 @@ export function ProvidersModule({
                     onClick={() => onViewLogs?.(p.id)}
                     title={`点击查看 ${p.id} 的请求日志`}
                     aria-label={`查看 ${p.name} 近 24h 请求日志`}
-                    className="mt-3 flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-stone-50 px-2.5 py-1.5 text-left text-[11px] text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-700"
+                    className="mt-3 flex w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-stone-50 px-2.5 py-1.5 text-left text-[11px] text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-700"
                   >
-                    <span className="font-medium text-stone-600">近 24h</span>
-                    <span className="tabular-nums">{p.stats24h.requests} 次调用</span>
+                    <span className="shrink-0 whitespace-nowrap font-medium text-stone-600">近 24h</span>
+                    <span className="shrink-0 whitespace-nowrap tabular-nums">{p.stats24h.requests} 次调用</span>
                     <span
-                      className={`font-medium tabular-nums ${
+                      className={`shrink-0 whitespace-nowrap font-medium tabular-nums ${
                         p.stats24h.successRate >= 90 ? "text-emerald-600" : p.stats24h.successRate >= 60 ? "text-amber-600" : "text-red-600"
                       }`}
                       title="近 24 小时 2xx/3xx 响应占比"
@@ -592,11 +592,11 @@ export function ProvidersModule({
                       成功率 {p.stats24h.successRate}%
                     </span>
                     {p.stats24h.avgDurationMs !== null && (
-                      <span className={`tabular-nums ${p.stats24h.avgDurationMs > 3000 ? "text-amber-600" : ""}`}>
+                      <span className={`shrink-0 whitespace-nowrap tabular-nums ${p.stats24h.avgDurationMs > 3000 ? "text-amber-600" : ""}`}>
                         平均 {p.stats24h.avgDurationMs} ms
                       </span>
                     )}
-                    <span className="ml-auto hidden items-center gap-0.5 text-stone-400 sm:inline">日志
+                    <span className="ml-auto inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-stone-400">日志
                       <ArrowLeftRight className="size-3" />
                     </span>
                   </button>
