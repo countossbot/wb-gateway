@@ -3,7 +3,8 @@
 "use client";
 
 import * as React from "react";
-import { Network } from "lucide-react";
+import { Network, ShieldAlert, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { setUnauthorizedHandler, authHeaders, clearSessionToken } from "@/lib/console/api";
 import { parseTabParam, syncTabToUrl } from "@/lib/console/urlState";
 import type { SessionInfo } from "@/lib/console/types";
@@ -21,11 +22,18 @@ import { SettingsModule } from "@/components/console/settings";
 
 type Phase = "loading" | "setup" | "login" | "console";
 
+// v4.9.13-local：默认口令安全横幅的会话级关闭记忆（sessionStorage —— 关闭后未重开标签前不再打扰，
+// 重开/新会话重现，保持安全提醒压力；改密后后端不再下发标志，横幅自然消失）
+const DEFAULT_PWD_BANNER_DISMISSED = "uag-default-pwd-banner-dismissed";
+
 export default function Home() {
   const [phase, setPhase] = React.useState<Phase>("loading");
   const [username, setUsername] = React.useState("");
   const [authVia, setAuthVia] = React.useState<"cookie" | "bearer" | null>(null);
   const [version, setVersion] = React.useState("—");
+  // v4.9.13-local：管理员口令仍为公开默认值 → 控制台顶部常驻安全横幅
+  const [defaultPwdActive, setDefaultPwdActive] = React.useState(false);
+  const [bannerDismissed, setBannerDismissed] = React.useState(false);
   // v3.4.0：初始 tab 支持 URL 深链（如 /?tab=logs 直接落到运行日志页）
   const [tab, setTabState] = React.useState<ConsoleTab>(() => {
     if (typeof window === "undefined") return "overview";
@@ -45,6 +53,17 @@ export default function Home() {
   const [logsAccount, setLogsAccount] = React.useState<{ providerId: string; accountId: string } | null>(null);
   // v3.8.0：模型健康行 → 按对外模型过滤（第八跳转通道）
   const [logsModel, setLogsModel] = React.useState<string | null>(null);
+  // v4.9.13-local-r4：总览错误模式卡 → 按状态大类下钻（第十跳转通道，单一意图：仅设状态筛选）
+  const [logsStatus, setLogsStatus] = React.useState<"2xx" | "4xx" | "5xx" | null>(null);
+  // v4.9.13-local-r9：错误模式下钻通道携带的检索词（模式骨架片段；总览错误卡/失败徽标 tooltip 的
+  // 关键字下钻落点，与 logsStatus 同构但优先级更高 —— 有检索词时状态清回 null）
+  const [logsErrorKeyword, setLogsErrorKeyword] = React.useState<string | null>(null);
+  // v4.9.13-local-r15：总览 Top 成本模型 chip → 模型路由页联动（第十一跳转通道）
+  // 携带目标模型名切到路由页；RoutesModule 数据就绪后消费（编辑/克隆/预填新建三级回退）
+  const [routesEditModel, setRoutesEditModel] = React.useState<string | null>(null);
+  // r18：总览 Top 提供商行 → API 中转页联动（第十二跳转通道）
+  // 携带目标提供商 ID 切页；ProvidersModule 数据就绪后消费（滚动定位 + 翡翠光环高亮）
+  const [providersFocusId, setProvidersFocusId] = React.useState<string | null>(null);
 
   const refreshSession = React.useCallback(async () => {
     try {
@@ -58,6 +77,9 @@ export default function Home() {
       if (!s) throw new Error("会话接口异常");
       setUsername(s.username || "");
       setAuthVia(s.authVia ?? null);
+      setDefaultPwdActive(!!s.defaultPasswordActive);
+      // 会话恢复时重读关闭记忆（新标签页/新会话重现横幅，保持安全提醒压力）
+      setBannerDismissed(sessionStorage.getItem(DEFAULT_PWD_BANNER_DISMISSED) === "1");
       if (!s.initialized) setPhase("setup");
       else if (!s.authenticated) setPhase("login");
       else setPhase("console");
@@ -142,11 +164,57 @@ export default function Home() {
           setLogsTimeRange(null);
           setLogsAccount(null);
           setLogsModel(null);
+          setLogsStatus(null);
+          setLogsErrorKeyword(null);
         }
         setTab(t);
       }}
       onLogout={logout}
     >
+      {/* v4.9.13-local：公开默认口令安全横幅 —— 管理员口令仍为 gateway-admin-2026 时常驻提醒 */}
+      {phase === "console" && defaultPwdActive && !bannerDismissed && (
+        <div
+          role="alert"
+          aria-label="默认口令安全提醒"
+          className="mb-6 flex flex-col gap-3 rounded-xl border border-amber-300 bg-gradient-to-r from-amber-50 to-orange-50 px-4 py-3.5 shadow-sm sm:flex-row sm:items-center"
+        >
+          <div className="flex min-w-0 flex-1 items-start gap-3">
+            <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-amber-100">
+              <ShieldAlert className="size-4.5 text-amber-600" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <p className="text-sm font-semibold text-amber-900">安全提醒：管理员仍在使用公开默认口令</p>
+              <p className="text-xs leading-relaxed text-amber-800/90">
+                当前口令为代码内置公开值
+                <code className="mx-1 rounded bg-amber-100/80 px-1.5 py-0.5 font-mono text-[11px] text-amber-900">gateway-admin-2026</code>
+                —— 任何知道该值的人都可登录控制台（管理账号凭证、密钥与路由）。请立即前往「设置 → 管理员密码」修改为强口令。
+              </p>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2 pl-11 sm:pl-0">
+            <Button
+              size="sm"
+              className="h-8 bg-amber-600 px-3 text-xs text-white hover:bg-amber-700"
+              onClick={() => setTab("settings")}
+            >
+              前往修改
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 text-amber-600 hover:bg-amber-100 hover:text-amber-800"
+              aria-label="关闭默认口令提醒（本次会话内不再显示）"
+              title="本次会话内不再显示；重新打开页面会再次提醒"
+              onClick={() => {
+                sessionStorage.setItem(DEFAULT_PWD_BANNER_DISMISSED, "1");
+                setBannerDismissed(true);
+              }}
+            >
+              <X className="size-4" />
+            </Button>
+          </div>
+        </div>
+      )}
       {tab === "overview" && (
         <OverviewModule
           onHourClick={(hourIso) => {
@@ -158,6 +226,8 @@ export default function Home() {
             setLogsKeyName(null);
             setLogsAccount(null);
             setLogsModel(null);
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
             setLogsTimeRange({
               from,
               to: from + 3600_000,
@@ -175,6 +245,8 @@ export default function Home() {
             setLogsKeyName(null);
             setLogsAccount(null);
             setLogsModel(null);
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
             setLogsTimeRange({
               from,
               to: from + 86_400_000,
@@ -190,6 +262,11 @@ export default function Home() {
             setLogsProvider(null);
             setLogsKeyName(null);
             setLogsAccount(null);
+            // v4.9.13-local-r9：补齐与其他通道一致的全量清空（此前缺 model/status/errorKeyword 清理，
+            // 旧筛选残留会叠加进今日窗口 —— 单一意图原则对齐）
+            setLogsModel(null);
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
             setLogsTimeRange({
               from,
               to: from + 86_400_000,
@@ -206,6 +283,8 @@ export default function Home() {
             setLogsKeyName(keyName);
             setLogsAccount(null);
             setLogsModel(null);
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
             setLogsTimeRange({
               from,
               to: from + 86_400_000,
@@ -223,6 +302,8 @@ export default function Home() {
             setLogsKeyName(null);
             setLogsAccount(null);
             setLogsModel(model);
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
             setLogsTimeRange({
               from,
               to: from + 86_400_000,
@@ -230,7 +311,30 @@ export default function Home() {
             });
             setTab("logs");
           }}
+          onErrorPatternsClick={(drill) => {
+            // v4.9.13-local-r4：总览错误模式卡行 → 下钻运行日志（第十跳转通道，单一意图：不携带模型/密钥/时间）；
+            // v4.9.13-local-r9 升级：优先错误关键字（模式骨架片段 contains 命中整组，比状态大类精准，
+            // 且解锁跨状态大类的模式组）；无关键字时回落状态大类下钻（既有语义）
+            setLogsProvider(null);
+            setLogsKeyName(null);
+            setLogsAccount(null);
+            setLogsModel(null);
+            setLogsTimeRange(null);
+            setLogsErrorKeyword(drill.keyword ?? null);
+            setLogsStatus(drill.keyword ? null : drill.statusClass);
+            setTab("logs");
+          }}
           onNavigate={(t) => setTab(t)}
+          onModelRouteClick={(model) => {
+            // v4.9.13-local-r15：Top 成本模型 chip → 路由页（单一意图：只带目标模型名，不动其他筛选）
+            setRoutesEditModel(model);
+            setTab("routes");
+          }}
+          onProviderClick={(pid) => {
+            // r18：Top 提供商行 → API 中转页定位高亮（单一意图：只带目标提供商 ID）
+            setProvidersFocusId(pid);
+            setTab("providers");
+          }}
         />
       )}
       {tab === "accounts" && (
@@ -242,18 +346,37 @@ export default function Home() {
             setLogsTimeRange(null);
             setLogsAccount(target);
             setLogsModel(null);
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
+            setTab("logs");
+          }}
+          onDrillErrors={(target, errorKeyword) => {
+            // v4.9.13-local-r5：健康面板「失败 N」徽标 → 该账号 + 5xx 组合下钻
+            //（组合筛选两 state 同时设置，LogsModule 挂载初始化天然支持 account × status 组合）；
+            // v4.9.13-local-r9：tooltip 模式行点击携 errorKeyword 时改走关键字下钻（精准命中该模式组，状态清回）
+            setLogsProvider(null);
+            setLogsKeyName(null);
+            setLogsTimeRange(null);
+            setLogsAccount(target);
+            setLogsModel(null);
+            setLogsErrorKeyword(errorKeyword ?? null);
+            setLogsStatus(errorKeyword ? null : "5xx");
             setTab("logs");
           }}
         />
       )}
       {tab === "providers" && (
         <ProvidersModule
+          focusProviderId={providersFocusId}
+          onProviderFocusConsumed={() => setProvidersFocusId(null)}
           onViewLogs={(pid) => {
             // 跳转意图单一：提供商跳转时清空其他跨模块筛选
             setLogsKeyName(null);
             setLogsTimeRange(null);
             setLogsAccount(null);
             setLogsModel(null);
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
             setLogsProvider(pid);
             setTab("logs");
           }}
@@ -264,6 +387,9 @@ export default function Home() {
             setLogsTimeRange(null);
             setLogsAccount(null);
             setLogsModel(model);
+            // v4.9.13-local-r9：补齐与其他通道一致的状态/关键字清空（此前缺失，旧 5xx 筛选会残留叠加）
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
             setTab("logs");
           }}
         />
@@ -276,12 +402,32 @@ export default function Home() {
             setLogsTimeRange(null);
             setLogsAccount(null);
             setLogsModel(null);
+            setLogsStatus(null);
+            setLogsErrorKeyword(null);
+            setLogsKeyName(keyName);
+            setTab("logs");
+          }}
+          onDrillErrors={(keyName, errorKeyword) => {
+            // v4.9.13-local-r6：密钥健康面板失败徽标下钻 —— 该密钥 × 5xx 组合筛选
+            //（两 state 同时设置，LogsModule 挂载初始化天然支持 key × status 组合，与账号页 onDrillErrors 同构）；
+            // v4.9.13-local-r9：tooltip 模式行点击携 errorKeyword 时改走关键字下钻（精准命中该模式组，状态清回）
+            setLogsProvider(null);
+            setLogsTimeRange(null);
+            setLogsAccount(null);
+            setLogsModel(null);
+            setLogsErrorKeyword(errorKeyword ?? null);
+            setLogsStatus(errorKeyword ? null : "5xx");
             setLogsKeyName(keyName);
             setTab("logs");
           }}
         />
       )}
-      {tab === "routes" && <RoutesModule />}
+      {tab === "routes" && (
+        <RoutesModule
+          editModelTarget={routesEditModel}
+          onEditModelTargetConsumed={() => setRoutesEditModel(null)}
+        />
+      )}
       {tab === "jobs" && <JobsModule />}
       {tab === "logs" && (
         <LogsModule
@@ -290,6 +436,8 @@ export default function Home() {
           initialTimeRange={logsTimeRange}
           initialAccount={logsAccount}
           initialModel={logsModel}
+          initialStatus={logsStatus}
+          initialErrorKeyword={logsErrorKeyword}
         />
       )}
       {tab === "settings" && <SettingsModule onPasswordChanged={() => { clearSessionToken(); setPhase("login"); }} />}

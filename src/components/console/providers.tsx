@@ -8,9 +8,11 @@ import {
   ArrowLeftRight,
   Building2,
   Check,
+  CheckCircle2,
   ChevronDown,
   CircleAlert,
   Eye,
+  History,
   KeyRound,
   Loader2,
   Pencil,
@@ -20,6 +22,7 @@ import {
   Sparkles,
   Trash2,
   X,
+  XCircle,
   Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -41,6 +44,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
@@ -53,12 +57,13 @@ import {
   TypeBadge,
 } from "@/components/console/ui";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
-import { PROVIDER_TYPE_META, isMaskedValue } from "@/lib/console/format";
+import { PROVIDER_TYPE_META, isMaskedValue, relativeTime, absoluteTime } from "@/lib/console/format";
 import { cn } from "@/lib/utils";
 import type {
   ConsoleProvider,
   ModelHealthRow,
   NativeProviderPreset,
+  ProviderTestResult,
   ProviderType,
   ProvidersData,
 } from "@/lib/console/types";
@@ -207,6 +212,199 @@ function allSecretsMasked(f: ProviderForm): boolean {
  * 成功率三档配色（≥90 emerald / ≥60 amber / <60 red）、耗时 >3s amber、
  * 最后调用复用共享 LastUsedCell；模型名可点击跳转该模型日志。
  */
+// v4.9.12-local-r11：连通性测试结果条（卡片内嵌与悬浮窗共用）。
+// 成功：翡翠描边 + 延迟/模型数/凭据来源；失败：红色描边 + 状态码与可操作错误。
+// workbuddy（authChecked=false）仅网络可达性，措辞单独区分避免误导。
+// v4.9.12-local-r12：持久化测试徽标（卡片常驻）。
+// 数据源为服务端 lastTest（SystemSetting 持久化）；会话内重新测试后由 TestResultStrip 接管。
+// 点击徽标 = 重新测试；title 展示完整结果明细。
+function LastTestBadge({ result, onRetest, testing }: { result: ProviderTestResult; onRetest: () => void; testing: boolean }) {
+  const anonymous = result.authSource === "none" && result.authChecked && result.ok;
+  const tone = !result.ok
+    ? "border-red-200 bg-red-50 text-red-600"
+    : anonymous
+      ? "border-amber-200 bg-amber-50 text-amber-700"
+      : "border-emerald-200 bg-emerald-50 text-emerald-700";
+  const summary = !result.ok
+    ? `探测失败${result.status !== null ? `（HTTP ${result.status}）` : ""}`
+    : anonymous
+      ? "连通（匿名）"
+      : result.authChecked
+        ? `上次连通 · ${result.elapsedMs} ms${result.modelsCount !== null ? ` · ${result.modelsCount} 模型` : ""}`
+        : `网络可达 · ${result.elapsedMs} ms`;
+  return (
+    <button
+      type="button"
+      onClick={onRetest}
+      disabled={testing}
+      title={`最近一次连通性测试（点击重新测试）\n${summary}\n${result.target || "—"}${result.error ? `\n${result.error}` : ""}\n${absoluteTime(result.testedAt)}`}
+      aria-label={`最近测试结果：${summary}，${relativeTime(result.testedAt)}。点击重新测试`}
+      className={cn(
+        "mt-3 inline-flex w-fit items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors hover:brightness-95",
+        tone,
+        testing && "opacity-60"
+      )}
+    >
+      {testing ? (
+        <Loader2 className="size-2.5 animate-spin" aria-hidden />
+      ) : (
+        <span aria-hidden className={cn("size-1.5 rounded-full", !result.ok ? "bg-red-500" : anonymous ? "bg-amber-500" : "bg-emerald-500")} />
+      )}
+      {summary}
+      <span className="opacity-70">· {relativeTime(result.testedAt)}</span>
+    </button>
+  );
+}
+
+function TestResultStrip({
+  result,
+  onDismiss,
+  compact = false,
+}: {
+  result: ProviderTestResult;
+  onDismiss?: () => void;
+  compact?: boolean;
+}) {
+  const authSourceLabel: Record<ProviderTestResult["authSource"], string> = {
+    "account-pool": "账号池密钥",
+    "provider-key": "提供商密钥",
+    draft: "草稿密钥",
+    none: "匿名",
+  };
+  const anonymous = result.authSource === "none" && result.authChecked;
+  const unreachable = result.status === null && !result.ok;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={cn(
+        "mt-2 rounded-lg border px-2.5 py-2 text-[11px] leading-relaxed",
+        result.ok && !anonymous
+          ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+          : anonymous
+            ? "border-amber-200 bg-amber-50 text-amber-800"
+            : "border-red-200 bg-red-50 text-red-700"
+      )}
+    >
+      <div className="flex items-start gap-1.5">
+        {result.ok && !anonymous ? (
+          <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+        ) : (
+          <XCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="font-medium">
+            {result.ok
+              ? anonymous
+                ? "连通（匿名）"
+                : result.authChecked
+                  ? `连通 · ${result.elapsedMs} ms`
+                  : `网络可达 · ${result.elapsedMs} ms（未校验凭据）`
+              : unreachable
+                ? "无法连接"
+                : `探测失败（HTTP ${result.status ?? "—"}）`}
+            {result.ok && result.modelsCount !== null && ` · ${result.modelsCount} 个模型`}
+          </p>
+          <p className="mt-0.5 truncate font-mono text-[10px] opacity-80" title={result.target}>
+            {result.target || "—"}
+          </p>
+          {!compact && result.ok && result.sampleModels.length > 0 && (
+            <p className="mt-1 truncate font-mono text-[10px] opacity-75" title={result.sampleModels.join(", ")}>
+              {result.sampleModels.join(" · ")}
+            </p>
+          )}
+          {result.error && (
+            <p className="mt-1 break-words" title={result.error}>
+              {result.error}
+            </p>
+          )}
+          <p className="mt-0.5 text-[10px] opacity-70">
+            凭据：{authSourceLabel[result.authSource]}
+            {result.authChecked ? "" : " · 仅测可达性"} · {new Date(result.testedAt).toLocaleTimeString()}
+          </p>
+        </div>
+        {onDismiss && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="收起测试结果"
+            className="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100"
+          >
+            <X className="size-3" aria-hidden />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * v4.9.12-local-r13：编辑悬浮窗「最近测试历史」折叠区。
+ * 数据源为服务端 testHistory（SystemSetting providerTestResults，cap 10 最新在前）；
+ * 每条：状态点 + 摘要 + 相对时间（悬停绝对时间）+ 探测目标；失败条目附错误摘要。
+ * 仅编辑态且有历史时渲染（新增态/无历史不占空间）。
+ */
+function TestHistorySection({ history }: { history: ProviderTestResult[] }) {
+  const [open, setOpen] = React.useState(false);
+  const okCount = history.filter((h) => h.ok).length;
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border border-stone-200 bg-stone-50/50">
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          aria-expanded={open}
+          className="flex w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-xs font-medium text-stone-700 transition-colors hover:bg-stone-100/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+        >
+          <History className="size-3.5 shrink-0 text-stone-400" aria-hidden />
+          最近测试历史
+          <Badge variant="outline" className="px-1 py-0 text-[9px] font-normal">{history.length}</Badge>
+          <span className={cn("ml-auto text-[10px] font-normal", okCount === history.length ? "text-emerald-600" : "text-stone-400")}>
+            {okCount}/{history.length} 连通
+          </span>
+          <ChevronDown className={cn("size-3.5 shrink-0 text-stone-400 transition-transform", open && "rotate-180")} aria-hidden />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ul className="max-h-48 space-y-0.5 overflow-y-auto border-t border-stone-100 px-2 py-2" aria-label="连通性测试历史列表">
+          {history.map((h, i) => {
+            const anonymous = h.authSource === "none" && h.authChecked && h.ok;
+            const summary = !h.ok
+              ? `失败${h.status !== null ? ` · HTTP ${h.status}` : " · 无法连接"}`
+              : anonymous
+                ? "连通（匿名）"
+                : h.authChecked
+                  ? `连通 · ${h.elapsedMs} ms${h.modelsCount !== null ? ` · ${h.modelsCount} 模型` : ""}`
+                  : `网络可达 · ${h.elapsedMs} ms`;
+            return (
+              <li key={`${h.testedAt}-${i}`} className="rounded-md px-1.5 py-1 transition-colors hover:bg-white/70">
+                <div className="flex items-center gap-1.5">
+                  <span
+                    aria-hidden
+                    className={cn("size-1.5 shrink-0 rounded-full", !h.ok ? "bg-red-500" : anonymous ? "bg-amber-500" : "bg-emerald-500")}
+                  />
+                  <span className="min-w-0 flex-1 truncate" title={h.error ?? summary}>
+                    {summary}
+                    {!h.ok && h.error && <span className="text-red-600"> · {h.error}</span>}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-stone-400" title={absoluteTime(h.testedAt)}>
+                    {relativeTime(h.testedAt)}
+                  </span>
+                </div>
+                <p className="ml-3 truncate font-mono text-[10px] text-stone-400" title={`${h.target || "—"}${h.error ? ` — ${h.error}` : ""}`}>
+                  {h.target || "—"}
+                </p>
+              </li>
+            );
+          })}
+        </ul>
+        <p className="border-t border-stone-100 px-3 py-1.5 text-[10px] leading-relaxed text-stone-400">
+          测试记录仅用于运维排障（每提供商保留最近 {history.length} 条）；「测试连接」按钮即测当前表单/已保存配置。
+        </p>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 function ModelHealthRowView({
   row,
   onViewLogsForModel,
@@ -315,9 +513,14 @@ export function ProvidersModule({
   onViewLogs,
   /** v3.8.0：模型健康一览行点击 → 按模型过滤跳转运行日志（第八跳转通道） */
   onViewLogsForModel,
+  /** r18：总览 Top 提供商行 → 定位高亮目标提供商卡片（第十二跳转通道） */
+  focusProviderId,
+  onProviderFocusConsumed,
 }: {
   onViewLogs?: (providerId: string) => void;
   onViewLogsForModel?: (model: string) => void;
+  focusProviderId?: string | null;
+  onProviderFocusConsumed?: () => void;
 } = {}) {
   const [data, setData] = React.useState<ProvidersData | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -356,6 +559,37 @@ export function ProvidersModule({
   const [delTarget, setDelTarget] = React.useState<ConsoleProvider | null>(null);
   const [delSaving, setDelSaving] = React.useState(false);
 
+  // v4.9.12-local-r11：连通性测试（卡片按已保存配置实测；悬浮窗按草稿实测）
+  const [testingId, setTestingId] = React.useState<string | null>(null);
+  const [cardResults, setCardResults] = React.useState<Record<string, ProviderTestResult>>({});
+  const [draftTesting, setDraftTesting] = React.useState(false);
+  const [draftTest, setDraftTest] = React.useState<ProviderTestResult | null>(null);
+  const [draftTestError, setDraftTestError] = React.useState("");
+
+  // v4.9.12-local-r12：全部测试（批处理逐个实测，进度落在各卡片的 testingId 上）
+  const [testingAll, setTestingAll] = React.useState(false);
+  const testingAllRef = React.useRef(false);
+
+  // r18：总览 Top 提供商行联动 —— 数据就绪后滚动定位 + 2.2s 翡翠光环（与设置页定价区引导同构）。
+  // 消费回调在定位执行后才触发（清父级 state）；回调走 ref —— 若在 effect 内同步消费，
+  // 父级重渲染会更换回调身份导致 effect cleanup 把 pending 定位定时器取消（首版实阳 bug）。
+  const [highlightProviderId, setHighlightProviderId] = React.useState<string | null>(null);
+  const consumedCbRef = React.useRef(onProviderFocusConsumed);
+  consumedCbRef.current = onProviderFocusConsumed;
+  React.useEffect(() => {
+    if (!focusProviderId || !data) return;
+    const pid = focusProviderId;
+    // 下一帧滚动定位（等 grid 渲染完成），随后短暂光环标识目标卡
+    const t = window.setTimeout(() => {
+      const el = document.querySelector(`[data-provider-card="${CSS.escape(pid)}"]`);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightProviderId(pid);
+      consumedCbRef.current?.();
+      window.setTimeout(() => setHighlightProviderId((cur) => (cur === pid ? null : cur)), 2200);
+    }, 150);
+    return () => window.clearTimeout(t);
+  }, [focusProviderId, data]);
+
   React.useEffect(() => {
     if (!notice) return;
     const t = setTimeout(() => setNotice(""), 3000);
@@ -369,6 +603,8 @@ export function ProvidersModule({
     setForm(f);
     setIdCustom(false);
     setFormError("");
+    setDraftTest(null);
+    setDraftTestError("");
     setDialogOpen(true);
   };
 
@@ -376,7 +612,69 @@ export function ProvidersModule({
     setEditing(p);
     setForm(formFromProvider(p));
     setFormError("");
+    setDraftTest(null);
+    setDraftTestError("");
     setDialogOpen(true);
+  };
+
+  // v4.9.12-local-r11：卡片「测试」——按已保存配置实测（后端自动取账号池首密钥/提供商密钥）
+  const runCardTest = async (p: ConsoleProvider) => {
+    setTestingId(p.id);
+    try {
+      const r = await apiPost<{ result: ProviderTestResult }>("/api/console/providers/test", { providerId: p.id });
+      setCardResults((m) => ({ ...m, [p.id]: r.result }));
+    } catch (e) {
+      setCardResults((m) => ({
+        ...m,
+        [p.id]: {
+          ok: false,
+          status: null,
+          elapsedMs: 0,
+          target: "",
+          type: p.type,
+          authSource: "none",
+          authChecked: true,
+          modelsCount: null,
+          sampleModels: [],
+          error: errMessage(e),
+          testedAt: new Date().toISOString(),
+        },
+      }));
+    } finally {
+      setTestingId(null);
+    }
+  };
+
+  // v4.9.12-local-r11：悬浮窗「测试连接」——编辑态且密钥为掩码时按已保存配置实测
+  //（掩码值发不上后端也解不开），否则按当前表单草稿实测（不落库）。
+  const runDraftTest = async () => {
+    setDraftTestError("");
+    setDraftTesting(true);
+    try {
+      const keyMasked = !form.apiKey || form.apiKey.includes("••••") || form.apiKey === "***REDACTED***";
+      const useSaved = !!editing && keyMasked;
+      const payload = useSaved
+        ? { providerId: editing!.id }
+        : {
+            draft: {
+              type: form.type,
+              baseUrl: form.baseUrl,
+              apiKey: form.apiKey,
+              anthropicVersion: form.anthropicVersion,
+              region: form.region,
+              defaultHeaders: Object.fromEntries(
+                form.extraHeaders.filter((h) => h.key.trim() !== "").map((h) => [h.key, h.value])
+              ),
+            },
+          };
+      const r = await apiPost<{ result: ProviderTestResult }>("/api/console/providers/test", payload);
+      setDraftTest(r.result);
+    } catch (e) {
+      setDraftTest(null);
+      setDraftTestError(errMessage(e));
+    } finally {
+      setDraftTesting(false);
+    }
   };
 
   const setF = (patch: Partial<ProviderForm>) => setForm((f) => ({ ...f, ...patch }));
@@ -478,6 +776,72 @@ export function ProvidersModule({
 
   const providers = data?.providers ?? [];
   const nativePresets = data?.nativePresets ?? [];
+  // v4.9.12-local-r13：编辑悬浮窗「最近测试历史」数据源 —— 优先取列表最新数据（保存/重测后更准确），回退打开对话框时捕获的对象
+  const editingHistory = editing
+    ? providers.find((x) => x.id === editing.id)?.testHistory ?? editing.testHistory ?? []
+    : [];
+
+  // v4.9.12-local-r12：全部测试 —— 逐个实测（复用单卡测试通道），结果汇入 notice；
+  // providersRef 供事件监听器读到最新列表而不依赖闭包时序。
+  const providersRef = React.useRef<ConsoleProvider[]>(providers);
+  providersRef.current = providers;
+
+  const runAllTests = React.useCallback(async () => {
+    if (testingAllRef.current) return;
+    const list = providersRef.current;
+    if (list.length === 0) return;
+    testingAllRef.current = true;
+    setTestingAll(true);
+    let okCount = 0;
+    let failCount = 0;
+    for (const p of list) {
+      setTestingId(p.id);
+      try {
+        const r = await apiPost<{ result: ProviderTestResult }>("/api/console/providers/test", { providerId: p.id });
+        setCardResults((m) => ({ ...m, [p.id]: r.result }));
+        if (r.result.ok) okCount++;
+        else failCount++;
+      } catch (e) {
+        failCount++;
+        setCardResults((m) => ({
+          ...m,
+          [p.id]: {
+            ok: false,
+            status: null,
+            elapsedMs: 0,
+            target: "",
+            type: p.type,
+            authSource: "none",
+            authChecked: true,
+            modelsCount: null,
+            sampleModels: [],
+            error: errMessage(e),
+            testedAt: new Date().toISOString(),
+          },
+        }));
+      }
+    }
+    setTestingId(null);
+    setTestingAll(false);
+    testingAllRef.current = false;
+    setNotice(`全部测试完成：${okCount} 连通 / ${failCount} 失败（共 ${list.length} 个）`);
+  }, []);
+
+  // ⌘K 面板「测试提供商连通性」入口：双通道防错过 ——
+  // 模块已挂载 → CustomEvent 直接触发；未挂载（正在切页）→ mount 时检查 sessionStorage 旗标。
+  React.useEffect(() => {
+    const handler = () => void runAllTests();
+    window.addEventListener("uag:run-provider-test-all", handler);
+    try {
+      if (sessionStorage.getItem("uag:pending-test-all") === "1") {
+        sessionStorage.removeItem("uag:pending-test-all");
+        handler();
+      }
+    } catch {
+      /* sessionStorage 不可用时仅依赖事件通道 */
+    }
+    return () => window.removeEventListener("uag:run-provider-test-all", handler);
+  }, [runAllTests]);
 
   return (
     <div className="space-y-6">
@@ -486,6 +850,18 @@ export function ProvidersModule({
         description={`上游提供商实例（调度按路由候选顺序故障转移）· 共 ${providers.length} 个`}
         actions={
           <>
+            {providers.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void runAllTests()}
+                disabled={testingAll || loading}
+                title="逐个实测全部提供商连通性（结果持久化，卡片常驻徽标同步更新）"
+              >
+                {testingAll ? <Loader2 className="animate-spin" /> : <Activity />}
+                {testingAll ? "测试中…" : "全部测试"}
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={load} disabled={loading}>
               <RefreshCw className={loading ? "animate-spin" : undefined} />
               刷新
@@ -525,7 +901,13 @@ export function ProvidersModule({
           {providers.map((p) => {
             const TypeIcon = TYPE_ICONS[p.type] || Server;
             return (
-              <div key={p.id} className="flex flex-col rounded-xl border border-stone-200 bg-white p-4 shadow-xs">
+              <div
+                key={p.id}
+                data-provider-card={p.id}
+                className={`flex flex-col rounded-xl border border-stone-200 bg-white p-4 shadow-xs transition-shadow duration-300${
+                  highlightProviderId === p.id ? " ring-2 ring-emerald-400/70 ring-offset-2" : ""
+                }`}
+              >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -604,7 +986,36 @@ export function ProvidersModule({
                   <p className="mt-3 text-[11px] text-stone-300">近 24h 无调用记录</p>
                 )}
 
+                {/* v4.9.12-local-r12：持久化测试徽标（服务端 lastTest，会话内未重测时展示） */}
+                {!cardResults[p.id] && p.lastTest && (
+                  <LastTestBadge result={p.lastTest} testing={testingId === p.id} onRetest={() => void runCardTest(p)} />
+                )}
+
+                {/* v4.9.12-local-r11：连通性测试结果（内嵌卡片，可收起；会话内实测后覆盖持久徽标） */}
+                {cardResults[p.id] && (
+                  <TestResultStrip
+                    result={cardResults[p.id]}
+                    onDismiss={() =>
+                      setCardResults((m) => {
+                        const next = { ...m };
+                        delete next[p.id];
+                        return next;
+                      })
+                    }
+                  />
+                )}
+
                 <div className="mt-auto flex justify-end gap-1 pt-4">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void runCardTest(p)}
+                    disabled={testingId === p.id}
+                    title="实测上游连通性（GET /models，与真实转发同源路径与凭据）"
+                  >
+                    {testingId === p.id ? <Loader2 className="animate-spin" /> : <Activity />}
+                    {testingId === p.id ? "测试中…" : "测试"}
+                  </Button>
                   <Button variant="outline" size="sm" onClick={() => openEdit(p)}>
                     <Pencil />
                     编辑
@@ -914,8 +1325,29 @@ export function ProvidersModule({
                 <p className="text-xs text-muted-foreground">优先级：提供商覆盖 &gt; 全局代理 &gt; 环境变量 &gt; 直连</p>
               </div>
 
+              {/* v4.9.12-local-r13：最近测试历史折叠区（编辑态且有历史时展示） */}
+              {editing && editingHistory.length > 0 && <TestHistorySection history={editingHistory} />}
+
             </div>
           </ScrollArea>
+
+          {/* v4.9.12-local-r11：草稿连通性测试结果（表单滚动区外，footer 上方，与表单错误同层） */}
+          {draftTest && (
+            <TestResultStrip
+              result={draftTest}
+              compact
+              onDismiss={() => setDraftTest(null)}
+            />
+          )}
+          {draftTestError && (
+            <div
+              role="alert"
+              className="mt-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+            >
+              <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+              <span className="min-w-0 break-words">测试请求失败：{draftTestError}</span>
+            </div>
+          )}
 
           {/* v4.2.1：表单错误固定在滚动区外、footer 上方 —— 长表单无需滚到底即可看到校验错误
               （此前错误渲染在表单末尾，id 未填等校验错误在长表单下不可见，被误以为「点保存没反应」） */}
@@ -930,6 +1362,15 @@ export function ProvidersModule({
           )}
 
           <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => void runDraftTest()}
+              disabled={draftTesting || saving}
+              title={editing && (!form.apiKey || form.apiKey.includes("••••")) ? "密钥为掩码：将按已保存配置实测" : "按当前表单值实测（不会保存草稿）"}
+            >
+              {draftTesting ? <Loader2 className="animate-spin" /> : <Activity />}
+              {draftTesting ? "测试中…" : "测试连接"}
+            </Button>
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>
               取消
             </Button>

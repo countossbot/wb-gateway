@@ -31,6 +31,12 @@
 //     top_p / stop / 流式 / 历史轮次），assistant 气泡 meta 行 hover 显现 Terminal 按钮，
 //     一键复制重现该轮请求的 cURL —— 后续调整参数不影响历史轮次的复现保真度
 //   - 修复：cURL 会话导出 Anthropic 分支漏带 temperature（与真实请求组装语义对齐）
+// v4.9.13-local-r2：密钥一键载入 ——
+//   - KeysModule 把密钥清单（名称/掩码/启用态）透传给本面板，「从密钥列表载入」Popover 直选；
+//   - 选中后按 id 走 /api/console/keys?reveal= 换取明文填入输入框（与列表页「显示完整密钥」同一通道、
+//     同一粒度：单密钥按需下发、管理员会话必需）；填入后自动触发 /v1/models 拉取（既有 debounce effect）
+//   - 已载入密钥名以 chip 形式提示（输入框是 password 型，用户无法直观看到里面是什么）；
+//     手动编辑输入框即清除 chip —— 明文只留在本地 state，不回传、不落库、不入分享链接
 "use client";
 
 import * as React from "react";
@@ -43,26 +49,42 @@ import {
   FileDown,
   History,
   Info,
+  KeyRound,
   Link2,
   Loader2,
+  FolderOpen,
+  Plus,
   RefreshCcw,
+  Save,
   Send,
   Settings2,
   Share2,
+  Sparkles,
   Square,
   Terminal,
+  Trash2,
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectRichItem, SelectItemText, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { CopyButton } from "@/components/console/ui";
-import { apiPost } from "@/lib/console/api";
+import { apiGet, apiPost } from "@/lib/console/api";
+
+/** v4.9.13-local-r2：密钥选择器数据源 —— KeysModule 透传的密钥清单（仅展示必要字段，明文不透传） */
+export interface PlaygroundKeyOption {
+  id: string;
+  name: string;
+  keyMasked: string;
+  enabled: boolean;
+}
 
 type Protocol = "openai" | "anthropic";
 
@@ -178,6 +200,190 @@ function decodeShareState(raw: string): SharePayload | null {
 
 const MAX_HISTORY = 20; // 会话保留的最大消息数（防止请求体无限膨胀）
 
+// v4.9.11-sandbox-r10：与沙箱上游真实输出上限对齐（此前 UI 保守限制 32768，上游实为 [1, 98304]）。
+// 上游网关侧仍有兜底钳制（v4.9.11-r3 起），此处对齐后 UI 与 API 直调行为一致，消除双重上限困惑。
+const MAX_TOKENS_CAP = 98304;
+
+// ---- v4.9.11-sandbox-r10：快捷 Prompt 模板库 ----
+// 一键填充常用测试场景（message + 可选 system），覆盖翻译/代码审查/抽取/长输出压测/健康检查等
+// Playground 高频用法；点击仅填充输入框（不自动发送），历史会话不受影响。
+interface PromptTemplate {
+  id: string;
+  label: string;
+  hint: string;
+  message: string;
+  system?: string;
+}
+const PROMPT_TEMPLATES: PromptTemplate[] = [
+  {
+    id: "ping",
+    label: "健康检查",
+    hint: "最小请求，验证链路连通 · 回复单个单词",
+    message: "回复一个单词：PONG",
+  },
+  {
+    id: "translate",
+    label: "中英互译",
+    hint: "设定专业翻译角色 · 只输出译文",
+    system: "你是专业翻译，中英互译准确流畅，专有名词保留原文。",
+    message: "把以下内容翻译成英文，只输出译文：\n\n（在此粘贴中文内容）",
+  },
+  {
+    id: "code-review",
+    label: "代码审查",
+    hint: "指出 bug / 安全风险 / 改进建议",
+    message: "审查以下代码，指出 bug、安全风险与改进建议，按严重程度排序：\n\n```\n（在此粘贴代码）\n```",
+  },
+  {
+    id: "json-extract",
+    label: "JSON 提取",
+    hint: "抽取引擎角色 · 只输出合法 JSON（测试 stop 序列好场景）",
+    system: "你是信息抽取引擎，只输出合法 JSON，不要任何解释或代码块围栏。",
+    message: "从以下文本提取 {姓名, 邮箱, 电话}，输出 JSON，缺失字段用 null：\n\n（在此粘贴文本）",
+  },
+  {
+    id: "minutes",
+    label: "会议纪要",
+    hint: "要点式整理：决议 / 待办 / 风险",
+    system: "你是专业秘书，输出结构清晰、要点精炼。",
+    message: "把以下会议记录整理成要点式纪要，分「决议 / 待办 / 风险」三节：\n\n（在此粘贴记录）",
+  },
+  {
+    id: "long-output",
+    label: "长输出压测",
+    hint: "800 字以上 · 可配合高级区调大 Max Tokens 验证钳制",
+    message: "写一篇 800 字以上的短文，主题：城市夜跑的魅力。要求分三段，语言有画面感。",
+  },
+  {
+    id: "tutor",
+    label: "导师角色",
+    hint: "角色扮演 + 类比解释（测试 System Prompt 生效）",
+    system: "你是一位耐心的编程导师，总用生活中的类比解释技术概念，每次回答不超过 200 字。",
+    message: "用类比解释什么是 WebSocket？",
+  },
+];
+
+// ---- v4.9.12-local-r11：自定义模板（localStorage 持久化） ----
+// 用户把常用 prompt 存为本浏览器本地模板（不上传、不入库、不跨设备）；
+// 与内置模板同渲染入口，虚线边框区分；读写失败静默降级（隐私模式/配额满不干扰主流程）。
+const CUSTOM_TEMPLATES_KEY = "uag-playground-custom-templates-v1";
+const CUSTOM_TEMPLATES_CAP = 30;
+const CUSTOM_LABEL_CAP = 24;
+const CUSTOM_MESSAGE_CAP = 4000;
+
+function loadCustomTemplates(): PromptTemplate[] {
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_TEMPLATES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return [];
+    const list = (parsed as { templates?: unknown }).templates;
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((t): t is PromptTemplate => {
+        if (!t || typeof t !== "object") return false;
+        const c = t as Partial<PromptTemplate>;
+        return (
+          typeof c.id === "string" && c.id.startsWith("custom-") &&
+          typeof c.label === "string" && c.label.trim() !== "" &&
+          typeof c.message === "string" && c.message.trim() !== ""
+        );
+      })
+      .slice(0, CUSTOM_TEMPLATES_CAP)
+      .map((t) => ({
+        id: t.id.slice(0, 48),
+        label: t.label.slice(0, CUSTOM_LABEL_CAP),
+        hint: typeof t.hint === "string" && t.hint ? t.hint.slice(0, 60) : "自定义模板",
+        message: t.message.slice(0, CUSTOM_MESSAGE_CAP),
+        ...(typeof t.system === "string" && t.system ? { system: t.system.slice(0, 2000) } : {}),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function persistCustomTemplates(list: PromptTemplate[]): boolean {
+  try {
+    window.localStorage.setItem(
+      CUSTOM_TEMPLATES_KEY,
+      JSON.stringify({ v: 1, templates: list.slice(0, CUSTOM_TEMPLATES_CAP) })
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---- v4.9.13-local-r4：本地草稿持久化（localStorage）----
+// 刷新/误关页后会话与调试参数不丢：防抖写 localStorage，挂载时恢复。
+// 安全口径与分享链接一致：API 密钥绝不入草稿；恢复时逐字段校验防注入非法状态；
+// 写失败静默（隐私模式/配额满 —— 草稿是锦上添花，不干扰主流程）。
+const DRAFT_STORAGE_KEY = "uag-playground-draft-v1";
+const DRAFT_SAVE_DEBOUNCE_MS = 600;
+
+/** 草稿负载（字段语义与 SharePayload 对齐，但 history 保留完整 meta 以延续逐轮徽标与 cURL 复现） */
+interface PlaygroundDraft {
+  v: 1;
+  p: Protocol;
+  m: string;
+  s: string;
+  t: number;
+  mt: number;
+  tp: number;
+  st: string;
+  fl: boolean;
+  h: ChatTurn[];
+  q: string;
+}
+
+/** 读取并校验草稿（任意字段非法 → 整体放弃，宁可丢弃草稿不注入怪状态） */
+function loadPlaygroundDraft(): PlaygroundDraft | null {
+  try {
+    const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    return parseDraftPayload(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * v4.9.13-local-r5：草稿负载纯校验 —— localStorage 读与文件导入共用同一套规则（单一实现防口径漂移）。
+ * 入参 unknown（JSON.parse 结果或用户上传文件内容），逐字段校验+收敛，非法返回 null。
+ */
+function parseDraftPayload(input: unknown): PlaygroundDraft | null {
+  try {
+    const d = input as Partial<PlaygroundDraft> | null;
+    if (!d || typeof d !== "object" || d.v !== 1 || (d.p !== "openai" && d.p !== "anthropic")) return null;
+    const clamp = (v: unknown, lo: number, hi: number, dflt: number) =>
+      typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi ? v : dflt;
+    const hist: ChatTurn[] = Array.isArray(d.h)
+      ? (d.h as unknown[])
+          .filter((t): t is ChatTurn => {
+            if (!t || typeof t !== "object") return false;
+            const tt = t as ChatTurn;
+            return (tt.role === "user" || tt.role === "assistant") && typeof tt.content === "string";
+          })
+          .slice(-MAX_HISTORY)
+      : [];
+    return {
+      v: 1,
+      p: d.p,
+      m: typeof d.m === "string" ? d.m.slice(0, 200) : "",
+      s: typeof d.s === "string" ? d.s.slice(0, 4000) : "",
+      t: clamp(d.t, 0, 2, 0.7),
+      mt: Math.floor(clamp(d.mt, 1, MAX_TOKENS_CAP, 1024)),
+      tp: clamp(d.tp, 0.05, 1, 1),
+      st: typeof d.st === "string" ? d.st.slice(0, 200) : "",
+      fl: typeof d.fl === "boolean" ? d.fl : false,
+      h: hist,
+      q: typeof d.q === "string" ? d.q.slice(0, 8000) : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** v4.9.12-local-r5：解析 stop 序列输入（每行/逗号分隔 → 去重去空，上限 4） */
 function parseStopSequences(text: string): string[] {
   const raw = text.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
@@ -200,8 +406,26 @@ function detectPreset(temperature: number, topP: number): SamplingPreset {
   return "custom";
 }
 
-export function QuickTestPanel() {
+/**
+ * v4.9.13-local-r3：QuickTestPanel 对外命令句柄（React 19 ref-as-prop）。
+ * KeysModule 密钥行「在 Playground 中测试」按钮经此触发：
+ * 滚动面板入视口 → 按 id 走 reveal 通道换取明文填入 → 既有 debounce effect 自动拉 /v1/models。
+ */
+export interface QuickTestPanelHandle {
+  /** 载入密钥并滚动面板入视口；返回是否成功（停用/加载中/网络失败 → false） */
+  loadKey: (k: PlaygroundKeyOption) => Promise<boolean>;
+}
+
+export function QuickTestPanel({ keys, ref }: { keys?: PlaygroundKeyOption[]; ref?: React.Ref<QuickTestPanelHandle> }) {
   const [apiKey, setApiKey] = React.useState("");
+  // v4.9.13-local-r3：外部入口高亮 —— 从密钥行按钮载入成功后面板短暂 ring 提示落点
+  const [flash, setFlash] = React.useState(false);
+  const rootRef = React.useRef<HTMLElement>(null);
+  // v4.9.13-local-r2：密钥一键载入（Popover 开合 / 载入中 / 已载入密钥名 / 失败提示）
+  const [keyPickerOpen, setKeyPickerOpen] = React.useState(false);
+  const [keyLoadingId, setKeyLoadingId] = React.useState<string | null>(null);
+  const [loadedKeyName, setLoadedKeyName] = React.useState<string | null>(null);
+  const [keyLoadError, setKeyLoadError] = React.useState<string | null>(null);
   const [models, setModels] = React.useState<ModelEntry[]>([]);
   const [modelsState, setModelsState] = React.useState<"idle" | "loading" | "ready" | "empty">("idle");
   const [selectedModel, setSelectedModel] = React.useState("");
@@ -210,13 +434,110 @@ export function QuickTestPanel() {
   // v4.9.12-local-r7：分享链接（复制反馈 + 恢复提示条）；r9：分享前预览对话框
   const [shareCopied, setShareCopied] = React.useState(false);
   const [restoredNotice, setRestoredNotice] = React.useState<string | null>(null);
-  // v4.9.12-local-r9：分享预览对话框（url = null 表示超长拒绝生成）
+  // v4.9.13-local-r6：草稿自动保存指示器（文档编辑器语言：unsaved/saved/unavailable）。
+  // dirty=防抖窗口内未写入；saved=已写入 localStorage（带时间戳）；blocked=写失败（隐私模式/配额满）。
+  const [draftSaveState, setDraftSaveState] = React.useState<"dirty" | "saved" | "blocked">("dirty");
+  const [draftSavedAt, setDraftSavedAt] = React.useState<number | null>(null);
+  // v4.9.13-local-r9：分享预览对话框（url = null 表示超长拒绝生成）
   const [shareOpen, setShareOpen] = React.useState(false);
   const [shareUrl, setShareUrl] = React.useState<string | null>(null);
+  // v4.9.13-local-r8：草稿菜单「复制分享链接」快捷项的反馈态（触发按钮短暂变 ✓ 已复制链接）
+  const [draftLinkCopied, setDraftLinkCopied] = React.useState(false);
   const [protocol, setProtocol] = React.useState<Protocol>("openai");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [temperature, setTemperature] = React.useState(0.7);
   const [maxTokens, setMaxTokens] = React.useState(1024);
+  // v4.9.11-sandbox-r10：max_tokens 输入越界被钳制时的行内提醒（3s 自动消退，aria-live 播报）
+  const [mtClampNotice, setMtClampNotice] = React.useState(false);
+  const mtClampTimer = React.useRef<number | null>(null);
+  /** 输入处理：越界即时钳制到上游真实上限 [1, 98304]，并触发一次性行内提醒 */
+  const handleMaxTokensChange = (raw: string) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 1) {
+      setMaxTokens(1);
+      setMtClampNotice(false);
+      return;
+    }
+    if (n > MAX_TOKENS_CAP) {
+      setMaxTokens(MAX_TOKENS_CAP);
+      setMtClampNotice(true);
+      if (mtClampTimer.current !== null) window.clearTimeout(mtClampTimer.current);
+      mtClampTimer.current = window.setTimeout(() => setMtClampNotice(false), 3000);
+      return;
+    }
+    setMtClampNotice(false);
+    setMaxTokens(Math.floor(n));
+  };
+  React.useEffect(() => () => { if (mtClampTimer.current !== null) window.clearTimeout(mtClampTimer.current); }, []);
+  // v4.9.11-sandbox-r10：快捷模板 —— 最近使用的模板高亮 + system prompt 是否被覆盖的反馈
+  const [activeTemplateId, setActiveTemplateId] = React.useState<string | null>(null);
+  const applyTemplate = (t: PromptTemplate) => {
+    setMessage(t.message);
+    if (t.system) setSystemPrompt(t.system);
+    setActiveTemplateId(t.id);
+  };
+
+  // v4.9.12-local-r11：自定义模板（localStorage 持久化，挂载时恢复）
+  const [customTemplates, setCustomTemplates] = React.useState<PromptTemplate[]>([]);
+  const [tplDialogOpen, setTplDialogOpen] = React.useState(false);
+  const [tplManageOpen, setTplManageOpen] = React.useState(false);
+  const [tplLabel, setTplLabel] = React.useState("");
+  const [tplMessage, setTplMessage] = React.useState("");
+  const [tplUseSystem, setTplUseSystem] = React.useState(false);
+  const [tplError, setTplError] = React.useState("");
+  const [tplSavedFlash, setTplSavedFlash] = React.useState(false);
+  React.useEffect(() => {
+    setCustomTemplates(loadCustomTemplates());
+  }, []);
+  React.useEffect(() => {
+    if (!tplSavedFlash) return;
+    const t = setTimeout(() => setTplSavedFlash(false), 2500);
+    return () => clearTimeout(t);
+  }, [tplSavedFlash]);
+
+  const openSaveTemplate = () => {
+    setTplLabel("");
+    setTplMessage(message);
+    setTplUseSystem(systemPrompt.trim() !== "");
+    setTplError("");
+    setTplDialogOpen(true);
+  };
+
+  const confirmSaveTemplate = () => {
+    const label = tplLabel.trim();
+    const msg = tplMessage; // 消息保留原始换行，仅校验非空
+    if (!label) {
+      setTplError("请填写模板名称");
+      return;
+    }
+    if (!msg.trim()) {
+      setTplError("消息内容不能为空");
+      return;
+    }
+    const tpl: PromptTemplate = {
+      id: `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      label: label.slice(0, CUSTOM_LABEL_CAP),
+      hint: tplUseSystem ? "含 System Prompt · 自定义" : "自定义模板",
+      message: msg.slice(0, CUSTOM_MESSAGE_CAP),
+      ...(tplUseSystem && systemPrompt.trim() ? { system: systemPrompt.slice(0, 2000) } : {}),
+    };
+    const next = [tpl, ...customTemplates].slice(0, CUSTOM_TEMPLATES_CAP);
+    if (!persistCustomTemplates(next)) {
+      setTplError("保存失败：浏览器本地存储不可用（隐私模式或配额已满）");
+      return;
+    }
+    setCustomTemplates(next);
+    setTplDialogOpen(false);
+    setActiveTemplateId(tpl.id);
+    setTplSavedFlash(true);
+  };
+
+  const deleteCustomTemplate = (id: string) => {
+    const next = customTemplates.filter((t) => t.id !== id);
+    setCustomTemplates(next);
+    persistCustomTemplates(next); // 尽力而为：state 已删，持久化失败则刷新后回来（可接受）
+    if (activeTemplateId === id) setActiveTemplateId(null);
+  };
   // v4.9.12-local-r5：top_p（1 = 不传给上游）与 stop 序列（每行一个，最多 4 个）
   const [topP, setTopP] = React.useState(1);
   const [stopText, setStopText] = React.useState("");
@@ -231,6 +552,43 @@ export function QuickTestPanel() {
   const [sessionUsage, setSessionUsage] = React.useState<SessionUsage>({ requests: 0, inputTokens: 0, outputTokens: 0 });
   const abortRef = React.useRef<AbortController | null>(null);
   const chatScrollRef = React.useRef<HTMLDivElement>(null);
+
+  // v4.9.13-local-r2：从密钥列表一键载入 —— 按 id 走 reveal 通道换明文（与列表页「显示完整密钥」
+  // 同一端点、同一粒度），填入后既有 debounce effect 自动拉 /v1/models；失败仅提示不阻断。
+  // v4.9.13-local-r3：返回 boolean（外部行按钮需要知道成败以收敛 spinner）。
+  const pickKey = async (k: PlaygroundKeyOption): Promise<boolean> => {
+    if (!k.enabled || keyLoadingId) return false;
+    setKeyLoadingId(k.id);
+    setKeyLoadError(null);
+    try {
+      const r = await apiGet<{ keyValue: string }>(`/api/console/keys?reveal=${encodeURIComponent(k.id)}`, { quiet: true });
+      if (!r?.keyValue) throw new Error("empty");
+      setApiKey(r.keyValue);
+      setLoadedKeyName(k.name);
+      setKeyPickerOpen(false);
+      return true;
+    } catch {
+      setKeyLoadError(`密钥「${k.name}」载入失败，请手动粘贴完整密钥或稍后重试`);
+      return false;
+    } finally {
+      setKeyLoadingId(null);
+    }
+  };
+
+  // v4.9.13-local-r3：对外命令句柄 —— 密钥行「在 Playground 中测试」入口：
+  // 平滑滚动面板入视口（scroll-mt 抵消吸顶头部遮挡）→ 载入密钥 → 成功后 ring 高亮 1.8s 提示落点。
+  React.useImperativeHandle(ref, () => ({
+    loadKey: async (k) => {
+      if (!k.enabled) return false;
+      rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const success = await pickKey(k);
+      if (success) {
+        setFlash(true);
+        setTimeout(() => setFlash(false), 1800);
+      }
+      return success;
+    },
+  }));
 
   // 当用户输入密钥后，用该密钥拉取 /v1/models 获取可用模型列表
   // 这样模型列表与实际测试的密钥权限一致（虚拟密钥可能有模型白名单限制）
@@ -320,7 +678,7 @@ export function QuickTestPanel() {
     if (typeof d.m === "string" && d.m) setSelectedModel(d.m);
     if (typeof d.s === "string") setSystemPrompt(d.s.slice(0, 4000));
     if (typeof d.t === "number" && d.t >= 0 && d.t <= 2) setTemperature(Math.round(d.t * 10) / 10);
-    if (typeof d.mt === "number" && d.mt >= 1 && d.mt <= 32768) setMaxTokens(Math.floor(d.mt));
+    if (typeof d.mt === "number" && d.mt >= 1 && d.mt <= MAX_TOKENS_CAP) setMaxTokens(Math.floor(d.mt));
     if (typeof d.tp === "number" && d.tp >= 0.05 && d.tp <= 1) setTopP(d.tp);
     if (Array.isArray(d.st)) {
       const st = d.st.filter((x): x is string => typeof x === "string" && !!x.trim()).slice(0, 4);
@@ -345,6 +703,86 @@ export function QuickTestPanel() {
       `已从分享链接恢复${turns > 0 ? ` ${turns} 轮会话与` : " "}调试参数（API 密钥不随链接分享，请自行粘贴后继续调试）`,
     );
   }, []);
+
+  // v4.9.13-local-r4：本地草稿恢复 —— 挂载时读取 localStorage（URL 分享链接优先：
+  // 有 ?pl= 参数时跳过，避免与分享恢复叠加覆盖）。恢复后按 meta 重建会话累计用量徽标。
+  // 密钥不随草稿保存（安全口径与分享链接一致），恢复后需重新载入/粘贴。
+  // v4.9.13-local-r5：恢复/导入共用 applyDraft（单一实现），导入入口在「草稿」菜单。
+  const applyDraft = (d: PlaygroundDraft) => {
+    setProtocol(d.p);
+    if (d.m) setSelectedModel(d.m);
+    setSystemPrompt(d.s);
+    setTemperature(d.t);
+    setMaxTokens(d.mt);
+    setTopP(d.tp);
+    if (d.st) setStopText(d.st);
+    setStream(d.fl);
+    if (d.h.length > 0) {
+      setHistory(d.h);
+      // 按 assistant 轮次 meta 重建会话累计用量（无 meta 的轮次不计，与实时累计口径一致）
+      const usage = d.h.reduce(
+        (acc, t) => {
+          if (t.role === "assistant" && t.meta) {
+            acc.requests += 1;
+            acc.inputTokens += t.meta.inTok ?? 0;
+            acc.outputTokens += t.meta.outTok ?? 0;
+          }
+          return acc;
+        },
+        { requests: 0, inputTokens: 0, outputTokens: 0 },
+      );
+      setSessionUsage(usage);
+    }
+    setMessage(d.q);
+  };
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get("pl")) return; // 分享链接恢复优先，该分支由上面的 effect 处理
+    const d = loadPlaygroundDraft();
+    if (!d) return;
+    applyDraft(d);
+    setRestoredNotice(
+      `已恢复上次会话草稿（${d.h.length} 轮 · 存于浏览器本地；API 密钥不随草稿保存，请重新载入）`,
+    );
+  }, []);
+
+  // v4.9.13-local-r4：草稿防抖持久化 —— 会话/参数/输入框任一变更后 600ms 写 localStorage。
+  // 恢复 effect 先于写生效（挂载同步读、写有防抖），刷新往返无竞态；「清空」语义仅清会话，
+  // 参数草稿保留（与按钮 title「清空会话历史与累计用量」一致）。
+  // v4.9.13-local-r6：写入成功/失败同步到指示器状态（dirty → saved/blocked，与导出/导入共用同源写入内容）。
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    setDraftSaveState("dirty");
+    const timer = setTimeout(() => {
+      try {
+        const draft: PlaygroundDraft = {
+          v: 1,
+          p: protocol,
+          m: selectedModel,
+          s: systemPrompt.slice(0, 4000),
+          t: temperature,
+          mt: maxTokens,
+          tp: topP,
+          st: stopText.slice(0, 200),
+          fl: stream,
+          h: history.slice(-MAX_HISTORY),
+          q: message.slice(0, 8000),
+        };
+        window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+        setDraftSaveState("saved");
+        setDraftSavedAt(Date.now());
+      } catch {
+        // 静默：隐私模式/配额满 —— 草稿仅是锦上添花，不干扰主流程（指示器转 blocked 态如实告知）
+        setDraftSaveState("blocked");
+      }
+    }, DRAFT_SAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [history, protocol, systemPrompt, temperature, maxTokens, topP, stopText, stream, selectedModel, message]);
+
+  // v4.9.13-local-r6：指示器仅在有可保存内容时渲染（空会话+空输入+无系统提示词时隐藏，避免无意义噪音）
+  const hasDraftContent =
+    history.length > 0 || message.trim().length > 0 || systemPrompt.trim().length > 0 || stopText.trim().length > 0;
 
   // v4.9.12-local-r7：选中模型的上游画像元数据（无元数据目录时为 undefined，信息条不渲染）
   const selectedEntry = models.find((m) => m.id === selectedModel);
@@ -937,6 +1375,64 @@ export function QuickTestPanel() {
     setShareUrl(buildShareUrl());
     setShareOpen(true);
   };
+
+  // v4.9.13-local-r5：草稿导出 —— 与 localStorage 自动保存同源内容（会话+参数+输入框），
+  // 序列化为带 schema 版本的 .json 文件下载；文件名含时间戳便于多份草稿并存。密钥绝不入草稿。
+  const draftFileRef = React.useRef<HTMLInputElement>(null);
+  const exportDraftFile = () => {
+    const payload: PlaygroundDraft = {
+      v: 1,
+      p: protocol,
+      m: selectedModel,
+      s: systemPrompt.slice(0, 4000),
+      t: temperature,
+      mt: maxTokens,
+      tp: topP,
+      st: stopText.slice(0, 200),
+      fl: stream,
+      h: history.slice(-MAX_HISTORY),
+      q: message.slice(0, 8000),
+    };
+    const ts = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const fname = `uag-playground-draft-${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}.json`;
+    try {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      // 极端环境（blob 不可用）兜底：console 提示，不静默丢用户操作
+      console.error("[Playground] 草稿导出失败：浏览器不支持 Blob 下载");
+    }
+  };
+
+  // v4.9.13-local-r5：草稿导入 —— 读取文件文本 → JSON.parse → parseDraftPayload（与 localStorage
+  // 恢复同一套校验规则：逐字段收敛，非法整体拒绝）→ applyDraft 应用 + 成功提示；
+  // 非法文件给出可操作的错误提示（格式/字段/版本不匹配均归「不是有效草稿」）。
+  const importDraftFile = async (file: File | null) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = parseDraftPayload(JSON.parse(text));
+      if (!parsed) {
+        setErrorMsg("导入失败：不是有效的 Playground 草稿文件（需为「草稿」菜单导出的 .json，版本/字段校验未通过）");
+        return;
+      }
+      applyDraft(parsed);
+      setErrorMsg("");
+      setRestoredNotice(
+        `已从草稿文件导入（${parsed.h.length} 轮 · ${file.name}；API 密钥不随草稿保存，请重新载入）`,
+      );
+    } catch {
+      setErrorMsg("导入失败：文件不是合法 JSON，无法解析为草稿");
+    }
+  };
   const copyShareUrl = async () => {
     if (!shareUrl) return;
     try {
@@ -954,8 +1450,47 @@ export function QuickTestPanel() {
     setTimeout(() => setShareCopied(false), 1600);
   };
 
+  // v4.9.13-local-r8：草稿菜单「复制分享链接」快捷项 —— 与分享按钮同源负载（buildShareUrl 单一实现），
+  // 但跳过预览对话框直接复制（快捷项语义）；超长拒绝 / 无可分享内容给出可操作提示；
+  // 复制成功后触发按钮短暂变「已复制链接」提供可见反馈（菜单已关闭，对话框内反馈不可用）。
+  const copyDraftShareLink = async () => {
+    if (!hasShareable) {
+      setErrorMsg("分享链接为空：当前无会话内容、系统提示词或未发送的输入，先写点什么再分享");
+      return;
+    }
+    const url = buildShareUrl();
+    if (!url) {
+      setErrorMsg("分享链接生成失败：会话内容过长（约超 8k 中文字符），请先用「清空」精简会话，或改用「导出草稿（.json）」迁移");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        /* ignore */
+      }
+      ta.remove();
+    }
+    setErrorMsg("");
+    setDraftLinkCopied(true);
+    setTimeout(() => setDraftLinkCopied(false), 1600);
+  };
+
   return (
-    <section className="space-y-4 rounded-xl border border-stone-200 bg-white p-4 lg:p-6">
+    <section
+      ref={rootRef}
+      className={`space-y-4 rounded-xl border border-stone-200 bg-white p-4 scroll-mt-24 transition-[box-shadow] duration-500 lg:p-6 ${
+        flash ? "ring-2 ring-teal-300 ring-offset-2" : ""
+      }`}
+    >
       {/* 标题行 */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2.5">
@@ -1041,6 +1576,82 @@ export function QuickTestPanel() {
             <Share2 className="size-3.5" />
             分享
           </Button>
+          {/* v4.9.13-local-r5：草稿菜单 —— 导出 .json 文件（换设备迁移）/ 从文件导入（同一套校验规则）； */}
+          {/* v4.9.13-local-r8：+「复制分享链接」快捷项 —— 草稿导出/导入/分享三入口归一（同一负载源）；密钥绝不入草稿 */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className={`text-[11px] ${draftLinkCopied ? "text-emerald-600" : "text-stone-500 hover:text-stone-800"}`}
+                title="导出/导入会话草稿、复制分享链接（跨设备迁移；密钥不随草稿与链接）"
+              >
+                {draftLinkCopied ? <Check className="size-3.5" /> : <Save className="size-3.5" />}
+                {draftLinkCopied ? "已复制链接" : "草稿"}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-64">
+              <DropdownMenuItem onClick={() => void copyDraftShareLink()} disabled={!hasShareable} className="gap-2 text-[11px]">
+                <Share2 className="size-3.5" aria-hidden />
+                复制分享链接
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={exportDraftFile} className="gap-2 text-[11px]">
+                <FileDown className="size-3.5" aria-hidden />
+                导出草稿（.json）
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => draftFileRef.current?.click()} className="gap-2 text-[11px]">
+                <FolderOpen className="size-3.5" aria-hidden />
+                从文件导入草稿
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <p className="px-2 py-1 text-[10px] leading-relaxed text-muted-foreground">
+                草稿含会话 / 调试参数 / 输入框内容；与浏览器自动保存同源。分享链接与导出文件同负载（链接免跳转预览直接复制）。API 密钥不随草稿/链接导出，导入后需重新载入。
+              </p>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {/* v4.9.13-local-r6：草稿自动保存指示器（文档编辑器语言）—— */}
+          {/* dirty：琥珀脉冲点 +「自动保存中…」；saved：翡翠点 +「已自动保存 HH:mm:ss」；blocked：红点 + 存储不可用 */}
+          {hasDraftContent && (
+            <span
+              role="status"
+              aria-live="polite"
+              title={
+                draftSaveState === "dirty"
+                  ? "草稿防抖保存中（600ms 后写入浏览器 localStorage）"
+                  : draftSaveState === "blocked"
+                    ? "localStorage 写入失败（隐私模式/存储配额满）—— 草稿不会持久化，但当前会话不受影响"
+                    : "草稿已写入浏览器 localStorage（密钥不随草稿保存）；刷新/误关页后自动恢复"
+              }
+              className="inline-flex items-center gap-1 tabular-nums text-[10px] text-stone-400"
+            >
+              <span
+                className={`size-1.5 rounded-full ${
+                  draftSaveState === "dirty"
+                    ? "animate-pulse bg-amber-400"
+                    : draftSaveState === "blocked"
+                      ? "bg-red-400"
+                      : "bg-emerald-500"
+                }`}
+                aria-hidden
+              />
+              {draftSaveState === "dirty"
+                ? "自动保存中…"
+                : draftSaveState === "blocked"
+                  ? "草稿自动保存不可用"
+                  : `已自动保存${draftSavedAt ? ` ${new Date(draftSavedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : ""}`}
+            </span>
+          )}
+          <input
+            ref={draftFileRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            aria-label="选择草稿文件"
+            onChange={(e) => {
+              void importDraftFile(e.target.files?.[0] ?? null);
+              e.target.value = ""; // 允许重复选同一个文件
+            }}
+          />
         </div>
       </div>
 
@@ -1066,16 +1677,78 @@ export function QuickTestPanel() {
       {/* 密钥 + 模型 */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-stone-600">API 密钥</label>
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-medium text-stone-600">API 密钥</label>
+            {/* v4.9.13-local-r2：从密钥列表一键载入（明文按需换取，与列表页「显示完整密钥」同通道） */}
+            {(keys?.length ?? 0) > 0 && (
+              <Popover open={keyPickerOpen} onOpenChange={(v) => { setKeyPickerOpen(v); if (v) setKeyLoadError(null); }}>
+                <PopoverTrigger
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-300"
+                  title="从上方密钥列表选择一把填入（按需换取明文，仅本地填充）"
+                >
+                  <KeyRound className="size-3" />
+                  从密钥列表载入
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-80 p-2">
+                  <p className="px-1.5 pb-1.5 text-[11px] font-medium text-stone-500">选择虚拟密钥（按需换取明文，仅本地填充）</p>
+                  <div className="max-h-64 overflow-y-auto">
+                    {keys!.map((k) => (
+                      <button
+                        key={k.id}
+                        type="button"
+                        disabled={!k.enabled || keyLoadingId !== null}
+                        onClick={() => void pickKey(k)}
+                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
+                          k.enabled ? "hover:bg-stone-100" : "cursor-not-allowed opacity-50"
+                        } ${keyLoadingId === k.id ? "bg-stone-100" : ""}`}
+                      >
+                        {keyLoadingId === k.id ? (
+                          <Loader2 className="size-3.5 shrink-0 animate-spin text-stone-400" />
+                        ) : (
+                          <KeyRound className="size-3.5 shrink-0 text-stone-400" />
+                        )}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs font-medium text-stone-800">{k.name}</span>
+                          <span className="block truncate font-mono text-[10px] text-stone-400">{k.keyMasked}</span>
+                        </span>
+                        {loadedKeyName === k.name && keyLoadingId === null ? (
+                          <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700">已载入</span>
+                        ) : !k.enabled ? (
+                          <span className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-[9px] text-stone-500">已停用</span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                  {keyLoadError && (
+                    <p role="alert" className="mt-1.5 flex items-start gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[10px] leading-relaxed text-red-700">
+                      <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                      {keyLoadError}
+                    </p>
+                  )}
+                </PopoverContent>
+              </Popover>
+            )}
+          </div>
           <Input
             type="password"
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => {
+              setApiKey(e.target.value);
+              // 手动编辑视为脱离「已载入」状态：chip 提示同步清除（明文与密钥名的对应已不可信）
+              if (loadedKeyName !== null) setLoadedKeyName(null);
+            }}
             placeholder="sk-uag-...（虚拟密钥或 Master Key）"
             className="font-mono text-xs"
             autoComplete="off"
             spellCheck={false}
           />
+          {/* 已载入密钥名提示：输入框为 password 型，用户看不到里面是什么；明文仅本地 state */}
+          {loadedKeyName && (
+            <p className="flex items-center gap-1 text-[10px] text-emerald-700">
+              <Check className="size-3 shrink-0" aria-hidden />
+              已载入密钥「{loadedKeyName}」· 明文仅本地填充，不回传服务端；手动编辑即失效
+            </p>
+          )}
         </div>
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
@@ -1269,12 +1942,19 @@ export function QuickTestPanel() {
                 <Input
                   type="number"
                   min={1}
-                  max={32768}
+                  max={MAX_TOKENS_CAP}
                   value={maxTokens}
-                  onChange={(e) => setMaxTokens(Math.max(1, Math.min(32768, Number(e.target.value) || 1)))}
+                  onChange={(e) => handleMaxTokensChange(e.target.value)}
                   className="h-8 text-xs tabular-nums"
+                  aria-describedby="max-tokens-hint"
                 />
-                <p className="text-[10px] text-stone-400">Anthropic 协议此参数必填</p>
+                {/* v4.9.11-sandbox-r10：越界钳制行内提醒（aria-live 播报，3s 自动消退） */}
+                <p aria-live="polite" className={mtClampNotice ? "text-[10px] font-medium text-amber-600" : "hidden"}>
+                  已超出上游输出上限，自动钳制到 {MAX_TOKENS_CAP.toLocaleString()}
+                </p>
+                <p id="max-tokens-hint" className="text-[10px] text-stone-400">
+                  Anthropic 协议此参数必填；沙箱上游输出上限 [1, {MAX_TOKENS_CAP.toLocaleString()}] —— 输入越界会自动钳制并提示（v4.9.11-r3 起网关侧同样兜底），API 直调也无需手改
+                </p>
               </div>
             </div>
             {/* v4.9.12-local-r5：top_p 与 stop 序列（第二行参数区） */}
@@ -1403,6 +2083,83 @@ export function QuickTestPanel() {
 
       {/* 输入区 + 操作栏 */}
       <div className="space-y-2">
+        {/* v4.9.11-sandbox-r10：快捷 Prompt 模板库（一键填充 message + 可选 system，不自动发送）
+            v4.9.12-local-r11：内置模板后追加自定义模板（虚线边框）+ 存为模板/管理入口 */}
+        <div className="flex items-start gap-1.5">
+          <span className="mt-1 inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-stone-400" aria-hidden>
+            <Sparkles className="size-3" />
+            模板
+          </span>
+          <div className="flex flex-1 flex-wrap gap-1" role="toolbar" aria-label="快捷 Prompt 模板">
+            {PROMPT_TEMPLATES.map((t) => {
+              const active = activeTemplateId === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => applyTemplate(t)}
+                  title={`${t.hint}${t.system ? " · 会同时填充 System Prompt" : ""}`}
+                  aria-label={`使用模板：${t.label}（${t.hint}）`}
+                  aria-pressed={active}
+                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                    active
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                      : "border-stone-200 bg-stone-50 text-stone-600 hover:border-emerald-300 hover:bg-emerald-50/60 hover:text-emerald-700"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+            {customTemplates.map((t) => {
+              const active = activeTemplateId === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => applyTemplate(t)}
+                  title={`${t.hint}${t.system ? " · 会同时填充 System Prompt" : ""}`}
+                  aria-label={`使用自定义模板：${t.label}`}
+                  aria-pressed={active}
+                  className={`inline-flex items-center gap-1 rounded-full border border-dashed px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                    active
+                      ? "border-violet-400 bg-violet-100 text-violet-800"
+                      : "border-stone-300 bg-white text-stone-500 hover:border-violet-300 hover:bg-violet-50/60 hover:text-violet-700"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={openSaveTemplate}
+              title="把当前消息（可选含 System Prompt）存为自定义模板（仅保存在本浏览器）"
+              aria-label="把当前消息存为自定义模板"
+              className="inline-flex items-center gap-0.5 rounded-full border border-dashed border-stone-300 px-2 py-0.5 text-[10px] font-medium text-stone-400 transition-colors hover:border-emerald-300 hover:bg-emerald-50/60 hover:text-emerald-700"
+            >
+              <Plus className="size-2.5" aria-hidden />
+              存为模板
+            </button>
+            {customTemplates.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setTplManageOpen(true)}
+                title={`管理自定义模板（当前 ${customTemplates.length} 个，保存在本浏览器）`}
+                aria-label={`管理自定义模板（共 ${customTemplates.length} 个）`}
+                className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium text-stone-400 underline-offset-2 transition-colors hover:text-stone-600 hover:underline"
+              >
+                管理（{customTemplates.length}）
+              </button>
+            )}
+          </div>
+          {tplSavedFlash && (
+            <span role="status" className="mt-0.5 inline-flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-emerald-600">
+              <Check className="size-3" aria-hidden />
+              已存为模板
+            </span>
+          )}
+        </div>
         <Textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
@@ -1615,6 +2372,126 @@ export function QuickTestPanel() {
             >
               {shareCopied ? <Check className="size-3.5 text-emerald-300" /> : <Link2 className="size-3.5" />}
               {shareCopied ? "已复制" : "复制链接"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------- v4.9.12-local-r11：存为自定义模板 ---------- */}
+      <Dialog open={tplDialogOpen} onOpenChange={(o) => !o && setTplDialogOpen(false)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>存为自定义模板</DialogTitle>
+            <DialogDescription>
+              仅保存在本浏览器（localStorage），不上传服务器、不跨设备同步；上限 {CUSTOM_TEMPLATES_CAP} 个。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3.5 py-1">
+            <div className="space-y-1.5">
+              <label htmlFor="tpl-label" className="text-xs font-medium text-stone-700">
+                模板名称 <span className="text-red-500" aria-hidden>*</span>
+                <span className="ml-1 font-normal text-stone-400">（≤ {CUSTOM_LABEL_CAP} 字）</span>
+              </label>
+              <Input
+                id="tpl-label"
+                value={tplLabel}
+                onChange={(e) => setTplLabel(e.target.value)}
+                maxLength={CUSTOM_LABEL_CAP}
+                placeholder="如：周报整理"
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="tpl-message" className="text-xs font-medium text-stone-700">
+                消息内容 <span className="text-red-500" aria-hidden>*</span>
+                <span className="ml-1 font-normal text-stone-400">（已带入当前输入框，可再编辑）</span>
+              </label>
+              <Textarea
+                id="tpl-message"
+                value={tplMessage}
+                onChange={(e) => setTplMessage(e.target.value)}
+                rows={4}
+                maxLength={CUSTOM_MESSAGE_CAP}
+                className="text-xs"
+                placeholder="模板填充到输入框的消息文本"
+              />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
+              <div className="min-w-0 pr-3">
+                <p className="text-xs font-medium text-stone-700">包含当前 System Prompt</p>
+                <p className="mt-0.5 truncate text-[11px] text-stone-400">
+                  {systemPrompt.trim() ? systemPrompt.slice(0, 60) : "（当前 System Prompt 为空）"}
+                </p>
+              </div>
+              <Switch
+                checked={tplUseSystem}
+                onCheckedChange={setTplUseSystem}
+                disabled={systemPrompt.trim() === ""}
+                aria-label="模板是否包含当前 System Prompt"
+              />
+            </div>
+            {tplError && (
+              <p role="alert" className="text-xs text-red-600">
+                {tplError}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTplDialogOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={confirmSaveTemplate} className="bg-stone-900 hover:bg-stone-800">
+              <Save />
+              保存模板
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------- v4.9.12-local-r11：管理自定义模板 ---------- */}
+      <Dialog open={tplManageOpen} onOpenChange={(o) => !o && setTplManageOpen(false)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>管理自定义模板（{customTemplates.length}）</DialogTitle>
+            <DialogDescription>
+              保存在本浏览器 localStorage，删除后不可恢复（内置模板不受影响）。
+            </DialogDescription>
+          </DialogHeader>
+          {customTemplates.length === 0 ? (
+            <p className="py-6 text-center text-xs text-stone-400">还没有自定义模板 —— 在输入框写好 prompt 后点「＋ 存为模板」。</p>
+          ) : (
+            <div className="max-h-72 space-y-1.5 overflow-y-auto py-1 pr-1" role="list" aria-label="自定义模板列表">
+              {customTemplates.map((t) => (
+                <div
+                  key={t.id}
+                  role="listitem"
+                  className="flex items-start justify-between gap-2 rounded-lg border border-stone-200 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="flex items-center gap-1.5 text-xs font-medium text-stone-800">
+                      {t.label}
+                      {t.system && (
+                        <span className="rounded-sm bg-violet-100 px-1 text-[9px] font-medium text-violet-700">SYS</span>
+                      )}
+                    </p>
+                    <p className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-stone-400">{t.message}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => deleteCustomTemplate(t.id)}
+                    aria-label={`删除模板：${t.label}`}
+                    title="删除该模板"
+                    className="shrink-0 rounded p-1 text-stone-400 transition-colors hover:bg-red-50 hover:text-red-600"
+                  >
+                    <Trash2 className="size-3.5" aria-hidden />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTplManageOpen(false)}>
+              关闭
             </Button>
           </DialogFooter>
         </DialogContent>

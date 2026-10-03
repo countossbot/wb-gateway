@@ -29,6 +29,12 @@ model AdminUser {
   passwordHash String // scrypt: salt:hex
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  // v4.11.1：对齐生产库（Aiven PG）多用户增强字段 —— 管理员资料/角色/启停/登录时间
+  // 单机版代码不写入这些列，但 schema 必须映射以避免 P2022（列存在而 client 缺失）
+  displayName  String?
+  role         String   @default("VIEWER")
+  enabled      Boolean  @default(true)
+  lastLoginAt  DateTime?
 }
 
 model Session {
@@ -137,6 +143,8 @@ model VirtualKey {
   monthlyCostLimit  Float @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // v4.11.1：对齐生产库多用户增强字段 —— 密钥归属用户（单机版恒空）
+  ownerUserId String?
 }
 
 // ---- 系统设置（键值） ----
@@ -177,6 +185,8 @@ model RequestLog {
   apiKeyName   String?
   error        String?
   usageExact   Boolean? // true=上游精确 usage；false=网关字符估算；null=未知/未记录（旧数据或无用量）
+  // v4.11.1：对齐生产库多用户增强字段 —— 请求归属用户（单机版恒空）
+  ownerUserId  String?
 
   @@index([createdAt])
   @@index([model])
@@ -217,6 +227,8 @@ model UsageDaily {
   outputTokens Int      @default(0)
   cachedTokens Int      @default(0)
   updatedAt    DateTime @updatedAt
+  // v4.11.1：对齐生产库多用户增强字段 —— 用量归属用户（非空默认空串，保持复合唯一键语义）
+  ownerUserId  String   @default("")
 
   @@unique([day, providerId, apiKeyName, model])
   @@index([day])

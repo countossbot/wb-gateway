@@ -7,6 +7,8 @@
 // 非 7/14/30 的值一律回落 7，与前端按钮组一致）。
 // v4.3.2：slo_hours=1|6|24（服务质量 SLO 窗口，默认 24；非白名单值回落 24）——延迟分位数/
 // 成功率/流式占比/延迟分布直方图（RequestLog 聚合）。
+// v4.9.13-local-r5：ep_hours=24|168（近期错误模式卡窗口，默认 24；非白名单值回落 24）——
+// requestLogErrorPatterns({from}) 按时间窗口过滤后的归一化聚合（与主 overview 的无窗口版本同源）。
 import { NextRequest } from "next/server";
 import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
 import {
@@ -16,8 +18,14 @@ import {
   normalizeSloHours,
   normalizeWindowDays,
 } from "@/lib/console/overviewInsights";
+import { requestLogErrorPatterns } from "@/lib/gateway/config/requestLog";
 
 export const dynamic = "force-dynamic";
+
+/** v4.9.13-local-r5：错误模式卡窗口白名单（24h / 7d）；非法值回落 24 */
+function normalizeEpHours(v: string | null): 24 | 168 {
+  return v === "168" ? 168 : 24;
+}
 
 export async function GET(request: NextRequest) {
   const session = await requireSessionOr401(request);
@@ -26,12 +34,15 @@ export async function GET(request: NextRequest) {
   const mhDays = normalizeWindowDays(request.nextUrl.searchParams.get("mh_days"));
   const tpDays = normalizeWindowDays(request.nextUrl.searchParams.get("tp_days"));
   const sloHours = normalizeSloHours(request.nextUrl.searchParams.get("slo_hours"));
+  const epHours = normalizeEpHours(request.nextUrl.searchParams.get("ep_hours"));
 
-  // 三路独立计算并行执行（前两路各为一次 UsageDaily 轻量查询；SLO 为一次 RequestLog 窗口查询）
-  const [modelHealth, topProviders, slo] = await Promise.all([
+  // 四路独立计算并行执行（前两路各为一次 UsageDaily 轻量查询；SLO 为一次 RequestLog 窗口查询；
+  // 错误模式为一次 error 非空行的窗口查询，异常静默降级空数组不阻断其余三路）
+  const [modelHealth, topProviders, slo, errorPatterns] = await Promise.all([
     computeModelHealthData(mhDays),
     computeTopProviders(tpDays),
     computeSloData(sloHours),
+    requestLogErrorPatterns({ from: Date.now() - epHours * 3600_000 }).catch(() => []),
   ]);
 
   return ok({
@@ -40,5 +51,8 @@ export async function GET(request: NextRequest) {
     top_providers_7d: topProviders,
     top_providers_window_days: tpDays,
     slo,
+    /** v4.9.13-local-r5：近期错误模式（窗口回显 error_patterns_hours） */
+    error_patterns: errorPatterns,
+    error_patterns_hours: epHours,
   });
 }

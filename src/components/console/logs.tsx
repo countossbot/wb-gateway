@@ -6,10 +6,14 @@
 // v3.0.8：CSV 导出 —— 按当前七维筛选导出全部匹配行（上限 5000，BOM + RFC 4180 转义，Excel 直接打开）。
 // v4.9.12-local-r7：行内展开详情 —— 点击行/箭头展开完整请求画像（时间/状态/耗时/协议/流式/密钥/命中链路/
 // Token 用量来源/成本/错误全文），移动端被隐藏的列在展开区全部可读；支持复制行 JSON 便于排障工单。
+// v4.9.13-local-r9：筛选九维 —— 新增错误文本关键字（error，contains 匹配；错误模式下钻通道的检索维度，
+// 模式芯片/总览错误卡/失败徽标 tooltip 的骨架片段一键落入此输入框）与「仅错误行」开关（error_only，
+// 排障一键聚焦）；两维与列表/速览聚合/CSV 导出/URL 深链全部同源同口径。
 "use client";
 
 import * as React from "react";
 import {
+  AlertCircle,
   Braces,
   Check,
   ChevronDown,
@@ -41,6 +45,7 @@ import {
 } from "@/components/console/ui";
 import { apiGet, authHeaders, errMessage } from "@/lib/console/api";
 import { absoluteTime, fmtNum, fmtUsd, statusColor, tokenUsage } from "@/lib/console/format";
+import { categorizeError, ERROR_CATEGORY_TONE, patternSearchKeyword } from "@/lib/console/errorCategories";
 import { buildDeepLink, parseLogsFilters, syncLogsFiltersToUrl } from "@/lib/console/urlState";
 import type { LogRow, LogsData } from "@/lib/console/types";
 
@@ -76,6 +81,19 @@ const TIME_PRESET_OPTIONS: Array<{ value: Exclude<TimePreset, "custom">; label: 
   { value: "24h", label: "近 24 小时" },
   { value: "7d", label: "近 7 天" },
 ];
+
+/**
+ * v4.9.13-local-r4：错误模式 → 状态筛选大类（芯片下钻目标）。
+ * 状态全集落在同一大类（2xx/4xx/5xx）→ 该大类；空或跨大类 → null（保持只读展示，不下钻）。
+ */
+function patternStatusTarget(statuses: number[]): StatusFilter | null {
+  if (statuses.length === 0) return null;
+  const inRange = (s: number, lo: number) => s >= lo && s < lo + 100;
+  if (statuses.every((s) => inRange(s, 500))) return "5xx";
+  if (statuses.every((s) => inRange(s, 400))) return "4xx";
+  if (statuses.every((s) => inRange(s, 200))) return "2xx";
+  return null;
+}
 
 const TIME_PRESET_MS: Record<Exclude<TimePreset, "custom" | "all">, number> = {
   "1h": 3600_000,
@@ -140,6 +158,10 @@ interface LoadArgs {
   timePreset: TimePreset;
   customRange: TimeRangeJump | null;
   offset: number;
+  /** v4.9.13-local-r9：错误文本关键字（contains；空 = 不筛） */
+  error: string;
+  /** v4.9.13-local-r9：仅看有错误文本的行 */
+  errorOnly: boolean;
 }
 
 /** v3.0.6：账号组合键拆解（组合键防跨提供商同名账号串扰；与 provider 参数成对下发） */
@@ -195,6 +217,75 @@ function CopyableError({ text }: { text: string }) {
   );
 }
 
+/**
+ * v4.9.13-local-r3：展开区错误详情卡（上轮建议「错误详情增强」落地）——
+ * - 分类徽标：categorizeError 共享模块（与服务端错误模式聚合同口径），配 ERROR_CATEGORY_TONE 色相；
+ * - 一键复制全文（clipboard API + execCommand 兜底，✓ 反馈 1.6s，与 CopyableError 同交互语言）；
+ * - 字符计数（长错误提示规模，复制前心中有数）；
+ * - 超长错误（>240 字符）max-h + 滚动 + 自定义细滚动条，不再撑爆展开区。
+ */
+function ErrorDetailCard({ error }: { error: string }) {
+  const [copied, setCopied] = React.useState(false);
+  const category = categorizeError(error);
+  const tone = ERROR_CATEGORY_TONE[category] || ERROR_CATEGORY_TONE["其他"];
+  const isLong = error.length > 240;
+  const onCopy = React.useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(error);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = error;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  }, [error]);
+  return (
+    <div className="mt-2.5 rounded-md border border-red-200 bg-red-50/70 px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <p className="text-[10px] font-medium text-red-500">错误全文</p>
+        <span
+          className={`rounded-full border px-1.5 py-px text-[10px] font-medium ${tone}`}
+          title={`按关键字推断的错误大类：${category}（分类规则与错误模式速览条同源）`}
+        >
+          {category}
+        </span>
+        <span className="text-[10px] tabular-nums text-red-400" title="错误文本字符数">
+          {error.length.toLocaleString()} 字符{isLong ? " · 已折叠滚动" : ""}
+        </span>
+        <button
+          type="button"
+          onClick={() => void onCopy()}
+          aria-label="复制错误全文到剪贴板"
+          className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-red-600 transition-colors hover:bg-red-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400"
+        >
+          {copied ? (
+            <>
+              <Check className="size-3" aria-hidden />
+              已复制
+            </>
+          ) : (
+            <>
+              <Copy className="size-3" aria-hidden />
+              复制全文
+            </>
+          )}
+        </button>
+      </div>
+      <div
+        className={`mt-1 break-all font-mono text-[11px] leading-relaxed text-red-700 ${
+          isLong ? "max-h-40 overflow-y-auto rounded bg-white/60 px-1.5 py-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-red-200 [&::-webkit-scrollbar-track]:bg-transparent" : ""
+        }`}
+      >
+        {error}
+      </div>
+    </div>
+  );
+}
+
 /** v4.9.12-local-r7：展开详情字段（上方小标签 + 值） */
 function DetailField({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -247,6 +338,8 @@ export function LogsModule({
   initialTimeRange,
   initialAccount,
   initialModel,
+  initialStatus,
+  initialErrorKeyword,
 }: {
   initialProvider?: string | null;
   initialKeyName?: string | null;
@@ -255,17 +348,28 @@ export function LogsModule({
   initialAccount?: { providerId: string; accountId: string } | null;
   /** v3.8.0：模型健康行跳转携带的对外模型名 */
   initialModel?: string | null;
+  /** v4.9.13-local-r4：总览错误模式卡跳转携带的状态大类（第十跳转通道） */
+  initialStatus?: "2xx" | "4xx" | "5xx" | null;
+  /** v4.9.13-local-r9：错误模式下钻携带的检索词（模式骨架片段；总览错误卡/失败徽标 tooltip 通道，
+   *  精准命中该模式组的全部行，优先于状态大类） */
+  initialErrorKeyword?: string | null;
 } = {}) {
   const [data, setData] = React.useState<LogsData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [modelFilter, setModelFilter] = React.useState("");
   const [appliedFilter, setAppliedFilter] = React.useState("");
+  // v4.9.13-local-r9：错误文本关键字两维 —— 输入/已应用双轨（与模型筛选项同交互语言：提交才生效）
+  const [errorFilter, setErrorFilter] = React.useState("");
+  const [appliedErrorFilter, setAppliedErrorFilter] = React.useState("");
+  const [errorOnlyFilter, setErrorOnlyFilter] = React.useState(false);
   const [providerFilter, setProviderFilter] = React.useState<string>(
     initialProvider || (initialAccount ? initialAccount.providerId : "all")
   );
   const [usageFilter, setUsageFilter] = React.useState<UsageFilter>("all");
-  const [statusFilter, setStatusFilter] = React.useState<StatusFilter>("all");
+  const [statusFilter, setStatusFilter] = React.useState<StatusFilter>(
+    initialStatus === "2xx" || initialStatus === "4xx" || initialStatus === "5xx" ? initialStatus : "all"
+  );
   const [keyFilter, setKeyFilter] = React.useState<string>(initialKeyName || "all");
   const [accountFilter, setAccountFilter] = React.useState<string>(
     initialAccount ? accountKeyOf(initialAccount) : "all"
@@ -273,6 +377,20 @@ export function LogsModule({
   const [timePreset, setTimePreset] = React.useState<TimePreset>(initialTimeRange ? "custom" : "all");
   const [customRange, setCustomRange] = React.useState<TimeRangeJump | null>(initialTimeRange ?? null);
   const [offset, setOffset] = React.useState(0);
+  // v4.9.13-local-r6：错误模式速览窗口（"all"=跟随列表时间筛选 / 24h / 7d，与总览错误模式卡口径对齐）。
+  // 用 ref + state 双轨：load 通过 ref 读当前值（避免 load 身份随窗口变化引发挂载 effect 重跑双拉），按钮渲染用 state。
+  const [epWindow, setEpWindowState] = React.useState<"all" | 24 | 168>("all");
+  const epWindowRef = React.useRef<"all" | 24 | 168>("all");
+  // 窗口切换中（背景重拉模式聚合期间，芯片容器脉冲降透明度提示口径正在变化）
+  const [epStale, setEpStale] = React.useState(false);
+  const changeEpWindow = (w: "all" | 24 | 168) => {
+    if (epWindowRef.current === w) return;
+    epWindowRef.current = w;
+    setEpWindowState(w);
+    setEpStale(true);
+    // 背景重拉：仅模式聚合口径变化，列表数据同参数不变 → 不闪加载态（竞态由 loadSeq 保护）
+    void load(baseArgs(), { background: true }).then(() => setEpStale(false));
+  };
   // v3.9.1：自动刷新默认开启 —— 修复「日志卡死」感知：此前默认关闭，新请求产生后页面永远不动，
   // 看起来像卡死；现在进入日志页即自动跟随，可手动关闭。
   const [autoRefresh, setAutoRefresh] = React.useState(true);
@@ -303,6 +421,9 @@ export function LogsModule({
     if (a.usage !== "all") params.set("usage", a.usage);
     if (a.status !== "all") params.set("status", a.status);
     if (a.key && a.key !== "all") params.set("key", a.key);
+    // v4.9.13-local-r9：错误文本两维（错误模式下钻通道与排障聚焦共用）
+    if (a.error.trim()) params.set("error", a.error.trim());
+    if (a.errorOnly) params.set("error_only", "1");
     // 账号组合键：同时下发 provider（组合查询）与 account（accountId 精确）
     if (a.account && a.account !== "all") {
       const slash = a.account.indexOf("/");
@@ -330,6 +451,8 @@ export function LogsModule({
       }
       try {
         const params = buildParams(a, true);
+        // v4.9.13-local-r6：错误模式窗口透传（"all" 不带 → 跟随列表时间筛选；窗口覆盖时间维度，其余筛选同构）
+        if (epWindowRef.current !== "all") params.set("ep_hours", String(epWindowRef.current));
         const d = await apiGet<LogsData>(`/api/console/logs?${params.toString()}`);
         if (seq !== loadSeq.current) return; // 已有更新请求，丢弃本次过期响应
         setData(d);
@@ -356,25 +479,41 @@ export function LogsModule({
       timePreset,
       customRange,
       offset,
+      error: appliedErrorFilter,
+      errorOnly: errorOnlyFilter,
       ...over,
     }),
-    [appliedFilter, providerFilter, usageFilter, statusFilter, keyFilter, accountFilter, timePreset, customRange, offset],
+    [appliedFilter, providerFilter, usageFilter, statusFilter, keyFilter, accountFilter, timePreset, customRange, offset, appliedErrorFilter, errorOnlyFilter],
   );
 
   React.useEffect(() => {
     // v3.4.0：挂载初始化 —— 跳转通道 props 优先于 URL 深链，URL 优先于默认值。
-    // 深链形态：/?tab=logs&model=xx&provider=xx&usage=xx&status=xx&key=xx&account=xx&from=&to=
+    // 深链形态：/?tab=logs&model=xx&provider=xx&usage=xx&status=xx&key=xx&account=xx&error=xx&error_only=1&from=&to=
     const uf = typeof window !== "undefined" ? parseLogsFilters(window.location.search) : null;
     const usageVal = (uf?.usage && USAGE_FILTER_OPTIONS.some((o) => o.value === uf.usage) ? uf.usage : "all") as UsageFilter;
-    const statusVal = (uf?.status && STATUS_FILTER_OPTIONS.some((o) => o.value === uf.status) ? uf.status : "all") as StatusFilter;
+    // v4.9.13-local-r4：第十跳转通道（错误模式下钻）携状态大类时优先于 URL 深链；
+    // v4.9.13-local-r9：关键字通道携检索词时同样优先（且状态回落 all —— 关键字已含该模式全部行，叠加状态属过度约束）
+    const statusVal = (
+      initialStatus === "2xx" || initialStatus === "4xx" || initialStatus === "5xx"
+        ? initialStatus
+        : uf?.status && STATUS_FILTER_OPTIONS.some((o) => o.value === uf.status)
+          ? uf.status
+          : "all"
+    ) as StatusFilter;
     const p = initialProvider || (initialAccount ? initialAccount.providerId : "") || uf?.provider || "all";
     const k = initialKeyName || uf?.key || "all";
     const acc = initialAccount ? accountKeyOf(initialAccount) : uf?.account || "all";
     // 跳转通道携时间窗口时优先；否则用 URL from/to（label 缺失由 rangeLabel 补齐展示）
     const tr = initialTimeRange ?? (uf?.customRange ? { ...uf.customRange, label: "自定义" } : null);
     const model = initialModel || uf?.model || "";
+    // v4.9.13-local-r9：错误关键字（跳转通道优先于 URL 深链）与仅错误行开关（仅 URL 深链）
+    const errKw = initialErrorKeyword || uf?.error || "";
+    const errOnly = uf?.errorOnly ?? false;
     setModelFilter(model);
     setAppliedFilter(model);
+    setErrorFilter(errKw);
+    setAppliedErrorFilter(errKw);
+    setErrorOnlyFilter(errOnly);
     setProviderFilter(p);
     setKeyFilter(k);
     setAccountFilter(acc);
@@ -396,6 +535,8 @@ export function LogsModule({
       timePreset: tr ? "custom" : "all",
       customRange: tr,
       offset: 0,
+      error: errKw,
+      errorOnly: errOnly,
     });
   }, []);
 
@@ -407,7 +548,7 @@ export function LogsModule({
   // （QA 实测：深链打开后筛选丢失回默认、24 条全量）。快照比较对 remount 幂等。
   const lastJumpKey = React.useRef<string | null>(null);
   React.useEffect(() => {
-    const jumpKey = JSON.stringify([initialProvider, initialKeyName, initialTimeRange, initialAccount, initialModel]);
+    const jumpKey = JSON.stringify([initialProvider, initialKeyName, initialTimeRange, initialAccount, initialModel, initialStatus, initialErrorKeyword]);
     if (lastJumpKey.current === null || lastJumpKey.current === jumpKey) {
       lastJumpKey.current = jumpKey;
       return;
@@ -418,11 +559,17 @@ export function LogsModule({
     const tr = initialTimeRange ?? null;
     const acc = initialAccount ? accountKeyOf(initialAccount) : "all";
     const m = initialModel || "";
+    // v4.9.13-local-r4：错误模式下钻携状态大类时优先；其余通道清回 all（单一意图，防叠加残留）；
+    // v4.9.13-local-r9：关键字下钻携检索词时优先且状态清回 all（关键字已命中该模式全部行）
+    const sv = (initialErrorKeyword ? "all" : initialStatus === "2xx" || initialStatus === "4xx" || initialStatus === "5xx" ? initialStatus : "all") as StatusFilter;
+    const ek = initialErrorKeyword || "";
     // v3.8.0：跳转查询携 model 时同步输入框与已应用筛选（保持 URL 深链与实际查询一致）
     setModelFilter(m);
     setAppliedFilter(m);
+    setErrorFilter(ek);
+    setAppliedErrorFilter(ek);
     setUsageFilter("all");
-    setStatusFilter("all");
+    setStatusFilter(sv);
     setProviderFilter(p);
     setKeyFilter(k);
     setAccountFilter(acc);
@@ -433,14 +580,16 @@ export function LogsModule({
       model: m,
       provider: p,
       usage: "all",
-      status: "all",
+      status: sv,
       key: k,
       account: acc,
       timePreset: tr ? "custom" : "all",
       customRange: tr,
       offset: 0,
+      error: ek,
+      errorOnly: false,
     });
-  }, [initialProvider, initialKeyName, initialTimeRange, initialAccount, initialModel]);
+  }, [initialProvider, initialKeyName, initialTimeRange, initialAccount, initialModel, initialStatus, initialErrorKeyword]);
 
   // v3.4.0：用户筛选交互 → URL 深链同步（replaceState，不产生历史记录）。
   // 架构决策：不做「state → URL 自动同步 effect」——dev 环境实测存在不受控的 state 诡变
@@ -455,6 +604,8 @@ export function LogsModule({
       status: a.status,
       key: a.key,
       account: a.account,
+      error: a.error,
+      errorOnly: a.errorOnly,
       customRange: tp.from !== undefined ? { from: tp.from, to: tp.to ?? Date.now() } : null,
     });
   }, []);
@@ -468,10 +619,21 @@ export function LogsModule({
 
   const applyFilter = () => {
     setAppliedFilter(modelFilter);
+    setAppliedErrorFilter(errorFilter.trim());
     setOffset(0);
-    const a = baseArgs({ model: modelFilter, offset: 0 });
+    const a = baseArgs({ model: modelFilter, error: errorFilter.trim(), offset: 0 });
     void load(a);
     syncFromArgs(a); // v3.4.0：用户交互 → URL 深链同步
+  };
+
+  // v4.9.13-local-r9：仅错误行开关（error 非空；与状态下拉可叠加 —— 例：仅错误行 × 4xx）。
+  // 排障场景一键聚焦：无需先知状态大类，12+13 条带错误文本的行一键可见。
+  const changeErrorOnly = (v: boolean) => {
+    setErrorOnlyFilter(v);
+    setOffset(0);
+    const a = baseArgs({ errorOnly: v, offset: 0 });
+    void load(a);
+    syncFromArgs(a);
   };
 
   const changeProvider = (v: string) => {
@@ -571,6 +733,9 @@ export function LogsModule({
   const clearAll = () => {
     setModelFilter("");
     setAppliedFilter("");
+    setErrorFilter("");
+    setAppliedErrorFilter("");
+    setErrorOnlyFilter(false);
     setProviderFilter("all");
     setUsageFilter("all");
     setStatusFilter("all");
@@ -591,6 +756,8 @@ export function LogsModule({
       timePreset: "all",
       customRange: null,
       offset: 0,
+      error: "",
+      errorOnly: false,
     });
     syncFromArgs({
       model: "",
@@ -602,11 +769,15 @@ export function LogsModule({
       timePreset: "all",
       customRange: null,
       offset: 0,
+      error: "",
+      errorOnly: false,
     }); // v3.4.0：清除全部 → URL 同步归零
   };
 
   const hasActiveFilter =
     appliedFilter !== "" ||
+    appliedErrorFilter !== "" ||
+    errorOnlyFilter ||
     providerFilter !== "all" ||
     usageFilter !== "all" ||
     statusFilter !== "all" ||
@@ -624,6 +795,23 @@ export function LogsModule({
   const page = Math.floor(offset / PAGE_SIZE) + 1;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const items = data?.items ?? [];
+
+  // v4.9.13-local-r2：状态速览条 —— 按状态码分桶聚合（当前筛选除状态维度外的全集分布；
+  // 点击芯片切换状态筛选，与状态下拉同源 changeStatus，含 URL 同步）
+  const sb = React.useMemo(() => {
+    const b = { s2xx: 0, s4xx: 0, s5xx: 0, other: 0, none: 0, total: 0 };
+    for (const x of data?.statusBreakdown ?? []) {
+      const s = x.status;
+      b.total += x.count;
+      if (s === null) b.none += x.count;
+      else if (s >= 200 && s < 300) b.s2xx += x.count;
+      else if (s >= 400 && s < 500) b.s4xx += x.count;
+      else if (s >= 500 && s < 600) b.s5xx += x.count;
+      else b.other += x.count;
+    }
+    return b;
+  }, [data?.statusBreakdown]);
+  const sbAvailable = sb.total > 0;
 
   const usageLabel =
     usageFilter === "exact" ? "精确" : usageFilter === "estimated" ? "估算" : usageFilter === "none" ? "未记录" : null;
@@ -645,6 +833,9 @@ export function LogsModule({
     keyFilter !== "all" ? `密钥「${keyFilter}」` : null,
     statusLabel,
     usageLabel ? `用量${usageLabel}` : null,
+    // v4.9.13-local-r9：错误文本两维进摘要（页头描述与 CSV 导出摘要同口径）
+    appliedErrorFilter ? `错误含「${appliedErrorFilter.length > 24 ? `${appliedErrorFilter.slice(0, 24)}…` : appliedErrorFilter}」` : null,
+    errorOnlyFilter ? "仅错误行" : null,
     activeTimeLabel ? `时间 ${activeTimeLabel}` : null,
   ]
     .filter(Boolean)
@@ -667,6 +858,8 @@ export function LogsModule({
         status: a.status,
         key: a.key,
         account: a.account,
+        error: a.error,
+        errorOnly: a.errorOnly,
         customRange: tp.from !== undefined ? { from: tp.from, to: tp.to ?? Date.now() } : null,
       });
       try {
@@ -723,7 +916,7 @@ export function LogsModule({
       setExportNote(
         truncated
           ? `已导出 ${rows} 行（超过上限 5000 已截断，建议收窄筛选后分批导出）`
-          : `已导出 ${rows} 行 CSV${filterSummary ? "（当前筛选）" : "（全部日志）"}`
+          : `已导出 ${rows} 行 CSV${filterSummary ? "（当前筛选）" : "（全部日志）"} · 文件头含筛选摘要与错误模式统计（工单友好）`
       );
     } catch (e) {
       setError(errMessage(e));
@@ -755,7 +948,7 @@ export function LogsModule({
               size="sm"
               onClick={() => void exportCsv()}
               disabled={exporting || loading || total === 0}
-              title={filterSummary ? `按当前筛选导出全部匹配行（${total} 条）` : "导出全部日志（上限 5000 条）"}
+              title={filterSummary ? `按当前筛选导出全部匹配行（${total} 条）· 文件头附筛选摘要与错误模式统计` : "导出全部日志（上限 5000 条）· 文件头附筛选摘要与错误模式统计"}
             >
               <Download className={exporting ? "animate-bounce" : undefined} />
               {exporting ? "导出中…" : "导出 CSV"}
@@ -815,6 +1008,26 @@ export function LogsModule({
                   <option key={m} value={m} />
                 ))}
               </datalist>
+            )}
+          </div>
+          {/* v4.9.13-local-r9：错误文本关键字筛选 —— 错误模式下钻（模式芯片/总览错误卡/失败徽标 tooltip）
+              的落点输入框；红色系视觉与错误语义一致，与模型输入共享「应用筛选」提交（双输入一次提交） */}
+          <div className="relative min-w-0 flex-1">
+            <AlertCircle className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-red-300" aria-hidden />
+            <Input
+              value={errorFilter}
+              onChange={(e) => setErrorFilter(e.target.value)}
+              placeholder="按错误文本关键字筛选（如 No route configured）"
+              className="border-red-200 pl-8 font-mono text-xs focus-visible:ring-red-200"
+              aria-label="按错误文本关键字筛选（contains 匹配，不区分大小写；留空不筛）"
+            />
+            {appliedErrorFilter && (
+              <span
+                className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded-full border border-red-200 bg-red-50 px-1.5 py-px text-[9px] font-medium text-red-600"
+                title={`已应用错误关键字筛选：${appliedErrorFilter}`}
+              >
+                {errorFilter.trim() === appliedErrorFilter ? "生效中" : "待提交"}
+              </span>
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -923,6 +1136,28 @@ export function LogsModule({
               </SelectItem>
             </SelectContent>
           </Select>
+          {/* v4.9.13-local-r9：仅错误行开关 —— 一键聚焦全部带错误文本的行（不限状态码，12+13 条一眼可见；
+              与状态下拉可叠加组合，如「仅错误行 × 4xx」；导出 CSV 自动跟随该筛选） */}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-pressed={errorOnlyFilter}
+            onClick={() => changeErrorOnly(!errorOnlyFilter)}
+            title={
+              errorOnlyFilter
+                ? "已开启：仅显示记录了错误文本的行（点击关闭恢复全部）"
+                : "只看记录了错误文本的请求（不限状态码）· 排障时一键聚焦失败请求，导出 CSV 自动跟随"
+            }
+            className={`h-8 gap-1.5 whitespace-nowrap rounded-md border text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400 ${
+              errorOnlyFilter
+                ? "border-red-300 bg-red-50 text-red-700 hover:bg-red-100 hover:text-red-800"
+                : "border-stone-200 bg-white text-stone-600 hover:bg-stone-50 hover:text-stone-800"
+            }`}
+          >
+            <AlertCircle className={`size-3.5 ${errorOnlyFilter ? "text-red-600" : "text-stone-400"}`} aria-hidden />
+            仅错误行
+          </Button>
         </div>
         {/* v3.0.6：自定义起止时间输入（选「自定义起止…」展开；跳转窗口也可在此微调） */}
         {timePreset === "custom" && (
@@ -973,6 +1208,231 @@ export function LogsModule({
           </div>
         )}
       </form>
+
+      {/* v4.9.13-local-r2：状态速览条 —— 当前筛选（除状态外）的全集分布，点击芯片即切状态筛选；
+          再点已选中芯片或「全部」恢复。零计数分组仍可点（查看空集）但淡化提示。 */}
+      {sbAvailable && (
+        <div
+          role="group"
+          aria-label="状态分布速览（点击切换状态筛选）"
+          className="flex flex-wrap items-center gap-1.5"
+        >
+          <span className="mr-0.5 text-[10px] font-medium uppercase tracking-wider text-stone-400">
+            状态分布
+          </span>
+          {([
+            { v: "all" as StatusFilter, label: "全部", n: sb.total, tone: "stone" },
+            { v: "2xx" as StatusFilter, label: "2xx 成功", n: sb.s2xx, tone: "emerald" },
+            { v: "4xx" as StatusFilter, label: "4xx 客户端", n: sb.s4xx, tone: "amber" },
+            { v: "5xx" as StatusFilter, label: "5xx 服务端", n: sb.s5xx, tone: "red" },
+            { v: null, label: "无状态码", n: sb.none, tone: "stone" },
+          ] as const).map((c) => {
+            // 无状态码不是下拉的合法枚举（服务端按具体码筛选，无 null 维度）—— 仅展示不可点
+            const isClickable = c.v !== null;
+            const isActive = isClickable && statusFilter === c.v;
+            const isZero = c.n === 0;
+            const toneCls: Record<string, string> = {
+              emerald: isActive
+                ? "border-emerald-400 bg-emerald-50 text-emerald-800"
+                : "border-stone-200 bg-white text-emerald-700 hover:border-emerald-300",
+              amber: isActive
+                ? "border-amber-400 bg-amber-50 text-amber-800"
+                : "border-stone-200 bg-white text-amber-700 hover:border-amber-300",
+              red: isActive
+                ? "border-red-400 bg-red-50 text-red-800"
+                : "border-stone-200 bg-white text-red-700 hover:border-red-300",
+              stone: isActive
+                ? "border-stone-400 bg-stone-100 text-stone-800"
+                : "border-stone-200 bg-white text-stone-600 hover:border-stone-300",
+            };
+            return (
+              <button
+                key={c.label}
+                type="button"
+                disabled={!isClickable || loading}
+                aria-pressed={isClickable ? isActive : undefined}
+                onClick={() => {
+                  if (!isClickable) return;
+                  // 点击已选中分组 → 恢复全部；否则切至该分组（changeStatus 含 URL 同步 + 重新加载）
+                  changeStatus(isActive ? "all" : (c.v as StatusFilter));
+                }}
+                title={
+                  isClickable
+                    ? isActive
+                      ? `当前筛选：${c.label}（点击恢复全部状态）`
+                      : `仅看${c.label}的 ${c.n} 条请求`
+                    : `${c.n} 条请求未记录状态码（中断/未收到响应）`
+                }
+                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium tabular-nums transition-colors ${
+                  toneCls[c.tone]
+                } ${isZero && !isActive ? "opacity-50" : ""} ${!isClickable ? "cursor-default" : ""} disabled:cursor-wait`}
+              >
+                {c.label}
+                <span
+                  className={`rounded-full px-1.5 py-px text-[10px] ${
+                    isActive ? "bg-white/70" : "bg-stone-100/80"
+                  }`}
+                >
+                  {c.n}
+                </span>
+              </button>
+            );
+          })}
+          <span className="ml-auto hidden text-[10px] text-stone-400 sm:inline">
+            当前筛选（除状态外）的全集分布 · 点击芯片切换状态筛选
+          </span>
+        </div>
+      )}
+
+      {/* v4.9.13-local-r3：错误模式速览条 —— 同类错误归一化聚合（引号串/数字/密钥形态折叠）， */}
+      {/* 与状态速览条互补：状态芯片告诉你“错了多少”，模式芯片告诉你“错在哪类、长什么样”。 */}
+      {/* 展示当前筛选（除状态外）的全集错误构成（最近 2000 条错误内统计）；悬停查看原始示例与状态码。 */}
+      {/* v4.9.13-local-r6：窗口切换（全部/24h/7d，与总览错误模式卡口径对齐）：24h/7d 覆盖时间维度看全局错误构成； */}
+      {/* 非“全部”窗口零错误时正向反馈保留切换器（否则用户切进去无错误就再也切不回，体验陷阱）。 */}
+      {(epWindow !== "all" || (data?.errorPatterns?.length ?? 0) > 0) && (
+        <TooltipProvider delayDuration={150}>
+          <div
+            role="group"
+            aria-label="错误模式速览（悬停查看原始示例）"
+            className={`flex flex-wrap items-center gap-1.5 transition-opacity ${epStale ? "opacity-60" : ""}`}
+          >
+            <span className="mr-0.5 text-[10px] font-medium uppercase tracking-wider text-stone-400">错误模式</span>
+            {/* v4.9.13-local-r6：窗口切换按钮组（选中态与总览错误模式卡同范式 red-100） */}
+            <span
+              role="group"
+              aria-label="切换错误模式统计窗口"
+              className="mr-0.5 inline-flex items-center rounded border border-stone-200 bg-stone-50 px-0.5 py-px"
+            >
+              {([
+                { v: "all" as const, label: "全部" },
+                { v: 24 as const, label: "24h" },
+                { v: 168 as const, label: "7d" },
+              ] as const).map((o) => (
+                <button
+                  key={o.v}
+                  type="button"
+                  onClick={() => changeEpWindow(o.v)}
+                  aria-pressed={epWindow === o.v}
+                  title={
+                    o.v === "all"
+                      ? "统计窗口跟随列表时间筛选与其他维度（默认）"
+                      : `覆盖时间维度：只看近 ${o.v === 24 ? "24 小时" : "7 天"}的错误（其余筛选维度保留，与总览错误模式卡口径对齐）`
+                  }
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400 ${
+                    epWindow === o.v ? "bg-red-100 text-red-700" : "text-stone-400 hover:text-stone-700"
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </span>
+            {(data?.errorPatterns?.length ?? 0) === 0 ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
+                <Check className="size-3" aria-hidden />
+                近 {epWindow === 24 ? "24 小时" : "7 天"}窗口内无错误
+              </span>
+            ) : (
+              data!.errorPatterns!.map((p) => {
+            const tone = ERROR_CATEGORY_TONE[p.category] || ERROR_CATEGORY_TONE["其他"];
+              // v4.9.13-local-r4：芯片下钻 —— 同一大类错误模式可点击切换状态筛选（与状态芯片同交互语言）
+              const target = patternStatusTarget(p.statuses);
+              // v4.9.13-local-r9：关键字下钻优先 —— 模式骨架片段 contains 命中整组（比状态大类精准，
+              // 且解锁跨状态大类的模式组）；无可用片段时回落状态大类下钻（既有行为）
+              const kw = patternSearchKeyword(p.pattern);
+              const kwActive =
+                kw !== null && appliedErrorFilter.trim() !== "" && kw.trim().toLowerCase() === appliedErrorFilter.trim().toLowerCase();
+              const statusActive = target !== null && statusFilter === target;
+              const isActive = kw !== null ? kwActive : statusActive;
+              const clickable = kw !== null || target !== null;
+              const targetLabel = target !== null ? STATUS_FILTER_OPTIONS.find((o) => o.value === target)?.label : null;
+              const kwShort = kw !== null && kw.length > 40 ? `${kw.slice(0, 40)}…` : kw;
+              // v4.9.13-local-r6：统计口径文案随窗口自适应（响应回带的 errorPatternsHours，非切换中状态）
+              const scopeText =
+                data?.errorPatternsHours === 24
+                  ? "近 24 小时窗口"
+                  : data?.errorPatternsHours === 168
+                    ? "近 7 天窗口"
+                    : "全部（跟随列表时间筛选）";
+              return (
+                <Tooltip key={p.pattern}>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      disabled={!clickable || loading}
+                      onClick={() => {
+                        if (!clickable) return;
+                        if (kw !== null) {
+                          // 与状态芯片同交互语言：点击已命中关键字的芯片 → 清除关键字恢复全部；
+                          // 状态同步回 all（单一意图：关键字已含该模式全部行，状态叠加属过度约束）
+                          const next = kwActive ? "" : kw;
+                          setErrorFilter(next);
+                          setAppliedErrorFilter(next);
+                          setStatusFilter("all");
+                          setOffset(0);
+                          const a = baseArgs({ error: next, status: "all", offset: 0 });
+                          void load(a);
+                          syncFromArgs(a);
+                        } else {
+                          changeStatus(isActive ? "all" : (target as StatusFilter));
+                        }
+                      }}
+                      aria-pressed={clickable ? isActive : undefined}
+                      title={
+                        kw !== null
+                          ? isActive
+                            ? `当前筛选已命中该模式（点击清除错误关键字恢复全部）`
+                            : `点击按错误关键字「${kwShort}」下钻该模式（contains 命中整组，比状态大类更精准）`
+                          : target !== null
+                            ? isActive
+                              ? `当前筛选已命中该模式所属「${targetLabel}」（点击恢复全部状态）`
+                              : `点击按「${targetLabel}」下钻查看该类错误`
+                            : `该模式无骨架片段可下钻（${p.statuses.join(" / ") || "无状态码"}），仅悬停查看示例`
+                      }
+                      className={`inline-flex max-w-full items-center gap-1.5 rounded-full border py-1 pl-2.5 pr-2 text-left text-[11px] text-red-700 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400 ${
+                        isActive
+                          ? "border-red-400 bg-red-100 font-medium"
+                          : "border-red-200 bg-red-50/60 hover:border-red-300 hover:bg-red-50"
+                      } ${clickable ? "cursor-pointer" : "cursor-default"} disabled:cursor-wait`}
+                    >
+                      <span className={`shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium ${tone}`}>
+                        {p.category}
+                      </span>
+                      <span className="truncate font-mono">{p.pattern}</span>
+                      <span className="shrink-0 rounded-full bg-red-100/80 px-1.5 py-px text-[10px] font-semibold tabular-nums">
+                        ×{p.count}
+                      </span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-md">
+                    <p className="text-[10px] font-medium text-stone-500">
+                      原始示例（{p.category} · 状态码 {p.statuses.join(" / ") || "—"}）
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-red-700">
+                      {p.example}
+                    </p>
+                    <p className="mt-1.5 text-[10px] text-muted-foreground">
+                      当前筛选（除状态外）内命中 {p.count} 条 · 统计范围：{scopeText}（最近 2000 条错误内）
+                      {kw !== null
+                        ? ` · 点击按错误关键字「${kwShort}」下钻`
+                        : clickable
+                          ? ` · 点击按「${targetLabel}」下钻`
+                          : ""}
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              );
+              })
+            )}
+            <span className="ml-auto hidden text-[10px] text-stone-400 sm:inline">
+              {epStale
+                ? "窗口切换中…"
+                : `统计窗口：${
+                    data?.errorPatternsHours === 24 ? "近 24 小时" : data?.errorPatternsHours === 168 ? "近 7 天" : "全部（跟随列表筛选）"
+                  } · 同类错误归一化 · 点击下钻该模式 · 悬停看示例`}
+            </span>
+          </div>
+        </TooltipProvider>
+      )}
 
       <ErrorAlert message={error} onRetry={() => void load(baseArgs())} />
 
@@ -1212,12 +1672,7 @@ export function LogsModule({
                                   )}
                                 </DetailField>
                               </div>
-                              {l.error && (
-                                <div className="mt-2.5 rounded-md border border-red-200 bg-red-50/70 px-2.5 py-2">
-                                  <p className="text-[10px] font-medium text-red-500">错误全文</p>
-                                  <p className="mt-0.5 break-all font-mono text-[11px] leading-relaxed text-red-700">{l.error}</p>
-                                </div>
-                              )}
+                              {l.error && <ErrorDetailCard error={l.error} />}
                             </div>
                           </TableCell>
                         </TableRow>

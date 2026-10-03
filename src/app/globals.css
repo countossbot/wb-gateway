@@ -120,3 +120,189 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ---- v4.9.11-sandbox：主题细节增强 ---- */
+:root {
+  color-scheme: light;
+}
+.dark {
+  color-scheme: dark;
+}
+
+/* 深色滚动条（WebKit + Firefox）—— 长列表（运行日志/账号池）滚动观感 */
+@layer base {
+  .dark * {
+    scrollbar-color: oklch(0.42 0 0) transparent;
+  }
+  .dark ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background: oklch(0.38 0 0);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.48 0 0);
+    background-clip: content-box;
+  }
+  .dark ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/*
+ * 深色主题垫片（theme shim）—— 把控制台各组件中高频硬编码的中性色 / 柔和徽标色
+ * 重映射到语义 token，使既有 17K+ 行组件在 .dark 下整体自动适配，无需逐文件补 dark: 变体。
+ * 仅在 .dark 作用域生效；置于 @layer utilities（与 Tailwind 工具层同层），
+ * 同特异性时按源序覆盖浅色值，dark: 显式变体仍可继续细化。
+ */
+@layer utilities {
+  /* 中性表面 */
+  .dark .bg-white { background-color: var(--card); }
+  .dark .bg-stone-50 { background-color: var(--secondary); }
+  .dark .bg-stone-100 { background-color: var(--accent); }
+  .dark .bg-stone-200 { background-color: oklch(0.34 0 0); }
+  .dark .border-stone-100, .dark .border-stone-200 { border-color: var(--border); }
+  .dark .border-stone-300 { border-color: var(--border); }
+  .dark .border-stone-400 { border-color: var(--input); }
+  .dark .divide-stone-200 > :not([hidden]) ~ :not([hidden]) { border-color: var(--border); }
+
+  /* 中性文字 */
+  .dark .text-stone-900, .dark .text-stone-800 { color: var(--foreground); }
+  .dark .text-stone-700 { color: color-mix(in oklab, var(--foreground) 82%, transparent); }
+  .dark .text-stone-600 { color: var(--muted-foreground); }
+  .dark .text-stone-500 { color: var(--muted-foreground); }
+  .dark .text-stone-400 { color: color-mix(in oklab, var(--muted-foreground) 75%, transparent); }
+  .dark .text-stone-300 { color: color-mix(in oklab, var(--muted-foreground) 55%, transparent); }
+
+  /* 悬停面（hover: 变体是独立类名，需单独映射） */
+  .dark .hover\:bg-stone-50:hover { background-color: var(--secondary); }
+  .dark .hover\:bg-stone-100:hover { background-color: var(--accent); }
+  .dark .hover\:bg-stone-200:hover { background-color: oklch(0.34 0 0); }
+  .dark .hover\:text-stone-900:hover, .dark .hover\:text-stone-800:hover { color: var(--foreground); }
+
+  /* 柔和徽标色：50 底 → 同色 14% 透明；200 边 → 30%；600/700 字 → 400 系亮字 */
+  .dark .bg-emerald-50 { background-color: oklch(0.696 0.17 162.48 / 0.14); }
+  .dark .border-emerald-200 { border-color: oklch(0.696 0.17 162.48 / 0.3); }
+  .dark .text-emerald-600, .dark .text-emerald-700 { color: oklch(0.79 0.14 163); }
+
+  .dark .bg-amber-50 { background-color: oklch(0.83 0.16 84 / 0.14); }
+  .dark .border-amber-200 { border-color: oklch(0.83 0.16 84 / 0.3); }
+  .dark .text-amber-600, .dark .text-amber-700 { color: oklch(0.87 0.15 88); }
+  /* v4.9.11-sandbox-r11：amber 深层变体（安全提醒横幅 / 图标圆底 / 强调字） */
+  .dark .bg-amber-100, .dark .bg-amber-100\/80 { background-color: oklch(0.83 0.16 84 / 0.18); }
+  .dark .text-amber-800, .dark .text-amber-800\/90, .dark .text-amber-900 { color: oklch(0.9 0.13 88); }
+
+  .dark .bg-red-50 { background-color: oklch(0.63 0.24 27 / 0.15); }
+  .dark .border-red-200 { border-color: oklch(0.63 0.24 27 / 0.32); }
+  .dark .text-red-600, .dark .text-red-700 { color: oklch(0.75 0.18 25); }
+
+  .dark .bg-sky-50 { background-color: oklch(0.75 0.14 232 / 0.14); }
+  .dark .border-sky-200 { border-color: oklch(0.75 0.14 232 / 0.3); }
+  .dark .text-sky-600, .dark .text-sky-700 { color: oklch(0.8 0.12 232); }
+
+  .dark .bg-violet-50 { background-color: oklch(0.67 0.24 303 / 0.15); }
+  .dark .border-violet-200 { border-color: oklch(0.67 0.24 303 / 0.3); }
+  .dark .text-violet-600, .dark .text-violet-700 { color: oklch(0.74 0.2 303); }
+  /* v4.9.11-sandbox-r11：violet 深层变体（Playground 自定义模板 chips / SYS 徽标） */
+  .dark .bg-violet-100 { background-color: oklch(0.67 0.24 303 / 0.22); }
+  .dark .border-violet-300, .dark .border-violet-400 { border-color: oklch(0.67 0.24 303 / 0.5); }
+  .dark .text-violet-800 { color: oklch(0.8 0.17 303); }
+  .dark .hover\:bg-violet-50\/60:hover { background-color: oklch(0.67 0.24 303 / 0.18); }
+
+  .dark .bg-orange-50 { background-color: oklch(0.79 0.15 70 / 0.14); }
+  .dark .border-orange-200 { border-color: oklch(0.79 0.15 70 / 0.3); }
+  .dark .text-orange-600, .dark .text-orange-700 { color: oklch(0.83 0.14 70); }
+  /* v4.9.11-sandbox-r11：orange 深层变体 */
+  .dark .bg-orange-100 { background-color: oklch(0.79 0.15 70 / 0.18); }
+  .dark .text-orange-800, .dark .text-orange-900 { color: oklch(0.86 0.12 70); }
+
+  /* ---- v4.9.11-sandbox-r11：渐变 stop 变量（from-XX / to-XX 是独立于 bg-XX 的自定义属性工具类，
+   *      垫片此前只覆盖 background-color，渐变底（安全提醒横幅、引导卡）在深色下仍刺眼亮色 ---- */
+  .dark .from-amber-50 { --tw-gradient-from: oklch(0.83 0.16 84 / 0.14); }
+  .dark .to-orange-50 { --tw-gradient-to: oklch(0.79 0.15 70 / 0.1); }
+  .dark .from-stone-50 { --tw-gradient-from: var(--secondary); }
+  .dark .to-white { --tw-gradient-to: var(--card); }
+
+  .dark .text-rose-600, .dark .text-rose-700 { color: oklch(0.75 0.18 15); }
+
+  /* ---- v4.9.11-sandbox-r10：垫片扩展（QA 实测发现的遗漏家族） ---- */
+
+  /* lime 家族（成本估算卡 / 月度账单 / 覆盖率徽标） */
+  .dark .bg-lime-50, .dark .bg-lime-50\/40, .dark .bg-lime-50\/60, .dark .bg-lime-50\/70 { background-color: oklch(0.768 0.233 130.85 / 0.13); }
+  .dark .bg-lime-100 { background-color: oklch(0.768 0.233 130.85 / 0.18); }
+  .dark .border-lime-200, .dark .border-lime-300 { border-color: oklch(0.768 0.233 130.85 / 0.32); }
+  .dark .border-lime-400\/60 { border-color: oklch(0.768 0.233 130.85 / 0.5); }
+  .dark .text-lime-600, .dark .text-lime-700, .dark .text-lime-800 { color: oklch(0.84 0.2 130); }
+  .dark .hover\:bg-lime-50:hover { background-color: oklch(0.768 0.233 130.85 / 0.2); }
+  .dark .hover\:text-lime-800:hover { color: oklch(0.88 0.19 130); }
+
+  /* teal 家族（环比徽标 / 用量透视 / 提供商卡） */
+  .dark .bg-teal-50, .dark .bg-teal-100 { background-color: oklch(0.704 0.14 182 / 0.14); }
+  .dark .border-teal-100, .dark .border-teal-200 { border-color: oklch(0.704 0.14 182 / 0.3); }
+  .dark .text-teal-600, .dark .text-teal-700, .dark .text-teal-800, .dark .text-teal-900 { color: oklch(0.8 0.11 182); }
+  .dark .ring-teal-200, .dark .ring-teal-300 { --tw-ring-color: oklch(0.704 0.14 182 / 0.45); }
+  .dark .hover\:bg-teal-50:hover, .dark .hover\:bg-teal-100:hover { background-color: oklch(0.704 0.14 182 / 0.2); }
+  .dark .hover\:text-teal-900:hover { color: oklch(0.84 0.1 182); }
+
+  /* rose / cyan / fuchsia 零星家族 */
+  .dark .bg-rose-50, .dark .bg-rose-100 { background-color: oklch(0.645 0.246 16.439 / 0.14); }
+  .dark .border-rose-200 { border-color: oklch(0.645 0.246 16.439 / 0.32); }
+  .dark .hover\:bg-rose-50\/60:hover { background-color: oklch(0.645 0.246 16.439 / 0.2); }
+  .dark .bg-cyan-100 { background-color: oklch(0.715 0.143 215.221 / 0.15); }
+  .dark .text-cyan-600, .dark .text-cyan-700 { color: oklch(0.78 0.12 215); }
+  .dark .bg-fuchsia-50 { background-color: oklch(0.667 0.295 322.15 / 0.14); }
+  .dark .border-fuchsia-200 { border-color: oklch(0.667 0.295 322.15 / 0.3); }
+  .dark .text-fuchsia-700 { color: oklch(0.74 0.2 322); }
+
+  /* 已覆盖家族的透明度变体（Tailwind 4 中 /NN 是独立类名，基础规则不匹配） */
+  .dark .bg-emerald-50\/40, .dark .bg-emerald-50\/50, .dark .bg-emerald-50\/60 { background-color: oklch(0.696 0.17 162.48 / 0.14); }
+  .dark .bg-amber-50\/60 { background-color: oklch(0.83 0.16 84 / 0.14); }
+  .dark .bg-red-50\/60, .dark .bg-red-50\/70 { background-color: oklch(0.63 0.24 27 / 0.15); }
+  .dark .text-emerald-600\/70, .dark .text-emerald-600\/80 { color: oklch(0.79 0.14 163 / 0.8); }
+
+  /* ---- v4.9.11-sandbox-r12：白色玻璃面板透明度变体 ----
+   *  彩色卡内嵌的 bg-white/NN（日志错误全文代码区 / 抽屉内容器等）在深色下保持亮白——
+   *  即连续三轮欠账的「日志详情代码块对比度」根因；按同透明度混入语义卡色。 */
+  .dark .bg-white\/60 { background-color: color-mix(in oklab, var(--card) 60%, transparent); }
+  .dark .bg-white\/70 { background-color: color-mix(in oklab, var(--card) 70%, transparent); }
+  .dark .bg-white\/80 { background-color: color-mix(in oklab, var(--card) 80%, transparent); }
+  .dark .bg-white\/90 { background-color: color-mix(in oklab, var(--card) 90%, transparent); }
+
+  /* ---- v4.9.11-sandbox-r12：hover 家族缺口（使用频次 ≥1 的浅色 hover 态） ----
+   *  实体深色 hover（如 hover:bg-red-700）是实心按钮自身变暗，深色下语义正确，不需映射。 */
+  .dark .hover\:bg-emerald-50:hover { background-color: oklch(0.696 0.17 162.48 / 0.2); }
+  .dark .hover\:bg-emerald-100:hover { background-color: oklch(0.696 0.17 162.48 / 0.26); }
+  .dark .hover\:bg-red-50:hover { background-color: oklch(0.63 0.24 27 / 0.2); }
+  .dark .hover\:bg-red-100:hover { background-color: oklch(0.63 0.24 27 / 0.26); }
+  .dark .hover\:bg-amber-50:hover { background-color: oklch(0.83 0.16 84 / 0.2); }
+  .dark .hover\:bg-amber-100:hover { background-color: oklch(0.83 0.16 84 / 0.26); }
+
+  /* stone 透明度变体（表格斑马行 / 面板内嵌区，20+ 处） */
+  .dark .bg-stone-50\/40, .dark .bg-stone-50\/50, .dark .bg-stone-50\/60, .dark .bg-stone-50\/70, .dark .bg-stone-50\/80 { background-color: color-mix(in oklab, var(--secondary) 82%, transparent); }
+  .dark .bg-stone-100\/80 { background-color: color-mix(in oklab, var(--accent) 82%, transparent); }
+  .dark .bg-stone-200\/70 { background-color: oklch(0.34 0 0 / 0.7); }
+  .dark .border-stone-200\/60, .dark .border-stone-200\/70 { border-color: var(--border); }
+  .dark .border-stone-400\/70 { border-color: var(--input); }
+  .dark .divide-stone-100 > :not([hidden]) ~ :not([hidden]) { border-color: var(--border); }
+
+  /* 骨架屏 / 状态点 / 滚动条 thumb 用的浅灰实体色 → 可见中灰 */
+  .dark .bg-stone-300 { background-color: oklch(0.38 0 0); }
+  .dark .bg-stone-400 { background-color: oklch(0.45 0 0); }
+}
+
+/* 深色主按钮可见性修复：「bg-stone-900 + hover:bg-stone-800」组合是主操作按钮的特征
+ * （代码块/聊天气泡只有 bg-stone-900 无此 hover），仅命中按钮组合，映射为暗色主题的标准主按钮
+ * （浅色底 + 深色字 = var(--primary)/var(--primary-foreground)），修复深色下主按钮隐身问题。 */
+@layer utilities {
+  .dark .bg-stone-900.hover\:bg-stone-800 {
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+  }
+  .dark .bg-stone-900.hover\:bg-stone-800:hover {
+    background-color: color-mix(in oklab, var(--primary) 90%, var(--foreground));
+  }
+}

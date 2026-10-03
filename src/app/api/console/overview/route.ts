@@ -7,7 +7,7 @@ import { requireSessionOr401, ok } from "@/lib/gateway/console/consoleHelpers";
 import { getConfig } from "@/lib/gateway/config/configService";
 import { getProviderFleet } from "@/lib/gateway/core/fleet";
 import { VERSION } from "@/lib/gateway/config/configService";
-import { localDayKey } from "@/lib/gateway/config/requestLog";
+import { localDayKey, requestLogErrorPatterns } from "@/lib/gateway/config/requestLog";
 import { computeModelHealthData, computeSloData, normalizeWindowDays } from "@/lib/console/overviewInsights";
 import { loadPricingMap, estimateRowCost, EMPTY_COST_AGG, type CostAgg } from "@/lib/console/pricing";
 
@@ -246,6 +246,10 @@ export async function GET(request: NextRequest) {
   // 延迟分位数 / 成功率 / 流式占比 / 延迟分布直方图（RequestLog 聚合）。
   const slo = await computeSloData(24);
 
+  // v4.9.13-local-r4：近期错误模式聚合（滚动窗口内全局错误构成，与运行日志页同源同口径；
+  // 异常静默降级空数组不阻断总览主数据）
+  const errorPatterns = await requestLogErrorPatterns({}).catch(() => []);
+
   // v4.4.0：用量成本估算（ModelPricing 单价表 × UsageDaily 模型维度）——
   // 复用已拉取的 todayRows / trend7Rows（含 model 维度），仅新增一次单价表整表查询。
   // 口径见 lib/console/pricing.ts 头注释：未配置单价的模型归「未计价」，绝不估值。
@@ -419,6 +423,8 @@ export async function GET(request: NextRequest) {
     model_health: modelHealth,
     /** v4.3.2：服务质量 SLO（近 24h 种子；切窗口走独立 insights API） */
     slo,
+    /** v4.9.13-local-r4：近期错误模式聚合（滚动窗口全局；与运行日志页同源） */
+    error_patterns: errorPatterns,
     /** v4.4.0：用量成本估算（今日 + 近 7 天窗口 + 逐日趋势 + Top 成本模型；单价未配置时 cost=0 且 unpricedRequests 完整回显） */
     cost,
     last_checkin: lastCheckinLog

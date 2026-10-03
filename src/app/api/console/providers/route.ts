@@ -13,6 +13,7 @@ import {
 import { supportedProviderTypes } from "@/lib/gateway/providers";
 import { invalidateConfigChanged, NATIVE_PROVIDER_PRESETS } from "@/lib/gateway/config/configService";
 import { auditCreate, auditDelete, auditUpdate } from "@/lib/gateway/console/auditService";
+import { deleteTestResult, readTestStore } from "@/lib/gateway/console/providerTestStore";
 
 export const dynamic = "force-dynamic";
 
@@ -105,6 +106,9 @@ export async function GET(request: NextRequest) {
     };
   });
 
+  // v4.9.12-local-r12：最近一次连通性测试（SystemSetting providerTestResults；未测过的提供商 null）
+  const testStore = await readTestStore();
+
   const result = providers.map((p) => ({
     id: p.id,
     name: p.name,
@@ -129,6 +133,9 @@ export async function GET(request: NextRequest) {
     accountCount: accounts.filter((a) => a.providerId === p.id).length,
     accountEnabledCount: accounts.filter((a) => a.providerId === p.id && a.enabled).length,
     stats24h: statsMap.get(p.id) || null,
+    lastTest: testStore[p.id]?.last ?? null,
+    // v4.9.12-local-r13：测试历史（cap 10，最新在前）——编辑悬浮窗「最近测试历史」折叠区
+    testHistory: testStore[p.id]?.history ?? [],
   }));
 
   return ok({
@@ -309,6 +316,7 @@ export async function DELETE(request: NextRequest) {
     return fail(`仍有 ${refCount} 条路由候选引用该提供商，请先移除相关路由`, 409);
   }
   await db.provider.delete({ where: { id } }); // 级联删除账号
+  await deleteTestResult(id); // 顺手清理连通性测试记录（孤儿键，失败静默）
   await invalidateConfigChanged();
   await auditDelete(
     "provider",

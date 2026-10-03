@@ -2,8 +2,9 @@
 // 异步写、失败不阻断请求路径；控制台「运行日志」模块与 /admin/api 状态查询消费。
 // v3.0.6：同步写 UsageDaily 按日聚合（日 × 提供商 × 密钥维度），统计不再受滚动窗口截断。
 // v4.2.3：聚合维度增加 model（模型健康/Top 模型排行的跨滚动窗口根本解）。
-import { db } from "@/lib/db";
+import { db, dbDialect } from "@/lib/db";
 import { loadPricingMap, estimateRowCost } from "@/lib/console/pricing";
+import { categorizeError } from "@/lib/console/errorCategories";
 import type { Prisma } from "@/lib/db";
 
 export interface RequestLogEntry {
@@ -441,6 +442,12 @@ export interface RequestLogQuery {
   to?: number;
   /** v3.0.6：按命中账号筛选（accountId 精确；与 provider 组合可防跨提供商同名串扰） */
   accountId?: string;
+  /** v4.9.13-local-r9：按错误文本关键字筛选（contains；PG 方言不区分大小写；服务端钳制长度）。
+   *  错误模式下钻通道（模式芯片/总览错误卡/失败徽标 tooltip）把模式的骨架片段作为检索词传入。 */
+  errorKeyword?: string;
+  /** v4.9.13-local-r9：仅看记录了错误文本的行（error 非空；与 errorKeyword 同设时以 contains 为准 ——
+   *  contains 隐含非空，叠加属冗余但无语义冲突） */
+  hasError?: boolean;
 }
 
 /** v3.0.5：状态码筛选值 → Prisma Int 过滤器（大类 → 区间；具体码 → 精确匹配） */
@@ -453,8 +460,8 @@ function statusFilterFor(v: string): Prisma.IntNullableFilter | number | undefin
   return undefined;
 }
 
-export async function listRequestLogs(opts: RequestLogQuery = {}) {
-  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
+/** v4.9.13-local-r2：七维筛选 → Prisma where（单处维护，listRequestLogs / 状态速览 / CSV 导出共用） */
+function buildLogWhere(opts: RequestLogQuery): Prisma.RequestLogWhereInput {
   const where: Prisma.RequestLogWhereInput = {};
   if (opts.model) where.model = opts.model;
   if (opts.provider) where.providerId = opts.provider;
@@ -463,6 +470,17 @@ export async function listRequestLogs(opts: RequestLogQuery = {}) {
   else if (opts.usage === "none") where.usageExact = null;
   if (opts.apiKeyName) where.apiKeyName = opts.apiKeyName;
   if (opts.accountId) where.accountId = opts.accountId;
+  // v4.9.13-local-r9：错误文本两维 —— 关键字 contains（优先）或仅看非空行；
+  // PG 用 mode insensitive（大小写不敏感 contains）；MySQL/SQLite 方言不接受 mode 参数
+  // （MySQL 整列排序规则本就不区分大小写、SQLite LIKE 对 ASCII 不区分 —— 行为近似等价）
+  if (opts.errorKeyword) {
+    where.error =
+      dbDialect === "postgresql"
+        ? { contains: opts.errorKeyword, mode: "insensitive" }
+        : { contains: opts.errorKeyword };
+  } else if (opts.hasError) {
+    where.error = { not: null };
+  }
   if (opts.status) {
     const f = statusFilterFor(opts.status);
     if (f !== undefined) where.status = f;
@@ -474,6 +492,12 @@ export async function listRequestLogs(opts: RequestLogQuery = {}) {
     if (Number.isFinite(opts.to) && (opts.to as number) > 0) range.lt = new Date(opts.to as number);
     if (range.gte || range.lt) where.createdAt = range;
   }
+  return where;
+}
+
+export async function listRequestLogs(opts: RequestLogQuery = {}) {
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
+  const where = buildLogWhere(opts);
   const [items, total] = await Promise.all([
     db.requestLog.findMany({
       where,
@@ -484,6 +508,103 @@ export async function listRequestLogs(opts: RequestLogQuery = {}) {
     db.requestLog.count({ where }),
   ]);
   return { items, total };
+}
+
+/**
+ * v4.9.13-local-r2：按状态码分组的请求计数（运行日志「状态速览条」数据源）。
+ * 与 listRequestLogs 同构的筛选语义，但忽略 status 维度 —— 速览条展示的是当前筛选
+ * （除状态外）下的全集分布，点击任一分组芯片即切换状态筛选。
+ */
+export async function requestLogStatusBreakdown(
+  opts: RequestLogQuery = {}
+): Promise<Array<{ status: number | null; count: number }>> {
+  const { status: _statusFilter, ...rest } = opts;
+  const where = buildLogWhere(rest);
+  const rows = await db.requestLog.groupBy({
+    by: ["status"],
+    where,
+    _count: { _all: true },
+  });
+  return rows.map((r) => ({ status: r.status, count: r._count._all }));
+}
+
+/**
+ * v4.9.13-local-r3：错误模式聚合（运行日志「错误模式速览」数据源）。
+ * 与 listRequestLogs 同构筛选语义但忽略 status 维度（展示当前筛选除状态外的全集错误构成），
+ * 仅取 error 非空的行（滚动窗口内最近 ERROR_SCAN_LIMIT 条），在 JS 侧做模式归一化分组：
+ * - 归一化规则：引号串 → "…"、连续数字 → #、连续空白折叠 —— 同类错误只出现一次；
+ * - 分类规则：categorizeError（共享模块 errorCategories，与前端展开区徽标同口径）；
+ * - 每组保留 count、首个原始示例（example，供 tooltip 直观查看）、出现过的状态码集合（statuses）。
+ * 返回按 count 降序的 Top PATTERN_LIMIT 组。
+ */
+export interface RequestLogErrorPattern {
+  /** 归一化后的模式文本（已截断至 120 字符） */
+  pattern: string;
+  /** 错误大类（中文短标签） */
+  category: string;
+  /** 命中该模式的行数 */
+  count: number;
+  /** 该组首个原始错误全文（tooltip 展示用） */
+  example: string;
+  /** 该组出现过的状态码去重升序列表 */
+  statuses: number[];
+}
+
+const ERROR_SCAN_LIMIT = 2000;
+const PATTERN_LIMIT = 6;
+
+/** v4.9.13-local-r3：错误文本 → 模式键（引号串/数字/密钥形态归一，截断 120 字符） */
+function normalizeErrorPattern(msg: string): string {
+  const normalized = msg
+    .replace(/"[^"]{0,120}"/g, '"…"')
+    .replace(/'[^']{0,120}'/g, "'…'")
+    .replace(/sk-uag-[A-Za-z0-9]+/gi, "sk-uag-…")
+    .replace(/\d+/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.length > 120 ? `${normalized.slice(0, 120)}…` : normalized;
+}
+
+export async function requestLogErrorPatterns(
+  opts: RequestLogQuery = {},
+  /** v4.9.13-local-r8：respectStatus=true 时保留 status 维度（CSV 导出摘要需要与导出集合同口径）；默认忽略 status（速览条语义：当前筛选除状态外的全集错误构成） */
+  o?: { respectStatus?: boolean }
+): Promise<RequestLogErrorPattern[]> {
+  const { status: _statusFilter, ...rest } = opts;
+  const where = buildLogWhere(o?.respectStatus ? opts : rest);
+  // error 非空兜底：仅在调用方未指定 error 维度过滤时设置 —— v4.9.13-local-r9 修复：
+  // 此前无条件覆盖会把 buildLogWhere 写入的 errorKeyword contains 筛选静默丢掉
+  // （聚合结果与列表口径漂移：列表已按关键字收窄、模式条仍显示全集）。
+  if (!where.error) where.error = { not: null };
+  const rows = await db.requestLog.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: ERROR_SCAN_LIMIT,
+    select: { error: true, status: true },
+  });
+  const groups = new Map<string, RequestLogErrorPattern>();
+  for (const r of rows) {
+    const raw = (r.error as string) || "";
+    if (!raw) continue;
+    const key = normalizeErrorPattern(raw);
+    const b = groups.get(key);
+    if (b) {
+      b.count += 1;
+      if (r.status != null && !b.statuses.includes(r.status)) b.statuses.push(r.status);
+    } else {
+      groups.set(key, {
+        pattern: key,
+        category: categorizeError(raw),
+        count: 1,
+        example: raw.length > 400 ? `${raw.slice(0, 400)}…` : raw,
+        statuses: r.status != null ? [r.status] : [],
+      });
+    }
+  }
+  return Array.from(groups.values())
+    .map((g) => ({ ...g, statuses: [...g.statuses].sort((a, b) => a - b) }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, PATTERN_LIMIT);
 }
 
 /** v3.0.4：日志中出现过的前提商去重清单（按调用次数降序）—— 运行日志筛选下拉数据源。 */
@@ -552,6 +673,9 @@ export const LOG_EXPORT_CAP = 5000;
  * v3.0.8：按七维筛选导出全部匹配日志为 CSV 文本。
  * 复用 listRequestLogs 的 where 构建逻辑（单处维护筛选语义），
  * 覆盖 take 上限拉全量（上限 LOG_EXPORT_CAP，与滚动窗口同量级）。
+ * v4.9.13-local-r8：文件头前置「# 注释区」摘要（导出时间/筛选/匹配行数/错误模式 Top 统计）——
+ * 排障工单友好：导出即带上下文，粘贴给别人无需口头补充筛选条件；Excel 双击打开注释区
+ * 呈现为首列文本行不影响数据区解析（RFC 4180 未禁止额外行，主流工具兼容）。
  */
 export async function exportRequestLogsCsv(opts: RequestLogQuery): Promise<{ csv: string; rows: number; truncated: boolean }> {
   type LogRow = Awaited<ReturnType<typeof listRequestLogs>>["items"][number];
@@ -567,13 +691,53 @@ export async function exportRequestLogsCsv(opts: RequestLogQuery): Promise<{ csv
   }
   const truncated = total > LOG_EXPORT_CAP;
 
+  // ---- v4.9.13-local-r8：摘要注释区（筛选语义与导出行严格同源 —— 同一个 opts） ----
+  // 错误模式与导出集合同口径：respectStatus=true（若导出筛选了 2xx，摘要如实显示无错误）；
+  // ERROR_SCAN_LIMIT 样本口径在行内注明，防止误解为全量精确计数。
+  const errorPatterns = await requestLogErrorPatterns(opts, { respectStatus: true }).catch(() => []);
+  const usageLabel =
+    opts.usage === "exact" ? "用量=精确(上游usage)" : opts.usage === "estimated" ? "用量=估算(字符折算)" : opts.usage === "none" ? "用量=未记录" : "";
+  const statusLabel = opts.status ? `状态=${opts.status}` : "";
+  const timeLabel =
+    Number.isFinite(opts.from) || Number.isFinite(opts.to)
+      ? `时间=${Number.isFinite(opts.from) ? new Date(opts.from as number).toISOString() : "滚动窗口起点"} ~ ${Number.isFinite(opts.to) ? new Date(opts.to as number).toISOString() : "导出时刻"}`
+      : "";
+  const filterDesc =
+    [
+      opts.model ? `模型=${opts.model}` : "",
+      opts.provider ? `提供商=${opts.provider}` : "",
+      opts.accountId ? `账号=${opts.accountId}` : "",
+      opts.apiKeyName ? `密钥=${opts.apiKeyName}` : "",
+      statusLabel,
+      usageLabel,
+      // v4.9.13-local-r9：新增两维进摘要（与导出行严格同源 —— 同一个 opts 走 buildLogWhere）
+      opts.errorKeyword ? `错误关键字=${opts.errorKeyword}` : "",
+      opts.hasError && !opts.errorKeyword ? "仅错误行" : "",
+      timeLabel,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "全部日志（无筛选）";
+  const patternDesc =
+    errorPatterns.length > 0
+      ? errorPatterns.map((p) => `${p.category}：${p.pattern} ×${p.count}（${p.statuses.join("/") || "无状态码"}）`).join("；")
+      : "无错误记录";
+  const summaryLines = [
+    "# Universal AI Gateway 运行日志导出",
+    `# 导出时间: ${new Date().toISOString()}（UTC）`,
+    `# 筛选: ${filterDesc}`,
+    `# 匹配: ${total} 行${truncated ? `（超过上限 ${LOG_EXPORT_CAP} 已截断，建议收窄筛选分批导出）` : "（未截断）"}`,
+    `# 错误模式（Top ${errorPatterns.length}，基于最近 ${ERROR_SCAN_LIMIT} 条错误样本归一化聚合）: ${patternDesc}`,
+    "# 列说明: 时间=UTC ISO8601 · 用量来源/流式=枚举中文 · 估算成本=模型单价表口径（非计费）",
+    "", // 空行分隔摘要区与数据区
+  ];
+
   const header = [
     "时间", "模型", "协议", "提供商", "账号", "调用方密钥", "状态码", "耗时(ms)",
     "流式", "输入tokens", "输出tokens", "缓存命中tokens", "用量来源", "估算成本$", "错误",
   ];
   // v4.4.0：行级成本估算（ModelPricing × tokens；未配置单价 → 空串）
   const pricing = await loadPricingMap();
-  const lines = [header.map(csvCell).join(",")];
+  const lines = [...summaryLines, header.map(csvCell).join(",")];
   for (const r of rows) {
     lines.push([
       r.createdAt.toISOString(),

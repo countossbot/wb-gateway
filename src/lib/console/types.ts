@@ -7,6 +7,8 @@ export interface SessionInfo {
   username: string | null;
   /** 当前生效认证通道（v3.0.2：控制台顶栏徽标） */
   authVia?: "cookie" | "bearer" | null;
+  /** v4.9.13-local：管理员口令仍为公开默认值（控制台安全提醒横幅） */
+  defaultPasswordActive?: boolean;
 }
 
 export interface SetupResult {
@@ -91,6 +93,8 @@ export interface OverviewData {
   model_health?: ModelHealthData;
   /** v4.3.2：服务质量 SLO（近 24h 种子；切窗口走独立 insights API） */
   slo?: SloData;
+  /** v4.9.13-local-r4：近期错误模式聚合（滚动窗口全局错误构成；与运行日志页同源同口径） */
+  error_patterns?: Array<{ pattern: string; category: string; count: number; example: string; statuses: number[] }>;
   /** v4.4.0：用量成本估算（今日 + 近 7 天窗口 + 逐日趋势 + Top 成本模型 + 覆盖率） */
   cost?: CostData;
   last_checkin: {
@@ -349,6 +353,9 @@ export interface OverviewInsightsData {
   top_providers_window_days?: number;
   /** v4.3.2：服务质量 SLO（窗口回显 slo.windowHours） */
   slo?: SloData;
+  /** v4.9.13-local-r5：近期错误模式（窗口回显 error_patterns_hours，24h/7d） */
+  error_patterns?: Array<{ pattern: string; category: string; count: number; example: string; statuses: number[] }>;
+  error_patterns_hours?: number;
 }
 
 // ---- 账号管理 ----
@@ -430,6 +437,10 @@ export interface ConsoleProvider {
   accountEnabledCount: number;
   /** v3.0.3：近 24h 调用统计（无调用时 null） */
   stats24h?: ProviderStats24h | null;
+  /** v4.9.12-local-r12：最近一次连通性测试结果（SystemSetting providerTestResults 持久化；未测过 null） */
+  lastTest?: ProviderTestResult | null;
+  /** v4.9.12-local-r13：测试历史（cap 10，最新在前；编辑悬浮窗「最近测试历史」折叠区数据源） */
+  testHistory?: ProviderTestResult[];
 }
 
 export interface ProviderStats24h {
@@ -528,16 +539,46 @@ export interface RouteRow {
   candidates: RouteCandidateRow[];
   /** v4.6.0：路由级系统提示词（null = 未配置） */
   prompt: string | null;
+  /** v4.9.13-local-r16：最近一次快测结果（GET 回读持久化 store；会话内新结果优先展示） */
+  lastTest?: RouteTestRecord;
+}
+
+/** v4.9.13-local-r16：路由快测持久化记录（批测/单测共用；SystemSetting routeTestResults 键） */
+export interface RouteTestRecord {
+  ok: boolean;
+  /** HTTP 状态码；网络错误/未发送为 null */
+  status: number | null;
+  durationMs: number;
+  /** 响应体上报的上游模型（可能经上游重写） */
+  upstreamModel: string | null;
+  /** 失败原因摘要 / 模型身份改写提示 */
+  error?: string;
+  /** 本轮使用的协议 */
+  protocol: "openai" | "anthropic";
+  /** 测试时间（ISO） */
+  testedAt: string;
 }
 
 export interface RoutesData {
   routes: RouteRow[];
+  /** v4.9.13-local：运行时回填生效但未落库的代码默认路由（只读展示；「转为自定义」后落入 routes） */
+  implicitRoutes?: ImplicitRouteRow[];
   providers: Array<{ id: string; name: string; type: string; enabled: boolean }>;
   /** v4.9.12-local-r4：近 24h 每路由调用统计（键 = 路由模型名；零流量路由不出现在键集中） */
   stats24h?: Record<string, RouteStat24h>;
   /** v4.9.12-local-r5：近 24h 按最终命中提供商聚合（键 = providerId；用于候选芯片 ×N 计数。
    *  RequestLog 仅记录最终服务的 provider，failover 中间失败不计入候选命中） */
   providerStats24h?: Record<string, { requests: number; errors: number; avgDurationMs: number | null }>;
+}
+
+/** v4.9.13-local：隐式代码默认路由（getConfig() 运行时回填、未落 DB ModelRoute）。
+ *  与 RouteRow 同形但无 id（未落库），候选无 id；enabled 恒为 true（backfill 只增不改）。 */
+export interface ImplicitRouteRow {
+  model: string;
+  prompt: string | null;
+  candidates: Array<{ providerId: string; model: string; enabled: boolean; sortOrder: number }>;
+  /** v4.9.13-local-r16：最近一次快测结果（同 RouteRow.lastTest） */
+  lastTest?: RouteTestRecord;
 }
 
 /** v4.9.12-local-r4：路由 24h 调用统计（RequestLog 按路由模型名聚合） */
@@ -639,6 +680,12 @@ export interface LogsData {
   accounts?: Array<{ providerId: string; accountId: string; label: string; requests: number }>;
   /** v3.9.0：日志中出现过的对外模型去重清单（按调用次数降序；模型筛选 datalist 数据源） */
   models?: string[];
+  /** v4.9.13-local-r2：按状态码分组的请求计数（当前筛选除状态维度外的全集分布；状态速览条数据源） */
+  statusBreakdown?: Array<{ status: number | null; count: number }>;
+  /** v4.9.13-local-r3：错误模式归一化聚合 Top 6（当前筛选除状态维度外的全集错误构成；错误模式速览条数据源） */
+  errorPatterns?: Array<{ pattern: string; category: string; count: number; example: string; statuses: number[] }>;
+  /** v4.9.13-local-r6：错误模式聚合的统计窗口（小时）：24 / 168；缺省 undefined = 全部（跟随列表时间筛选） */
+  errorPatternsHours?: 24 | 168;
 }
 
 // ---- 设置 ----
@@ -713,6 +760,26 @@ export interface ProxyTestRecord {
   mode: "draft" | "direct" | "global";
   pool?: Array<{ masked: string; ok: boolean; elapsedMs: number; exitIp?: string; error?: string }>;
   at: string;
+}
+
+/** v4.9.12-local-r11：提供商连通性实测结果（/api/console/providers/test） */
+export interface ProviderTestResult {
+  ok: boolean;
+  /** HTTP 状态码（未建立连接时为 null） */
+  status: number | null;
+  elapsedMs: number;
+  /** 实际探测的 URL（不含凭据） */
+  target: string;
+  type: string;
+  /** 凭据来源：account-pool（账号池首密钥）/ provider-key / draft / none */
+  authSource: "account-pool" | "provider-key" | "draft" | "none";
+  /** 是否真实校验了凭据（workbuddy 仅测可达性 = false） */
+  authChecked: boolean;
+  /** 模型目录条数（解析失败或无目录语义时为 null） */
+  modelsCount: number | null;
+  sampleModels: string[];
+  error: string | null;
+  testedAt: string;
 }
 
 export interface MigrateReport {

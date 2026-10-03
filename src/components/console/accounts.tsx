@@ -54,6 +54,7 @@ import {
   ClearCooldownButton,
   EmptyState,
   ErrorAlert,
+  FailureBadge,
   HealthBadge,
   LastUsedCell,
   LoadingBlock,
@@ -147,7 +148,15 @@ function BalanceBadge({
   );
 }
 
-export function AccountsModule({ onViewLogs }: { onViewLogs?: (target: { providerId: string; accountId: string }) => void } = {}) {
+export function AccountsModule({
+  onViewLogs,
+  onDrillErrors,
+}: {
+  onViewLogs?: (target: { providerId: string; accountId: string }) => void;
+  /** v4.9.13-local-r5：健康面板错误徽标点击下钻（该账号 + 5xx 状态大类组合筛选）；冷却徽标点击复用 onViewLogs；
+   *  v4.9.13-local-r9：第二参数 errorKeyword —— tooltip 模式行点击携骨架片段时改走关键字下钻（精准命中该模式组，状态清回） */
+  onDrillErrors?: (target: { providerId: string; accountId: string }, errorKeyword?: string) => void;
+} = {}) {
   const [data, setData] = React.useState<AccountsData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
@@ -613,7 +622,13 @@ export function AccountsModule({ onViewLogs }: { onViewLogs?: (target: { provide
                                 <span className="font-medium text-stone-800">{a.name}</span>
                                 <span className="flex items-center gap-2">
                                   <code className="text-[11px] text-stone-400">{a.id}</code>
-                                  <CooldownDot remaining={cd} streak={a.cooldownStreak} reason={a.cooldownReason} />
+                                  <CooldownDot
+                                    remaining={cd}
+                                    streak={a.cooldownStreak}
+                                    reason={a.cooldownReason}
+                                    onClick={onViewLogs ? () => onViewLogs({ providerId: g.provider.id, accountId: a.id }) : undefined}
+                                    drillHint="点击查看该账号请求日志（定位错误上下文）"
+                                  />
                                   {/* v3.4.0：冷却中账号一键清除（复用共享组件；操作后 notice 反馈 + 刷新列表） */}
                                   {cd && (
                                     <ClearCooldownButton
@@ -661,23 +676,37 @@ export function AccountsModule({ onViewLogs }: { onViewLogs?: (target: { provide
                               </div>
                             </TableCell>
                             <TableCell className="hidden xl:table-cell">
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <HealthBadge
-                                    stats24h={a.stats24h}
-                                    todayTokens={null}
-                                    onClick={onViewLogs ? () => onViewLogs({ providerId: g.provider.id, accountId: a.id }) : undefined}
-                                    ariaLabel={`查看账号 ${a.name} 近 24h 请求日志`}
-                                    tooltipTitle={`近 24 小时命中该账号的请求：${a.stats24h?.requests ?? 0} 次，成功率 ${a.stats24h?.successRate ?? 0}%`}
+                              <div className="flex flex-col items-start gap-1">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <HealthBadge
+                                      stats24h={a.stats24h}
+                                      todayTokens={null}
+                                      onClick={onViewLogs ? () => onViewLogs({ providerId: g.provider.id, accountId: a.id }) : undefined}
+                                      ariaLabel={`查看账号 ${a.name} 近 24h 请求日志`}
+                                      tooltipTitle={`近 24 小时命中该账号的请求：${a.stats24h?.requests ?? 0} 次，成功率 ${a.stats24h?.successRate ?? 0}%`}
+                                    />
+                                  </TooltipTrigger>
+                                  {(a.stats24h?.requests ?? 0) > 0 && (
+                                    <TooltipContent>
+                                      近 24 小时命中该账号的请求：{a.stats24h!.requests} 次，成功率 {a.stats24h!.successRate}%，失败 {a.stats24h?.failures ?? 0} 次
+                                      {onViewLogs ? " · 点击查看该账号的请求日志 →" : ""}
+                                    </TooltipContent>
+                                  )}
+                                </Tooltip>
+                                {/* v4.9.13-local-r5：24h 失败徽标 —— 仅失败 >0 时渲染（零失败不制造噪音）； */}
+                                {/* v4.9.13-local-r8：升级共享 FailureBadge —— 悬停 tooltip 内联拉取该账号 24h 错误模式分布（免跳转即知"失败的是什么错"），点击仍下钻 5xx； */}
+                                {/* v4.9.13-local-r9：tooltip 模式行可点击 —— 按该模式的错误关键字下钻（账号 × 关键字组合，比 5xx 更精准） */}
+                                {(a.stats24h?.failures ?? 0) > 0 && (
+                                  <FailureBadge
+                                    count={a.stats24h!.failures ?? 0}
+                                    ariaLabel={`查看账号 ${a.name} 近 24h 失败请求（按 5xx 过滤）`}
+                                    onClick={onDrillErrors ? () => onDrillErrors({ providerId: g.provider.id, accountId: a.id }) : undefined}
+                                    patternQuery={{ account: a.id, provider: g.provider.id }}
+                                    onPickPattern={onDrillErrors ? (kw) => onDrillErrors({ providerId: g.provider.id, accountId: a.id }, kw) : undefined}
                                   />
-                                </TooltipTrigger>
-                                {(a.stats24h?.requests ?? 0) > 0 && (
-                                  <TooltipContent>
-                                    近 24 小时命中该账号的请求：{a.stats24h!.requests} 次，成功率 {a.stats24h!.successRate}%，失败 {a.stats24h?.failures ?? 0} 次
-                                    {onViewLogs ? " · 点击查看该账号的请求日志 →" : ""}
-                                  </TooltipContent>
                                 )}
-                              </Tooltip>
+                              </div>
                             </TableCell>
                             {/* v3.8.0：最后调用（与密钥页同款共享组件；账号维度滚动窗口 MAX(createdAt)） */}
                             <TableCell className="hidden lg:table-cell">

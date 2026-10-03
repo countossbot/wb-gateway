@@ -9,7 +9,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { apiPost, errMessage } from "@/lib/console/api";
+import { apiGet, apiPost, errMessage } from "@/lib/console/api";
+import { ERROR_CATEGORY_TONE, patternSearchKeyword } from "@/lib/console/errorCategories";
 import { absoluteTime, fmtCompact, fmtNum, relativeTime } from "@/lib/console/format";
 import type { ProviderType } from "@/lib/console/types";
 
@@ -334,32 +335,59 @@ export function CooldownDot({
   remaining,
   streak,
   reason,
+  onClick,
+  drillHint,
 }: {
   remaining: string | null;
   streak?: number;
   /** v3.2.2：冷却原因摘要（最近一次进入冷却的上游报错），tooltip 展示 */
   reason?: string | null;
+  /** v4.9.13-local-r5：可选点击下钻（点击冷却徽标 → 该账号请求日志，定位错误上下文） */
+  onClick?: () => void;
+  /** v4.9.13-local-r5：tooltip 中的下钻提示文案（不传则无下钻提示） */
+  drillHint?: string;
 }) {
   if (!remaining) return null;
   const title = [
     streak ? `连续失败 ${streak} 次，指数退避冷却中` : "冷却中",
     reason ? `原因：${reason}` : null,
+    drillHint && onClick ? drillHint : null,
   ]
     .filter(Boolean)
     .join("\n");
+  const inner = (
+    <span
+      className={
+        onClick
+          ? "inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400"
+          : "inline-flex cursor-help items-center gap-1.5 rounded-md bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600"
+      }
+      {...(onClick
+        ? {
+            role: "button",
+            tabIndex: 0,
+            onClick,
+            onKeyDown: (e: React.KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            },
+          }
+        : {})}
+    >
+      <span className="relative flex size-2">
+        <span className="absolute inline-flex size-full animate-ping rounded-full bg-red-400 opacity-60" />
+        <span className="relative inline-flex size-2 rounded-full bg-red-500" />
+      </span>
+      冷却 {remaining}
+      {streak ? `（连败 ${streak}）` : ""}
+    </span>
+  );
   return (
     <TooltipProvider delayDuration={150}>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="inline-flex cursor-help items-center gap-1.5 rounded-md bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600">
-            <span className="relative flex size-2">
-              <span className="absolute inline-flex size-full animate-ping rounded-full bg-red-400 opacity-60" />
-              <span className="relative inline-flex size-2 rounded-full bg-red-500" />
-            </span>
-            冷却 {remaining}
-            {streak ? `（连败 ${streak}）` : ""}
-          </span>
-        </TooltipTrigger>
+        <TooltipTrigger asChild>{inner}</TooltipTrigger>
         <TooltipContent className="max-w-64 whitespace-pre-wrap text-xs">{title}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -765,5 +793,179 @@ export function HealthBadge({
       </span>
       {tooltipDetail ? <span className="sr-only">{tooltipDetail}</span> : null}
     </button>
+  );
+}
+
+// ---- v4.9.13-local-r8：失败徽标（密钥页/账号页共用；悬停即见该维度 24h 错误模式分布，免跳转） ----
+// 升级路径：r5/r6 的失败徽标只有原生 title（"失败 N 次 · 点击下钻"），要知道"失败的是什么错"
+// 必须跳日志页；本组件在 Tooltip 内联拉取 /api/console/logs/error-patterns（轻量端点，
+// 只查 error 非空的行），分类徽标 + 归一化模式 + ×count 一眼可读 —— 与日志页/总览卡同口径。
+export interface FailureBadgeQuery {
+  /** 按调用方密钥过滤（密钥页） */
+  key?: string;
+  /** 按命中账号过滤（账号页；与 provider 组合防跨提供商同名串扰） */
+  account?: string;
+  provider?: string;
+}
+
+interface EpPatternRow {
+  pattern: string;
+  category: string;
+  count: number;
+  statuses: number[];
+}
+
+/** 悬停缓存（60s TTL）：悬停是高频短交互，同一维度短时间内反复悬停不重复打 API */
+const epBadgeCache = new Map<string, { at: number; patterns: EpPatternRow[] }>();
+const EP_BADGE_CACHE_TTL = 60_000;
+/** Tooltip 内最多展示的模式组数（服务端返回 Top 6，徽标 tooltip 取前 4 防溢出） */
+const EP_BADGE_MAX_ROWS = 4;
+
+export function FailureBadge({
+  count,
+  ariaLabel,
+  onClick,
+  patternQuery,
+  onPickPattern,
+  drillHint = "点击按「5xx 服务端错误」下钻失败请求",
+}: {
+  /** 近 24 小时失败次数（调用方仅在 >0 时渲染本组件） */
+  count: number;
+  ariaLabel: string;
+  /** 点击下钻 handler（跳转通道未接线时只读展示） */
+  onClick?: () => void;
+  /** 错误模式聚合维度（不传则退化为原生 title，向后兼容） */
+  patternQuery?: FailureBadgeQuery;
+  /** v4.9.13-local-r9：tooltip 模式行点击下钻 —— 把该模式的骨架片段作为 error 关键字检索词
+   *  交给调用方（密钥/账号页跳转日志页时保留维度 × 关键字组合，比徽标自身的 5xx 下钻更精准）。
+   *  未接线时模式行只读展示（向后兼容） */
+  onPickPattern?: (keyword: string) => void;
+  drillHint?: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  // null = 尚未拉取（首次悬停触发）；空数组 = 已拉取但窗口内无错误文本
+  const [patterns, setPatterns] = React.useState<EpPatternRow[] | null>(null);
+  const [failed, setFailed] = React.useState(false);
+  // 缓存键（数值元组序列化，稳定身份供 useCallback 依赖）；查询对象本身经 ref 读取
+  // （每次渲染都是新字面量，直接进依赖会令 ensurePatterns 身份变化）
+  const cacheKey = patternQuery
+    ? JSON.stringify([patternQuery.key ?? "", patternQuery.provider ?? "", patternQuery.account ?? ""])
+    : "";
+  const queryRef = React.useRef(patternQuery);
+
+  const ensurePatterns = React.useCallback(async () => {
+    const q = queryRef.current;
+    if (!q) return;
+    const cached = epBadgeCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < EP_BADGE_CACHE_TTL) {
+      setPatterns(cached.patterns);
+      setFailed(false);
+      return;
+    }
+    try {
+      const params = new URLSearchParams();
+      if (q.key) params.set("key", q.key);
+      if (q.provider) params.set("provider", q.provider);
+      if (q.account) params.set("account", q.account);
+      params.set("hours", "24");
+      const d = await apiGet<{ patterns: EpPatternRow[] }>(`/api/console/logs/error-patterns?${params.toString()}`);
+      epBadgeCache.set(cacheKey, { at: Date.now(), patterns: d.patterns });
+      setPatterns(d.patterns);
+      setFailed(false);
+    } catch {
+      // 拉取失败不缓存：下次悬停自然重试；tooltip 内如实提示
+      setFailed(true);
+    }
+  }, [cacheKey]);
+
+  const button = (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!onClick}
+      aria-label={ariaLabel}
+      title={
+        patternQuery
+          ? undefined // 富 tooltip 接管提示职责，避免原生 title 与 Radix tooltip 双层叠显
+          : `近 24 小时失败 ${count} 次${onClick ? ` · ${drillHint}` : "（跳转通道未接线）"}`
+      }
+      className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-px text-[10px] font-medium text-red-700 transition-colors hover:border-red-300 hover:bg-red-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400 disabled:cursor-default"
+    >
+      <span className="size-1.5 rounded-full bg-red-500" aria-hidden />
+      失败 {count}
+      {onClick ? <span className="text-red-400">→</span> : null}
+    </button>
+  );
+
+  if (!patternQuery) return button;
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip
+        open={open}
+        onOpenChange={(o) => {
+          setOpen(o);
+          // 首次悬停（或上次失败后重试）才发起拉取；成功后 60s 内走缓存
+          if (o && (patterns === null || failed)) void ensurePatterns();
+        }}
+      >
+        <TooltipTrigger asChild>{button}</TooltipTrigger>
+        <TooltipContent side="top" className="max-w-80 text-left leading-relaxed">
+          <p className="text-xs font-medium">
+            近 24 小时失败 {count} 次
+            {onClick ? <span className="text-muted-foreground"> · {drillHint}</span> : null}
+          </p>
+          {failed ? (
+            <p className="mt-1 text-[10px] text-stone-500">错误模式加载失败（稍后再次悬停重试）</p>
+          ) : patterns === null ? (
+            <p className="mt-1 text-[10px] text-stone-500">正在聚合该维度的错误模式…</p>
+          ) : patterns.length === 0 ? (
+            <p className="mt-1 text-[10px] text-stone-500">窗口内的失败请求未记录错误文本（或已被滚动窗口淘汰）</p>
+          ) : (
+            <div className="mt-1.5 space-y-1">
+              {patterns.slice(0, EP_BADGE_MAX_ROWS).map((p, i) => {
+                // v4.9.13-local-r9：模式行可点击下钻 —— 骨架片段作 error 关键字（精准命中该模式组）
+                const kw = patternSearchKeyword(p.pattern);
+                const pickable = !!onPickPattern && kw !== null;
+                const kwShort = kw !== null && kw.length > 32 ? `${kw.slice(0, 32)}…` : kw;
+                const row = (
+                  <>
+                    <Badge variant="outline" className={`shrink-0 px-1 py-0 text-[9px] leading-4 ${ERROR_CATEGORY_TONE[p.category] ?? ""}`}>
+                      {p.category}
+                    </Badge>
+                    <span className={`min-w-0 flex-1 break-all text-[10px] ${pickable ? "text-stone-700" : "text-stone-600"}`}>{p.pattern}</span>
+                    <span className="shrink-0 text-[10px] font-medium tabular-nums text-red-600">
+                      ×{p.count}
+                      {p.statuses.length > 0 ? <span className="text-stone-400">（{p.statuses.join("/")}）</span> : null}
+                    </span>
+                  </>
+                );
+                return pickable ? (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => {
+                      setOpen(false); // 关闭 tooltip 即将跳转（模块切换后自然卸载，此处提前收起防闪烁）
+                      onPickPattern!(kw!);
+                    }}
+                    title={`点击按错误关键字「${kwShort}」查看该模式的请求日志（contains 命中整组）`}
+                    className="flex w-full items-start gap-1.5 rounded px-0.5 py-px text-left transition-colors hover:bg-stone-100/80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400"
+                  >
+                    {row}
+                  </button>
+                ) : (
+                  <div key={i} className="flex items-start gap-1.5">
+                    {row}
+                  </div>
+                );
+              })}
+              <p className="pt-0.5 text-[9px] text-stone-400">
+                统计口径：近 24h · 同类错误归一化 · 悬停查看{onPickPattern ? "，点击模式行按错误关键字下钻" : "，点击徽标下钻"}
+              </p>
+            </div>
+          )}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

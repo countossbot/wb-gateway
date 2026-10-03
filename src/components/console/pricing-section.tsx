@@ -13,6 +13,7 @@ import {
   Loader2,
   Plus,
   Save,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,107 @@ interface DraftRow {
 }
 
 const NUM_RE = /^\d*\.?\d*$/; // 输入态宽松校验（保存时服务端严格校验）
+
+/**
+ * 常见模型公开列表价参考表（$/1M tokens；v4.9.11-sandbox 新增）。
+ * 用途：「参考价预填」一键初始化单价表 —— 消除空表冷启动摩擦；价格可修改，仅估算展示不参与计费。
+ * 口径：以各厂商公开 API 定价为准（缓存价为缓存命中读价；0 = 免费/不计价档）。
+ */
+const REFERENCE_PRICES: Record<string, { input: number; output: number; cached: number }> = {
+  // ---- GLM（智谱 / z.ai）----
+  "glm-4.6": { input: 0.6, output: 2.2, cached: 0.11 },
+  "glm-4.5": { input: 0.6, output: 2.2, cached: 0.11 },
+  "glm-4.5-air": { input: 0.2, output: 0.66, cached: 0.04 },
+  "glm-4.5-flash": { input: 0, output: 0, cached: 0 },
+  "glm-4-flash": { input: 0, output: 0, cached: 0 },
+  "glm-4-plus": { input: 7, output: 7, cached: 0 },
+  "glm-4-long": { input: 1, output: 7, cached: 0 },
+  // ---- DeepSeek ----
+  "deepseek-chat": { input: 0.27, output: 1.1, cached: 0.07 },
+  "deepseek-reasoner": { input: 0.55, output: 2.19, cached: 0.14 },
+  "deepseek-v4.1": { input: 0.27, output: 1.1, cached: 0.07 },
+  "deepseek-v4.1-flash": { input: 0.27, output: 1.1, cached: 0.07 },
+  // ---- Claude（Anthropic）----
+  "claude-opus-4.6": { input: 15, output: 75, cached: 1.5 },
+  "claude-opus-4.1": { input: 15, output: 75, cached: 1.5 },
+  "claude-sonnet-4.6": { input: 3, output: 15, cached: 0.3 },
+  "claude-sonnet-4.5": { input: 3, output: 15, cached: 0.3 },
+  "claude-haiku-4.5": { input: 1, output: 5, cached: 0.1 },
+  // ---- GPT（OpenAI）----
+  "gpt-5.2": { input: 1.25, output: 10, cached: 0.125 },
+  "gpt-5.1": { input: 1.25, output: 10, cached: 0.125 },
+  "gpt-5": { input: 1.25, output: 10, cached: 0.125 },
+  "gpt-5-mini": { input: 0.25, output: 2, cached: 0.025 },
+  "gpt-5-nano": { input: 0.05, output: 0.4, cached: 0.005 },
+  "gpt-4.1": { input: 2, output: 8, cached: 0.5 },
+  "gpt-4.1-mini": { input: 0.4, output: 1.6, cached: 0.1 },
+  "gpt-4.1-nano": { input: 0.1, output: 0.4, cached: 0.025 },
+  "gpt-4o": { input: 2.5, output: 10, cached: 1.25 },
+  "gpt-4o-mini": { input: 0.15, output: 0.6, cached: 0.075 },
+  // ---- Qwen（阿里云）----
+  "qwen-max": { input: 1.6, output: 6.4, cached: 0.4 },
+  "qwen-plus": { input: 0.4, output: 1.2, cached: 0.1 },
+  "qwen-flash": { input: 0.05, output: 0.2, cached: 0.01 },
+  "qwen-turbo": { input: 0.05, output: 0.2, cached: 0.01 },
+  // ---- Kimi / Gemini ----
+  "kimi-k2": { input: 0.6, output: 2.5, cached: 0.1 },
+  "kimi-k2-0905": { input: 0.6, output: 2.5, cached: 0.1 },
+  "gemini-2.5-pro": { input: 1.25, output: 10, cached: 0.31 },
+  "gemini-2.5-flash": { input: 0.3, output: 2.5, cached: 0.075 },
+  "gemini-2.0-flash": { input: 0.1, output: 0.4, cached: 0.025 },
+};
+
+/**
+ * 参考价查询：精确命中优先；未命中时按「已知家族 + 档位关键词」保守推断
+ * （仅覆盖 glm / deepseek / claude / gpt / qwen / gemini / kimi 前缀；其余返回 null 不猜测）。
+ */
+function lookupReferencePrice(model: string): { input: string; output: string; cached: string } | null {
+  const m = model.toLowerCase().trim();
+  if (!m) return null;
+  const fmt = (p: { input: number; output: number; cached: number }) => ({
+    input: String(p.input),
+    output: String(p.output),
+    cached: String(p.cached),
+  });
+  const exact = REFERENCE_PRICES[m];
+  if (exact) return fmt(exact);
+  if (m.startsWith("glm")) {
+    if (m.includes("flash")) return fmt(REFERENCE_PRICES["glm-4-flash"]);
+    if (m.includes("air") || m.includes("lite")) return fmt(REFERENCE_PRICES["glm-4.5-air"]);
+    return fmt(REFERENCE_PRICES["glm-4.6"]); // glm 家族旗舰档兑底
+  }
+  if (m.startsWith("deepseek")) {
+    return fmt(m.includes("reasoner") ? REFERENCE_PRICES["deepseek-reasoner"] : REFERENCE_PRICES["deepseek-chat"]);
+  }
+  if (m.startsWith("gpt-5")) {
+    if (m.includes("nano")) return fmt(REFERENCE_PRICES["gpt-5-nano"]);
+    if (m.includes("mini")) return fmt(REFERENCE_PRICES["gpt-5-mini"]);
+    return fmt(REFERENCE_PRICES["gpt-5"]);
+  }
+  if (m.startsWith("gpt-4.1")) {
+    if (m.includes("nano")) return fmt(REFERENCE_PRICES["gpt-4.1-nano"]);
+    if (m.includes("mini")) return fmt(REFERENCE_PRICES["gpt-4.1-mini"]);
+    return fmt(REFERENCE_PRICES["gpt-4.1"]);
+  }
+  if (m.startsWith("gpt-4o")) {
+    return fmt(m.includes("mini") ? REFERENCE_PRICES["gpt-4o-mini"] : REFERENCE_PRICES["gpt-4o"]);
+  }
+  if (m.startsWith("claude")) {
+    if (m.includes("opus")) return fmt(REFERENCE_PRICES["claude-opus-4.6"]);
+    if (m.includes("haiku")) return fmt(REFERENCE_PRICES["claude-haiku-4.5"]);
+    return fmt(REFERENCE_PRICES["claude-sonnet-4.6"]); // sonnet 档兑底
+  }
+  if (m.startsWith("qwen")) {
+    if (m.includes("max")) return fmt(REFERENCE_PRICES["qwen-max"]);
+    if (m.includes("flash") || m.includes("turbo")) return fmt(REFERENCE_PRICES["qwen-flash"]);
+    return fmt(REFERENCE_PRICES["qwen-plus"]);
+  }
+  if (m.startsWith("gemini")) {
+    return fmt(m.includes("pro") ? REFERENCE_PRICES["gemini-2.5-pro"] : REFERENCE_PRICES["gemini-2.5-flash"]);
+  }
+  if (m.startsWith("kimi")) return fmt(REFERENCE_PRICES["kimi-k2"]);
+  return null;
+}
 
 function toDraftRow(r: { model: string; inputPerMTok: number; outputPerMTok: number; cachedPerMTok: number; updatedAt?: string }): DraftRow {
   return {
@@ -85,6 +187,8 @@ export function PricingSection() {
   const [pasteOpen, setPasteOpen] = React.useState(false);
   const [pasteText, setPasteText] = React.useState("");
   const [pasteResult, setPasteResult] = React.useState("");
+  const [flash, setFlash] = React.useState(false);
+  const rootRef = React.useRef<HTMLDivElement>(null);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -103,6 +207,17 @@ export function PricingSection() {
   React.useEffect(() => {
     void load();
   }, [load]);
+
+  // 总览「成本估算」空态 CTA 跳转：滚动定位 + 短暂高亮（CustomEvent 解耦，无 prop 钻透）
+  React.useEffect(() => {
+    const handler = () => {
+      rootRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setFlash(true);
+      window.setTimeout(() => setFlash(false), 2200);
+    };
+    window.addEventListener("uag:goto-pricing", handler);
+    return () => window.removeEventListener("uag:goto-pricing", handler);
+  }, []);
 
   const setCell = (i: number, key: keyof DraftRow, value: string) => {
     setRows((prev) => {
@@ -123,6 +238,39 @@ export function PricingSection() {
     setRows((prev) => (prev ? prev.filter((_, idx) => idx !== i) : prev));
     setNotice("");
   };
+
+  /**
+   * 参考价一键预填：仅对「未计价清单里有参考价且尚未在表内」的模型补行。
+   * 保守策略：家族外模型不猜测，留待手动/批量粘贴；预填后需手动保存生效。
+   */
+  const prefillReference = () => {
+    if (!rows) return;
+    const existing = new Set(rows.map((r) => r.model.trim().toLowerCase()));
+    const filled: string[] = [];
+    const additions: DraftRow[] = [];
+    for (const u of unpriced) {
+      const key = u.model.trim().toLowerCase();
+      if (existing.has(key)) continue;
+      const ref = lookupReferencePrice(u.model);
+      if (!ref) continue;
+      additions.push({ model: u.model, inputPerMTok: ref.input, outputPerMTok: ref.output, cachedPerMTok: ref.cached });
+      existing.add(key);
+      filled.push(u.model);
+    }
+    if (additions.length === 0) {
+      setNotice("没有可预填的参考价（未计价模型均不在参考价库内，或已全部在表中）");
+      return;
+    }
+    setRows((prev) => [...(prev || []), ...additions]);
+    setNotice(`已按公开列表价预填 ${filled.length} 个模型：${filled.join("、")} —— 请核对后点「保存单价表」生效`);
+  };
+
+  /** 是否存在至少一个可预填的候选（控制按钮可用态，避免无效点击） */
+  const prefillAvailable = React.useMemo(() => {
+    if (!rows) return false;
+    const existing = new Set(rows.map((r) => r.model.trim().toLowerCase()));
+    return unpriced.some((u) => !existing.has(u.model.trim().toLowerCase()) && lookupReferencePrice(u.model) !== null);
+  }, [rows, unpriced]);
 
   const applyPaste = () => {
     const { rows: parsed, invalid } = parsePasted(pasteText);
@@ -170,12 +318,23 @@ export function PricingSection() {
   };
 
   return (
+    <div ref={rootRef} className={flash ? "rounded-xl ring-2 ring-lime-400/70 ring-offset-2 transition-shadow duration-500" : "rounded-xl transition-shadow duration-500"}>
     <Section
       icon={<BadgeDollarSign className="size-4.5" />}
       title="模型单价 · 成本估算"
       description="按上游实际结算价填写 $/百万 tokens；总览成本卡 / 用量透视 / 密钥与日志的估算均基于此表（仅估算展示，不做计费）"
       actions={
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={prefillReference}
+            disabled={!prefillAvailable}
+            title="按公开列表价为未计价模型预填参考单价（可修改后保存）"
+          >
+            <Sparkles className="text-lime-600" />
+            参考价预填
+          </Button>
           <Button variant="outline" size="sm" onClick={() => setPasteOpen((v) => !v)} aria-expanded={pasteOpen}>
             <ClipboardPaste />
             批量粘贴
@@ -206,7 +365,7 @@ export function PricingSection() {
         <div className="rounded-lg border border-dashed border-stone-300 bg-stone-50/60 p-4 text-sm text-muted-foreground">
           <p className="font-medium text-stone-700">尚未配置任何模型单价</p>
           <p className="mt-1">
-            配置后总览页将新增「成本估算」卡片，用量透视支持 Tokens ⇄ 成本切换，日志与密钥页显示估算金额。可点击下方「未计价模型」快速补录，或用「批量粘贴」导入。
+            配置后总览页将新增「成本估算」卡片，用量透视支持 Tokens ⇄ 成本切换，日志与密钥页显示估算金额。可点击上方「参考价预填」一键按公开列表价初始化，或用「未计价模型」快速补录、「批量粘贴」导入。
           </p>
         </div>
       ) : rows ? (
@@ -366,5 +525,6 @@ export function PricingSection() {
       )}
       {error && !loading && <p className="text-sm text-red-600">{error}</p>}
     </Section>
+    </div>
   );
 }

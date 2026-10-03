@@ -24,7 +24,9 @@ export function parseTabParam(search: string): ConsoleTab | null {
   return TAB_IDS.includes(t as ConsoleTab) ? (t as ConsoleTab) : null;
 }
 
-/** 日志筛选的 URL 可表达形态（customRange 为 epoch ms；label 不入 URL，读回时由时间范围重新生成） */
+/** 日志筛选的 URL 可表达形态（customRange 为 epoch ms；label 不入 URL，读回时由时间范围重新生成）
+ *  v4.9.13-local-r9：新增 error（错误文本关键字）与 errorOnly（仅看有错误文本的行）两维 ——
+ *  错误模式下钻（模式芯片/总览错误卡/失败徽标 tooltip）的深链可复现。 */
 export interface LogsUrlFilters {
   model: string;
   provider: string;
@@ -32,10 +34,14 @@ export interface LogsUrlFilters {
   status: string;
   key: string;
   account: string;
+  /** 错误文本关键字（contains 匹配；空 = 不筛） */
+  error: string;
+  /** 仅看记录了错误文本的行（error 非空） */
+  errorOnly: boolean;
   customRange: { from: number; to: number } | null;
 }
 
-const LOG_KEYS = ["model", "provider", "usage", "status", "key", "account", "from", "to"] as const;
+const LOG_KEYS = ["model", "provider", "usage", "status", "key", "account", "error", "error_only", "from", "to"] as const;
 
 /** 从 URL 读取日志筛选（无任何日志参数时返回 null，表示「无深链意图」） */
 export function parseLogsFilters(search: string): LogsUrlFilters | null {
@@ -52,6 +58,8 @@ export function parseLogsFilters(search: string): LogsUrlFilters | null {
     status: p.get("status") || "all",
     key: p.get("key") || "all",
     account: p.get("account") || "all",
+    error: p.get("error") || "",
+    errorOnly: p.get("error_only") === "1",
     customRange: hasRange ? { from: fromNum, to: toNum } : null,
   };
 }
@@ -87,6 +95,8 @@ export function logsFiltersToQuery(f: LogsUrlFilters): string {
   if (f.status && f.status !== "all") p.set("status", f.status);
   if (f.key && f.key !== "all") p.set("key", f.key);
   if (f.account && f.account !== "all") p.set("account", f.account);
+  if (f.error.trim()) p.set("error", f.error.trim());
+  if (f.errorOnly) p.set("error_only", "1");
   if (f.customRange) {
     p.set("from", String(f.customRange.from));
     p.set("to", String(f.customRange.to));

@@ -43,6 +43,18 @@ export async function verifyPassword(password: string, stored: string): Promise<
   }
 }
 
+// ---- v4.9.13-local：公开默认口令风险检测 ----
+// 与 schemaInit.seedDefaultAdmin 播种用的同一公开常量（README/代码注释公开可查）。
+// 用途：session 端点对已登录管理员校验其口令是否仍为该公开值，是则下发展示提醒标志，
+// 控制台顶部常驻安全横幅引导改密。仅比对公开常量 —— 若部署时用 UAG_DEFAULT_ADMIN_PASSWORD
+// 覆盖为私有强口令，则不构成公开风险，不提醒（检测不到也不应提醒）。
+export const PUBLIC_DEFAULT_ADMIN_PASSWORD = "gateway-admin-2026";
+
+/** 检测指定口令哈希是否仍为公开默认口令（scrypt 校验，与登录路径同源）。 */
+export async function isPublicDefaultPassword(storedHash: string): Promise<boolean> {
+  return verifyPassword(PUBLIC_DEFAULT_ADMIN_PASSWORD, storedHash);
+}
+
 // ---- 会话 ----
 export function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");

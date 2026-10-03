@@ -257,6 +257,14 @@ const server = Bun.serve({
         );
       }
 
+      // v4.9.11-sandbox-r3：max_tokens 钳制 —— 客户端常按「上下文窗口」（如目录里的 128K）
+      // 设置 max_tokens，但真实后端（glm-4-plus 系）输出上限为 [1, 98304]（GLM 错误码 1210）。
+      // 上游 400 直传会变成 502 且每次都失败；此处钳制到合法区间，顺带容错 0/负数/小数。
+      const MAX_TOKENS_CAP = 98_304;
+      const rawMaxTokens = typeof body.max_tokens === "number" ? body.max_tokens : NaN;
+      const maxTokensClamped = Number.isFinite(rawMaxTokens)
+        ? Math.min(Math.max(1, Math.floor(rawMaxTokens)), MAX_TOKENS_CAP)
+        : undefined;
       const sdkBody = {
         model,
         messages,
@@ -265,7 +273,7 @@ const server = Bun.serve({
         // 采样参数透传（SDK body 允许扩展键；后端不识别则忽略）
         ...(typeof body.temperature === "number" ? { temperature: body.temperature } : {}),
         ...(typeof body.top_p === "number" ? { top_p: body.top_p } : {}),
-        ...(typeof body.max_tokens === "number" ? { max_tokens: body.max_tokens } : {}),
+        ...(maxTokensClamped !== undefined ? { max_tokens: maxTokensClamped } : {}),
         // v4.9.12-local-r5：停止序列透传（OpenAI stop 语义；后端不支持时忽略，不影响请求）
         ...(Array.isArray(body.stop) && body.stop.length > 0 ? { stop: body.stop } : {}),
         ...(typeof body.stop === "string" && body.stop ? { stop: body.stop } : {}),

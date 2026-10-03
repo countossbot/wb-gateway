@@ -4,6 +4,8 @@
 import * as React from "react";
 import {
   Activity,
+  AlertTriangle,
+  ArrowRight,
   BarChart3,
   Boxes,
   CalendarDays,
@@ -23,6 +25,7 @@ import {
   RefreshCw,
   Route as RouteIcon,
   Snowflake,
+  Sparkles,
   Table2,
   Users,
   Wallet,
@@ -49,6 +52,7 @@ import {
 } from "@/components/console/ui";
 import { apiGet, errMessage } from "@/lib/console/api";
 import { cooldownRemaining, fmtCompact, fmtNum, fmtUsd, relativeTime } from "@/lib/console/format";
+import { ERROR_CATEGORY_TONE, patternSearchKeyword } from "@/lib/console/errorCategories";
 import type { BalanceHistoryData, BillingData, CostData, ModelHealthData, OverviewData, OverviewInsightsData, SloData, TopKeyRow, TopModelRow, TopProviderRow, Trend7Day, Trend7DayPrev, TrendBucket } from "@/lib/console/types";
 
 /** v3.0.5：近 24h 逐小时请求趋势 mini 图（纯 CSS 柱状：成功 emerald / 失败 red，Tooltip 显示明细；
@@ -1078,9 +1082,23 @@ const TP_WINDOW_OPTIONS: Array<{ days: 7 | 14 | 30; label: string }> = [
  * - 覆盖徽标行：已计价 / 未计价请求次数（未计价 > 0 染 amber 提示补录）
  * - 脚注：估算口径（单价 × tokens；usage 为网关字符估算的请求其 token 本身为折算值）
  */
-function CostCard({ data }: { data?: CostData }) {
+function CostCard({
+  data,
+  onNavigate,
+  onModelRouteClick,
+}: {
+  data?: CostData;
+  onNavigate?: (tab: "settings") => void;
+  /** v4.9.13-local-r15：Top 成本模型 chip → 模型路由页联动（编辑/克隆/预填新建三级回退） */
+  onModelRouteClick?: (model: string) => void;
+}) {
   // 空态：未配置单价（pricingRows=0 且无任何已计价请求）
   if (!data || (data.pricingRows === 0 && data.window7d.pricedRequests === 0)) {
+    const gotoPricing = () => {
+      onNavigate?.("settings");
+      // 通知设置页定位到「模型单价 · 成本估算」Section（滚动 + 高亮，见 pricing-section.tsx）
+      window.setTimeout(() => window.dispatchEvent(new CustomEvent("uag:goto-pricing")), 120);
+    };
     return (
       <div className="rounded-xl border border-stone-200 bg-white p-4">
         <div className="flex items-baseline gap-1.5">
@@ -1091,9 +1109,20 @@ function CostCard({ data }: { data?: CostData }) {
           </Badge>
         </div>
         <div className="mt-3 rounded-lg border border-dashed border-lime-300 bg-lime-50/40 p-3">
-          <p className="text-xs font-medium text-stone-700">尚未配置模型单价</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            前往「设置 → 模型单价 · 成本估算」填写各模型 $/百万 tokens 单价后，此处将展示今日与近 7 天成本、逐日趋势与 Top 成本模型；用量透视、密钥页与运行日志也将同步显示估算金额。
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-medium text-stone-700">尚未配置模型单价</p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 gap-1.5 border-lime-400/60 bg-white px-2.5 text-xs text-lime-700 hover:bg-lime-50 hover:text-lime-800"
+              onClick={gotoPricing}
+            >
+              <Sparkles className="size-3.5" />
+              前往配置单价
+            </Button>
+          </div>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            前往「设置 → 模型单价 · 成本估算」填写各模型 $/百万 tokens 单价后，此处将展示今日与近 7 天成本、逐日趋势与 Top 成本模型；用量透视、密钥页与运行日志也将同步显示估算金额。可用「参考价预填」一键初始化。
           </p>
         </div>
       </div>
@@ -1183,22 +1212,50 @@ function CostCard({ data }: { data?: CostData }) {
         </div>
       )}
 
-      {/* Top 成本模型 chips */}
+      {/* Top 成本模型 chips —— r15：可点击跳转模型路由（编辑/克隆/预填新建；存在路由时直接编辑） */}
       {topModels.length > 0 && (
         <div className="mt-3 space-y-1">
-          <p className="text-[10px] font-medium tracking-wide text-stone-500">Top 成本模型</p>
+          <p className="text-[10px] font-medium tracking-wide text-stone-500">Top 成本模型{onModelRouteClick ? "（点击前往路由）" : ""}</p>
           <div className="flex flex-wrap gap-1.5">
-            {topModels.map((m, i) => (
-              <Badge
-                key={m.model}
-                variant="outline"
-                className={`gap-1 border-stone-200 bg-stone-50 font-mono text-[11px] tabular-nums ${i === 0 ? "border-lime-300 bg-lime-50/70 text-lime-800" : "text-stone-700"}`}
-                title={`${m.model}：近 7 天估算 ${fmtUsd(m.cost)}（${m.requests} 次已计价请求）`}
-              >
-                {m.model}
-                <span className="font-sans text-[10px] text-stone-500">{fmtUsd(m.cost)}</span>
-              </Badge>
-            ))}
+            {topModels.map((m, i) => {
+              const chipCls = `gap-1 border-stone-200 bg-stone-50 font-mono text-[11px] tabular-nums ${i === 0 ? "border-lime-300 bg-lime-50/70 text-lime-800" : "text-stone-700"}`;
+              const chipContent = (
+                <>
+                  {m.model}
+                  <span className="font-sans text-[10px] text-stone-500">{fmtUsd(m.cost)}</span>
+                </>
+              );
+              if (!onModelRouteClick) {
+                return (
+                  <Badge
+                    key={m.model}
+                    variant="outline"
+                    className={chipCls}
+                    title={`${m.model}：近 7 天估算 ${fmtUsd(m.cost)}（${m.requests} 次已计价请求）`}
+                  >
+                    {chipContent}
+                  </Badge>
+                );
+            }
+              return (
+                <button
+                  key={m.model}
+                  type="button"
+                  onClick={() => onModelRouteClick(m.model)}
+                  className="group/cm rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                  title={`${m.model}：近 7 天估算 ${fmtUsd(m.cost)}（${m.requests} 次已计价请求）· 点击前往模型路由（存在路由则直接编辑，否则预填创建）`}
+                  aria-label={`前往模型 ${m.model} 的路由配置`}
+                >
+                  <Badge
+                    variant="outline"
+                    className={`${chipCls} transition-colors group-hover/cm:border-emerald-400 group-hover/cm:bg-emerald-50`}
+                  >
+                    <RouteIcon className="size-3 text-stone-400 transition-colors group-hover/cm:text-emerald-600" aria-hidden />
+                    {chipContent}
+                  </Badge>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1230,11 +1287,14 @@ function TopProvidersCard({
   windowDays = 7,
   onWindowChange,
   loading,
+  onProviderClick,
 }: {
   rows: TopProviderRow[];
   windowDays?: 7 | 14 | 30;
   onWindowChange?: (days: 7 | 14 | 30) => void;
   loading?: boolean;
+  /** r18：行点击 → API 中转页定位高亮该提供商（第十二跳转通道，与 Top 成本模型 chip 同类 chip 模式） */
+  onProviderClick?: (providerId: string) => void;
 }) {
   const maxReq = Math.max(1, ...rows.map((r) => r.requests));
   const totalShare = rows.reduce((s, r) => s + r.share, 0);
@@ -1293,9 +1353,23 @@ function TopProvidersCard({
           const rateColor =
             rate >= 90 ? "text-emerald-600" : rate >= 60 ? "text-amber-600" : "text-red-600";
           const tokens = r.inputTokens + r.outputTokens;
+          // r18：可点击行（button 语义 + hover 提亮 + focus-visible 环），无回调时保持纯展示 div
+          const interactive = !!onProviderClick;
+          const RowTag = (interactive ? "button" : "div") as "button";
+          const detailTitle = `tokens 精确值：${fmtNum(tokens)}${r.cachedTokens > 0 ? ` · 缓存精确值：${fmtNum(r.cachedTokens)}` : ""} · 份额 ${r.share}%${anyPriced ? ` · 窗口内估算成本 ${fmtUsd(r.cost ?? 0)}（已计价 ${r.pricedRequests ?? 0} 次，未计价 ${r.requests - (r.pricedRequests ?? 0)} 次）` : ""}`;
           return (
             <li key={r.providerId}>
-              <div className="flex w-full items-center gap-3 rounded-lg px-2 py-1.5">
+              <RowTag
+                type={interactive ? "button" : undefined}
+                onClick={interactive ? () => onProviderClick?.(r.providerId) : undefined}
+                className={`group flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left${
+                  interactive
+                    ? " cursor-pointer transition-colors hover:bg-orange-50/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400/60"
+                    : ""
+                }`}
+                title={interactive ? `查看「${r.providerName}」的连接配置与连通性测试（API 中转）` : undefined}
+                aria-label={interactive ? `提供商 ${r.providerName}，近 ${nDays} 天 ${r.requests} 次调用，成功率 ${rate}%，点击前往 API 中转` : undefined}
+              >
                 <span
                   className={`flex size-5 shrink-0 items-center justify-center rounded text-[11px] font-bold tabular-nums ${
                     i === 0
@@ -1310,8 +1384,13 @@ function TopProvidersCard({
                   {i + 1}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium text-stone-800" title={`${r.providerName}（${r.providerId}）`}>
-                    {r.providerName}
+                  <span className="flex items-center gap-1">
+                    <span className="block truncate text-xs font-medium text-stone-800" title={`${r.providerName}（${r.providerId}）`}>
+                      {r.providerName}
+                    </span>
+                    {interactive && (
+                      <ArrowRight className="size-3 shrink-0 text-stone-300 transition-colors group-hover:text-orange-400" aria-hidden />
+                    )}
                   </span>
                   {/* 占比条：与请求峰值相对占比（orange，与 Top 密钥 emerald / Top 模型 teal 区分） */}
                   <span className="mt-1 block h-1 w-full overflow-hidden rounded-full bg-stone-100" aria-hidden>
@@ -1323,14 +1402,11 @@ function TopProvidersCard({
                 </span>
                 <span className="shrink-0 text-right tabular-nums">
                   <span className="block text-xs font-semibold text-stone-800">{r.requests} 次</span>
-                  <span
-                    className={`block text-[10px] ${rateColor}`}
-                    title={`tokens 精确值：${fmtNum(tokens)}${r.cachedTokens > 0 ? ` · 缓存精确值：${fmtNum(r.cachedTokens)}` : ""} · 份额 ${r.share}%${anyPriced ? ` · 窗口内估算成本 ${fmtUsd(r.cost ?? 0)}（已计价 ${r.pricedRequests ?? 0} 次，未计价 ${r.requests - (r.pricedRequests ?? 0)} 次）` : ""}`}
-                  >
+                  <span className={`block text-[10px] ${rateColor}`} title={detailTitle}>
                     {rate}% · {fmtCompact(tokens)} tk · 占 {r.share}%{anyPriced && (r.cost ?? 0) > 0 ? ` · ${fmtUsd(r.cost)}` : ""}
                   </span>
                 </span>
-              </div>
+              </RowTag>
             </li>
           );
         })}
@@ -1517,6 +1593,155 @@ const SLO_WINDOW_OPTIONS: Array<{ hours: 1 | 6 | 24; label: string }> = [
 /** 延迟人读格式：<1s → "812 ms"；≥1s → "1.35 s" */
 function fmtLatency(ms: number): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
+}
+
+/**
+ * v4.9.13-local-r4：近期错误模式卡 —— 把运行日志页的错误模式聚合能力上移到总览，
+ * 打开控制台第一眼就能看到「错在哪类、多少条、长什么样」。
+ * - 数据与运行日志页同源同口径（服务端 error_patterns 归一化聚合 Top 6）；
+ * - 空态为正向反馈（近期无错误 → emerald 徽标，而非空洞卡片）；
+ * - 点击行 → 运行日志按该模式下钻（v4.9.13-local-r9 升级：优先错误关键字 —— 模式骨架片段 contains
+ *   命中整组，比状态大类更精准且解锁跨状态大类的模式组；无骨架片段时回落状态大类，单一意图不变：
+ *   不携带模型/密钥/时间等其他维度，与日志页错误模式芯片下钻语义一致）。
+ */
+/** v4.9.13-local-r5：错误模式卡窗口选项（24h / 7d；与 SLO 卡同范式走独立 insights API） */
+const EP_WINDOW_OPTIONS: Array<{ hours: 24 | 168; label: string }> = [
+  { hours: 24, label: "24h" },
+  { hours: 168, label: "7d" },
+];
+
+function ErrorPatternsCard({
+  rows,
+  windowHours = 24,
+  onWindowChange,
+  loading,
+  onDrillClick,
+}: {
+  rows: NonNullable<OverviewData["error_patterns"]>;
+  /** 当前窗口（小时）：24 / 168；种子数据（主响应无窗口版本）默认 24 */
+  windowHours?: 24 | 168;
+  onWindowChange?: (hours: 24 | 168) => void;
+  /** 独立 API 拉取中：内容半透明脉冲（与 ModelHealthCard 同范式，不闪整页 loading） */
+  loading?: boolean;
+  /** v4.9.13-local-r9：下钻意图升级 —— keyword 优先（模式骨架片段，精准命中整组），
+   *  无关键字时回落 statusClass（既有状态大类语义）；两者均无则行不可点 */
+  onDrillClick?: (drill: { statusClass: "4xx" | "5xx" | null; keyword: string | null }) => void;
+}) {
+  const windowLabel = windowHours === 168 ? "近 7 天" : "近 24 小时";
+  const totalErrors = rows.reduce((s, r) => s + r.count, 0);
+  const header = (
+    <div className="flex items-baseline gap-1.5">
+      <AlertTriangle className="size-4 shrink-0 self-center text-red-500" aria-hidden />
+      <p className="shrink-0 text-sm font-medium text-stone-700">近期错误模式</p>
+      {rows.length > 0 ? (
+        <Badge variant="outline" className="border-red-200 bg-red-50 px-1.5 py-0 text-[10px] font-medium text-red-700">
+          {totalErrors} 条错误 · {rows.length} 类
+        </Badge>
+      ) : (
+        <Badge variant="outline" className="border-emerald-200 bg-emerald-50 px-1.5 py-0 text-[10px] font-medium text-emerald-700">
+          零错误
+        </Badge>
+      )}
+      {onWindowChange ? (
+        <span className="ml-auto" role="group" aria-label="切换错误模式窗口长度">
+          {EP_WINDOW_OPTIONS.map((o) => (
+            <button
+              key={o.hours}
+              type="button"
+              onClick={() => onWindowChange(o.hours)}
+              aria-pressed={windowHours === o.hours}
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                windowHours === o.hours
+                  ? "bg-red-100 text-red-700"
+                  : "text-stone-400 hover:text-stone-700"
+              }`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </span>
+      ) : null}
+    </div>
+  );
+  if (rows.length === 0) {
+    return (
+      <div className={`rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 ${loading ? "animate-pulse" : ""}`}>
+        {header}
+        <p className="mt-2 text-xs text-muted-foreground">
+          {windowLabel}滚动日志窗口内无错误 —— 空态为正向反馈。错误发生后此处按同类归一化聚合（引号串/数字折叠），一眼定位问题大类；点击行可下钻运行日志。
+        </p>
+      </div>
+    );
+  }
+  const maxCount = Math.max(1, ...rows.map((r) => r.count));
+  return (
+    <div className={`rounded-xl border border-stone-200 bg-white p-4 ${loading ? "animate-pulse" : ""}`}>
+      {header}
+      <ol className="mt-3 space-y-2">
+        {rows.map((r) => {
+          const tone = ERROR_CATEGORY_TONE[r.category] || ERROR_CATEGORY_TONE["其他"];
+          const all5 = r.statuses.length > 0 && r.statuses.every((s) => s >= 500 && s < 600);
+          const all4 = r.statuses.length > 0 && r.statuses.every((s) => s >= 400 && s < 500);
+          const target = all5 ? "5xx" : all4 ? "4xx" : null;
+          const targetLabel = target === "5xx" ? "5xx 服务端错误" : target === "4xx" ? "4xx 客户端错误" : null;
+          // v4.9.13-local-r9：关键字下钻优先 —— 模式骨架片段 contains 命中整组（比状态大类精准，
+          // 且解锁跨状态大类的模式组）；无片段时回落状态大类下钻（既有语义）
+          const kw = patternSearchKeyword(r.pattern);
+          const kwShort = kw !== null && kw.length > 36 ? `${kw.slice(0, 36)}…` : kw;
+          const clickable = (kw !== null || target !== null) && !!onDrillClick;
+          return (
+            <li key={r.pattern}>
+              <button
+                type="button"
+                disabled={!clickable}
+                onClick={clickable ? () => onDrillClick!({ statusClass: target, keyword: kw }) : undefined}
+                aria-label={
+                  kw !== null
+                    ? `按错误关键字「${kwShort}」查看该模式命中的 ${r.count} 条请求日志`
+                    : target
+                      ? `查看${targetLabel}请求日志（该模式命中 ${r.count} 条）`
+                      : `错误模式（无可下钻维度）：${r.pattern}`
+                }
+                title={
+                  `${r.category} · 状态码 ${r.statuses.join(" / ") || "—"} · 命中 ${r.count} 条\n${r.example}` +
+                  (kw !== null
+                    ? `\n点击按错误关键字「${kwShort}」下钻运行日志（contains 命中整组，精准）`
+                    : target
+                      ? `\n点击按「${targetLabel}」下钻运行日志`
+                      : "")
+                }
+                className={`group flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                  clickable
+                    ? "cursor-pointer hover:bg-red-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400"
+                    : "cursor-default"
+                }`}
+              >
+                <span className={`shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium ${tone}`}>
+                  {r.category}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-mono text-xs text-stone-800">
+                    {r.pattern}
+                  </span>
+                  {/* 占比条：与 Top 密钥/模型卡同语言，错误用红色系 */}
+                  <span className="mt-1 block h-1 w-full overflow-hidden rounded-full bg-stone-100" aria-hidden>
+                    <span
+                      className="block h-full rounded-full bg-red-400/70 transition-[width]"
+                      style={{ width: `${Math.max(6, Math.round((r.count / maxCount) * 100))}%` }}
+                    />
+                  </span>
+                </span>
+                <span className="shrink-0 text-right tabular-nums">
+                  <span className="block text-xs font-semibold text-stone-800">×{r.count}</span>
+                  <span className="block text-[10px] text-stone-400">{kw !== null ? "下钻模式" : target ? `下钻 ${target}` : r.statuses.join(" / ") || "—"}</span>
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
 }
 
 /** 服务质量色阶：≥99 emerald / ≥95 amber / <95 red（SLO 运维口径比模型健康卡更严） */
@@ -1938,7 +2163,7 @@ function Trend7dCard({ days, prev, onDayClick }: { days: Trend7Day[]; prev?: Tre
   );
 }
 
-export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyClick, onModelClick, onNavigate }: { onHourClick?: (hourIso: string) => void; onDayClick?: (dayKey: string) => void; onTodayClick?: () => void; onKeyClick?: (keyName: string) => void; onModelClick?: (model: string) => void; onNavigate?: (tab: "providers" | "accounts" | "routes" | "keys") => void } = {}) {
+export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyClick, onModelClick, onErrorPatternsClick, onNavigate, onModelRouteClick, onProviderClick }: { onHourClick?: (hourIso: string) => void; onDayClick?: (dayKey: string) => void; onTodayClick?: () => void; onKeyClick?: (keyName: string) => void; onModelClick?: (model: string) => void; /** v4.9.13-local-r4：错误模式卡下钻（第十跳转通道）。v4.9.13-local-r9 升级：keyword 优先（模式骨架片段精准命中整组），无片段时回落状态大类 */ onErrorPatternsClick?: (drill: { statusClass: "4xx" | "5xx" | null; keyword: string | null }) => void; onNavigate?: (tab: "providers" | "accounts" | "routes" | "keys" | "settings") => void; /** v4.9.13-local-r15：Top 成本模型 chip → 模型路由页联动（第十一跳转通道） */ onModelRouteClick?: (model: string) => void; /** r18：Top 提供商行 → API 中转页定位高亮（第十二跳转通道） */ onProviderClick?: (providerId: string) => void } = {}) {
   const [data, setData] = React.useState<OverviewData | null>(null);
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
@@ -1950,6 +2175,8 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
   const [tpWindow, setTpWindow] = React.useState<7 | 14 | 30>(7);
   // v4.3.2：服务质量 SLO 窗口（1/6/24 小时；与 mh/tp 同范式走独立 insights API，切窗口不整页重载）
   const [sloWindow, setSloWindow] = React.useState<1 | 6 | 24>(24);
+  // v4.9.13-local-r5：错误模式卡窗口（24h/7d；同范式走独立 insights API）
+  const [epWindow, setEpWindow] = React.useState<24 | 168>(24);
   // v4.2.4：洞察独立数据（模型健康 + Top 提供商；主响应 7 天种子初始化，窗口切换/刷新由独立 API 更新）
   const [insights, setInsights] = React.useState<OverviewInsightsData | null>(null);
   const [insightsLoading, setInsightsLoading] = React.useState(false);
@@ -1996,11 +2223,11 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
   // 页面其余数据（余额/账号/趋势等）不动；加载期间卡片内容半透明脉冲而非整页 loading。
   // v4.3.2：追加 SLO（slo_hours；RequestLog 窗口聚合）同请求合并拉取。
   const loadInsights = React.useCallback(
-    async (mh: 7 | 14 | 30, tp: 7 | 14 | 30, slo: 1 | 6 | 24) => {
+    async (mh: 7 | 14 | 30, tp: 7 | 14 | 30, slo: 1 | 6 | 24, ep: 24 | 168) => {
       setInsightsLoading(true);
       try {
         const d = await apiGet<OverviewInsightsData>(
-          `/api/console/overview/insights?mh_days=${mh}&tp_days=${tp}&slo_hours=${slo}`
+          `/api/console/overview/insights?mh_days=${mh}&tp_days=${tp}&slo_hours=${slo}&ep_hours=${ep}`
         );
         setInsights(d);
       } catch {
@@ -2013,19 +2240,22 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
   );
   // 挂载/切窗口 → 独立拉取（与主 load 并行，互不阻塞）
   React.useEffect(() => {
-    void loadInsights(mhWindow, tpWindow, sloWindow);
-  }, [loadInsights, mhWindow, tpWindow, sloWindow]);
-  // 主响应到达且洞察仍为空（首次挂载）→ 用 7 天种子即时渲染，随后被独立拉取的同口径数据替换
+    void loadInsights(mhWindow, tpWindow, sloWindow, epWindow);
+  }, [loadInsights, mhWindow, tpWindow, sloWindow, epWindow]);
+  // 主响应到达且洞察仍为空（首次挂载）→ 用种子即时渲染，随后被独立拉取的同口径数据替换
+  //（错误模式种子：主响应为无窗口版本，仅当 epWindow=24 时可用；切到 7d 后不再回退种子）
   React.useEffect(() => {
-    if (data && !insights && mhWindow === 7 && tpWindow === 7 && sloWindow === 24) {
+    if (data && !insights && mhWindow === 7 && tpWindow === 7 && sloWindow === 24 && epWindow === 24) {
       setInsights({
         model_health: data.model_health ?? { days: [], models: [] },
         top_providers_7d: data.top_providers_7d || [],
         top_providers_window_days: 7,
         slo: data.slo,
+        error_patterns: data.error_patterns ?? [],
+        error_patterns_hours: 24,
       });
     }
-  }, [data, insights, mhWindow, tpWindow, sloWindow]);
+  }, [data, insights, mhWindow, tpWindow, sloWindow, epWindow]);
 
   // v3.6.0：余额趋势独立拉取（quiet；接口/数据缺失时优雅降级为无 footer）
   // v4.2.3b：抽出为可重拉回调 —— 刷新按钮同步重拉（旧实现仅组件挂载时拉取一次，
@@ -2061,14 +2291,14 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
         if (document.visibilityState === "visible") {
           void load();
           loadBalTrend();
-          void loadInsights(mhWindow, tpWindow, sloWindow);
+          void loadInsights(mhWindow, tpWindow, sloWindow, epWindow);
         }
       } else {
         setNextRefreshIn(nextRefreshRef.current);
       }
     }, 1000);
     return () => window.clearInterval(t);
-  }, [autoRefresh, load, loadBalTrend, loadInsights, mhWindow, tpWindow, sloWindow]);
+  }, [autoRefresh, load, loadBalTrend, loadInsights, mhWindow, tpWindow, sloWindow, epWindow]);
 
   // v3.6.0：聚合余额逐日序列 —— 各账号 carry-forward 后按日求和
   //（存量指标语义：账号当日无快照沿用最近已知值，避免「没测=归零」的错误断崖）
@@ -2207,7 +2437,7 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
                 {nextRefreshIn}s 后自动刷新
               </span>
             )}
-            <Button variant="outline" size="sm" onClick={() => { void load(); loadBalTrend(); void loadInsights(mhWindow, tpWindow, sloWindow); }} disabled={loading}>
+            <Button variant="outline" size="sm" onClick={() => { void load(); loadBalTrend(); void loadInsights(mhWindow, tpWindow, sloWindow, epWindow); }} disabled={loading}>
               <RefreshCw className={loading ? "animate-spin" : undefined} />
               刷新
             </Button>
@@ -2327,10 +2557,24 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
           icon={<Network className="size-4" />}
           accent="stone"
         />
+        {/* v4.9.13-local-r2：路由口径细化 —— 与路由管理页/总览数字三方对齐：
+            routes_count = 运行时全量（自定义 + 代码默认）；routes_total = 落库自定义条数。
+            旧版 API 无 routes_total 时回落原口径（不显示拆分），防御性兼容。 */}
         <StatCard
           label="模型路由"
           value={data.routes_count}
-          hint={`覆盖 ${data.available_models?.length || 0} 个可用模型`}
+          hint={
+            typeof data.routes_total === "number" && data.routes_total >= 0 ? (
+              <span
+                title={`运行时全量 ${data.routes_count} 条 = 自定义（落库，可编辑）${data.routes_total} 条 + 代码默认（运行时内置、未落库）${Math.max(0, data.routes_count - data.routes_total)} 条；代码默认路由可在「模型路由」页一键转为自定义接管`}
+              >
+                自定义 {data.routes_total} + 代码默认 {Math.max(0, data.routes_count - data.routes_total)} · 覆盖{" "}
+                {data.available_models?.length || 0} 个模型
+              </span>
+            ) : (
+              `覆盖 ${data.available_models?.length || 0} 个可用模型`
+            )
+          }
           icon={<RouteIcon className="size-4" />}
           accent="amber"
         />
@@ -2381,8 +2625,8 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
         loading={insightsLoading}
       />
 
-      {/* v4.4.0：成本估算卡（模型单价表 × UsageDaily；未配置单价时渲染引导空态） */}
-      <CostCard data={data.cost} />
+      {/* v4.4.0：成本估算卡（模型单价表 × UsageDaily；未配置单价时渲染引导空态 + 前往配置 CTA） */}
+      <CostCard data={data.cost} onNavigate={onNavigate} onModelRouteClick={onModelRouteClick} />
 
       {/* v4.5.0：月度账单卡（按密钥分组月成本报表 + 预算进度 + 环比 + CSV；折叠懒加载） */}
       <MonthlyBillingCard />
@@ -2471,12 +2715,14 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
           />
         </div>
         {/* v4.2.1：Top 提供商排行（UsageDaily 持久聚合；v4.2.4：窗口可选 7/14/30 天，独立 API 拉取） */}
+        {/* r18：行点击 → API 中转页定位高亮（第十二跳转通道） */}
         <div className="xl:col-span-3">
           <TopProvidersCard
             rows={insights?.top_providers_7d || []}
             windowDays={tpWindow}
             onWindowChange={setTpWindow}
             loading={insightsLoading}
+            onProviderClick={onProviderClick}
           />
         </div>
         {/* v4.2.1：模型健康 sparkline（v4.2.3b：窗口可选 7/14/30 天；点击行 → 该模型今日日志；v4.2.4 独立 API 拉取） */}
@@ -2487,6 +2733,17 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
             onWindowChange={setMhWindow}
             loading={insightsLoading}
             onModelClick={onModelClick}
+          />
+        </div>
+        {/* v4.9.13-local-r4：近期错误模式卡（第十跳转通道：点击行 → 该模式所属状态大类的运行日志；空态为正向零错误反馈） */}
+        {/* v4.9.13-local-r5：窗口切换 24h/7d（独立 insights API，切窗口不整页重载）；数据优先用 insights（窗口口径），种子（主响应）仅首次挂载前兜底 */}
+        <div className="xl:col-span-3">
+          <ErrorPatternsCard
+            rows={(epWindow === 24 && !insights?.error_patterns ? data.error_patterns : insights?.error_patterns) ?? data.error_patterns ?? []}
+            windowHours={epWindow}
+            onWindowChange={setEpWindow}
+            loading={insightsLoading}
+            onDrillClick={onErrorPatternsClick}
           />
         </div>
       </div>

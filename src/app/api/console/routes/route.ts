@@ -1,11 +1,18 @@
 // /api/console/routes —— 模型路由管理（模型名 → 有序候选列表）。
 // GET：路由 + 候选 + 可选提供商清单（前端拖拽排序）+ 近 24h 每路由调用统计；
 // POST：新增路由；PUT：更新（含候选拖拽后的新顺序）；DELETE ?model=：删除路由。
+// v4.9.13-local：GET 增补 implicitRoutes —— 运行时回填生效但未落库的代码默认路由，
+// 修复「总览显示 9 条路由、管理页只见 3 条」的口径不一致（backfillMissingRoutes 只补内存不写库，
+// 用户在 UI 上完全看不到这批路由的存在）。前端单独成区展示，可一键「转为自定义路由」落库接管。
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireSessionOr401, ok, fail } from "@/lib/gateway/console/consoleHelpers";
-import { invalidateConfigChanged } from "@/lib/gateway/config/configService";
+import { getConfig, invalidateConfigChanged } from "@/lib/gateway/config/configService";
 import { auditCreate, auditDelete, auditUpdate } from "@/lib/gateway/console/auditService";
+import {
+  readRouteTestStore,
+  deleteRouteTestResult,
+} from "@/lib/gateway/console/routeTestStore";
 
 export const dynamic = "force-dynamic";
 
@@ -78,6 +85,38 @@ export async function GET(request: NextRequest) {
     };
   }
 
+  // v4.9.13-local：隐式代码默认路由 —— getConfig() 返回的运行时有效路由（含 backfillMissingRoutes
+  // 回填的代码默认项）中，不在 DB ModelRoute 表里的部分。它们真实生效（可被客户端调用），
+  // 但因未落库在管理页不可见不可管。这里下发给前端单独成区展示。
+  // 口径注意：只看 model 键是否在 DB；候选链以运行时为准（与网关 dispatch 行为一致）。
+  let implicitRoutes: Array<{
+    model: string;
+    prompt: string | null;
+    candidates: Array<{ providerId: string; model: string; enabled: boolean; sortOrder: number }>;
+  }> = [];
+  try {
+    const runtimeConfig = await getConfig();
+    const dbModels = new Set(routes.map((r) => r.model));
+    implicitRoutes = Object.entries(runtimeConfig.routes || {})
+      .filter(([model]) => !dbModels.has(model))
+      .map(([model, candidateList]) => ({
+        model,
+        // routePrompts 与 routes 平级存储；隐式路由未落库故 prompt 恒为 null（回填不携带提示词）
+        prompt: null,
+        candidates: (Array.isArray(candidateList) ? candidateList : [])
+          .filter((c) => c && typeof c.provider === "string" && typeof c.model === "string")
+          .map((c, i) => ({ providerId: c.provider, model: c.model, enabled: true, sortOrder: i })),
+      }))
+      .sort((a, b) => a.model.localeCompare(b.model));
+  } catch (e) {
+    // 运行时配置获取失败不阻断路由管理主功能（隐式区静默降级为不展示）
+    console.error("[RoutesAPI] failed to compute implicit routes:", (e as Error).message);
+    implicitRoutes = [];
+  }
+
+  // v4.9.13-local-r16：回读快测持久化结果（键 = 路由模型名；自定义与隐式路由统一附带 lastTest）
+  const testStore = await readRouteTestStore();
+
   return ok({
     routes: routes.map((r) => ({
       id: r.id,
@@ -92,7 +131,10 @@ export async function GET(request: NextRequest) {
         enabled: c.enabled,
         sortOrder: c.sortOrder,
       })),
+      lastTest: testStore[r.model]?.last,
     })),
+    // v4.9.13-local：运行时生效但未落库的代码默认路由（只读展示；前端提供「转为自定义」落库入口）
+    implicitRoutes: implicitRoutes.map((r) => ({ ...r, lastTest: testStore[r.model]?.last })),
     providers,
     // v4.9.12-local-r4：24h 统计（键 = 路由模型名）
     stats24h: stats,
@@ -240,6 +282,8 @@ export async function DELETE(request: NextRequest) {
   if (!existing) return fail("路由不存在", 404);
   await db.modelRoute.delete({ where }); // 级联删除候选
   await invalidateConfigChanged();
+  // v4.9.13-local-r16：清理该路由的快测持久化记录（孤儿键；失败静默不阻断删除）
+  await deleteRouteTestResult(existing.model);
   await auditDelete(
     "route",
     existing.id,

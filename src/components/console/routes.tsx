@@ -7,16 +7,22 @@ import {
   Activity,
   ArrowRight,
   Check,
+  Clock,
+  Code2,
+  Copy,
   DatabaseZap,
   Gauge,
   GripVertical,
+  HardDriveDownload,
   Loader2,
   Pencil,
   Plus,
   RefreshCw,
   Route as RouteIcon,
+  Search,
   Send,
   Trash2,
+  X,
   Zap,
 } from "lucide-react";
 import {
@@ -62,7 +68,7 @@ import {
   PageHeader,
 } from "@/components/console/ui";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
-import type { RouteRow, RouteStat24h, RoutesData } from "@/lib/console/types";
+import type { ImplicitRouteRow, RouteRow, RouteStat24h, RouteTestRecord, RoutesData } from "@/lib/console/types";
 
 // ---- 上游模型目录拉取（/api/console/providers/models）----
 // 模块级缓存 60s：同一提供商多行候选/反复打开表单不重复打上游；强制刷新穿透。
@@ -495,11 +501,14 @@ function RouteTestDialog({
   providerName,
   open,
   onOpenChange,
+  onTestPersisted,
 }: {
   route: RouteRow;
   providerName: (id: string) => string;
   open: boolean;
   onOpenChange: (o: boolean) => void;
+  /** r17：单测结果落库后同步父级行内徽标（与批测共用 routeTestResults 存储） */
+  onTestPersisted?: (record: RouteTestRecord) => void;
 }) {
   const [apiKey, setApiKey] = React.useState("");
   const [message, setMessage] = React.useState("请回复 pong 两个字母即可");
@@ -537,6 +546,20 @@ function RouteTestDialog({
     sessionStorage.setItem(ROUTE_TEST_KEY_STORAGE, apiKey.trim());
     const start = Date.now();
     const isAnthropic = protocol === "anthropic";
+    // r17：结果落库（成功/HTTP 失败/网络错误三分支均产生记录；静默失败不阻断对话框主流程）
+    const persistOutcome = (ok: boolean, status: number | null, durationMs: number, upstreamModel: string | null, error?: string) => {
+      const record: RouteTestRecord = {
+        ok,
+        status,
+        durationMs,
+        upstreamModel,
+        error,
+        protocol,
+        testedAt: new Date().toISOString(),
+      };
+      void apiPost("/api/console/routes/test-results", { results: [{ model: route.model, record }] }).catch(() => {});
+      onTestPersisted?.(record);
+    };
     try {
       // r8：双协议端点 / 认证头 / 请求体（Anthropic max_tokens 必填；OpenAI 显式 stream:false）
       const res = await fetch(isAnthropic ? "/v1/messages" : "/v1/chat/completions", {
@@ -566,6 +589,7 @@ function RouteTestDialog({
       const raw = await res.text();
       if (!res.ok) {
         setErrorMsg(`HTTP ${res.status}${raw ? ` · ${raw.slice(0, 240)}` : ""}`);
+        persistOutcome(false, res.status, durationMs, null, raw.slice(0, 300) || `HTTP ${res.status}`);
         return;
       }
       const d = JSON.parse(raw) as {
@@ -590,9 +614,11 @@ function RouteTestDialog({
         finishReason: isAnthropic ? d.stop_reason ?? null : d.choices?.[0]?.finish_reason ?? null,
         protocol,
       });
+      persistOutcome(true, res.status, durationMs, d.model ?? null);
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 50);
     } catch (e) {
       setErrorMsg(errMessage(e));
+      persistOutcome(false, null, Date.now() - start, null, errMessage(e).slice(0, 300));
     } finally {
       setLoading(false);
     }
@@ -742,7 +768,165 @@ function RouteTestDialog({
   );
 }
 
-export function RoutesModule() {
+// ---- v4.9.13-local-r15：路由批量快测（「全部测试」）----
+// 复用单路由快测的密钥（ROUTE_TEST_KEY_STORAGE）与协议偏好（ROUTE_TEST_PROTO_STORAGE），
+// 逐条发送最小真实请求（max_tokens=64，消息 "ping"）。
+// r17：结果持久化（SystemSetting routeTestResults，POST /api/console/routes/test-results）——
+// 会话内新结果 source="session" 实底样式；GET 回读的历史结果 source="persisted" 描边淡样式 + Clock 图标，
+// 刷新后徽标常驻（不再「刷新即失」）。停用路由不发送（避免语义混淆），标记「已停用 · 跳过」且不落库；
+// 无候选路由直接记失败并落库（省一次必 404 请求，结果对排障有信息量）。
+interface RouteBatchResult {
+  ok: boolean;
+  status: number | null;
+  durationMs: number;
+  upstreamModel: string | null;
+  /** 失败原因摘要（展示用，截断） */
+  error?: string;
+  /** 停用路由跳过（未发送请求） */
+  skipped?: boolean;
+  at: string;
+  /** r17：本轮使用的协议（展示 + 持久化载荷字段） */
+  protocol?: TestProtocol;
+  /** r17：session = 本轮实测；persisted = 历史记录回读（徽标淡样式区分） */
+  source?: "session" | "persisted";
+}
+
+async function sendRouteProbe(
+  model: string,
+  apiKey: string,
+  protocol: TestProtocol
+): Promise<RouteBatchResult> {
+  const start = Date.now();
+  const isAnthropic = protocol === "anthropic";
+  try {
+    const res = await fetch(isAnthropic ? "/v1/messages" : "/v1/chat/completions", {
+      method: "POST",
+      headers: isAnthropic
+        ? {
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+          }
+        : {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+      body: JSON.stringify(
+        isAnthropic
+          ? { model, max_tokens: 64, messages: [{ role: "user", content: "ping" }] }
+          : { model, messages: [{ role: "user", content: "ping" }], max_tokens: 64, stream: false },
+      ),
+    });
+    const durationMs = Date.now() - start;
+    const raw = await res.text();
+    if (!res.ok) {
+      return { ok: false, status: res.status, durationMs, upstreamModel: null, error: raw.slice(0, 120) || `HTTP ${res.status}`, at: new Date().toISOString() };
+    }
+    const d = JSON.parse(raw) as {
+      model?: string;
+      choices?: Array<{ message?: { content?: string } }>;
+      content?: Array<{ type?: string; text?: string }>;
+    };
+    const upstreamModel = d.model ?? null;
+    // 模型身份校验：上游上报模型与请求模型不一致 → 视为成功但附提示（与单测对话框语义一致）
+    const identityNote = upstreamModel && upstreamModel !== model ? `（上游改写为 ${upstreamModel}）` : "";
+    return { ok: true, status: res.status, durationMs, upstreamModel, error: identityNote || undefined, at: new Date().toISOString() };
+  } catch (e) {
+    return { ok: false, status: null, durationMs: Date.now() - start, upstreamModel: null, error: errMessage(e).slice(0, 120), at: new Date().toISOString() };
+  }
+}
+
+/** RouteBatchResult → 持久化记录（RouteTestRecord）；skipped 未发送不产生记录 */
+function toRouteTestRecord(r: RouteBatchResult, protocol: TestProtocol): RouteTestRecord {
+  return {
+    ok: r.ok,
+    status: r.status,
+    durationMs: r.durationMs,
+    upstreamModel: r.upstreamModel,
+    error: r.error,
+    protocol,
+    testedAt: r.at,
+  };
+}
+
+/** 持久化记录 → 会话徽标结果（source 标注「历史回读」或「本轮实测」以驱动徽标样式） */
+function fromRouteTestRecord(rec: RouteTestRecord, source: "session" | "persisted"): RouteBatchResult {
+  return {
+    ok: rec.ok,
+    status: rec.status,
+    durationMs: rec.durationMs,
+    upstreamModel: rec.upstreamModel,
+    error: rec.error,
+    protocol: rec.protocol,
+    at: rec.testedAt,
+    source,
+  };
+}
+
+/** 批测结果徽标：测试中旋转 / 跳过灰 / 成功翡翠 / 失败红。
+ *  r17：历史回读（source=persisted）降淡为描边样式 + Clock 图标，title 标注协议与绝对时间，
+ *  与「本轮实测」（实底）一眼区分。悬停 title 均含明细。 */
+function RouteBatchBadge({ result, testing }: { result?: RouteBatchResult; testing: boolean }) {
+  if (testing) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-700">
+        <Loader2 className="size-3 animate-spin" />
+        测试中…
+      </span>
+    );
+  }
+  if (!result) return null;
+  if (result.skipped) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-stone-200 bg-stone-50 px-1.5 py-0.5 text-[10px] text-stone-400" title="停用路由不参与批测（请求会被网关拒绝或落到其他路由）">
+        已停用 · 跳过
+      </span>
+    );
+  }
+  const persisted = result.source === "persisted";
+  const time = new Date(result.at).toLocaleTimeString();
+  const protoLabel = result.protocol === "anthropic" ? "Anthropic" : result.protocol === "openai" ? "OpenAI" : null;
+  const protoSuffix = protoLabel ? ` · 协议 ${protoLabel}` : "";
+  const prefix = persisted ? "上次快测记录" : "快测通过";
+  if (result.ok) {
+    return (
+      <span
+        className={
+          persisted
+            ? "inline-flex items-center gap-1 rounded-md border border-emerald-200/80 bg-emerald-50/60 px-1.5 py-0.5 text-[10px] tabular-nums text-emerald-600"
+            : "inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] tabular-nums text-emerald-700"
+        }
+        title={`${prefix} · HTTP ${result.status} · ${result.durationMs}ms${result.upstreamModel ? ` · 上游 ${result.upstreamModel}` : ""}${protoSuffix} · ${new Date(result.at).toLocaleString()}`}
+      >
+        {persisted ? <Clock className="size-3" /> : <Check className="size-3" />}
+        HTTP {result.status} · {result.durationMs}ms
+      </span>
+    );
+  }
+  return (
+    <span
+      className={
+        persisted
+          ? "inline-flex items-center gap-1 rounded-md border border-red-200/80 bg-red-50/60 px-1.5 py-0.5 text-[10px] tabular-nums text-red-600"
+          : "inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] tabular-nums text-red-700"
+      }
+      title={`${persisted ? "上次快测记录" : "快测"}失败 · ${result.status != null ? `HTTP ${result.status}` : "网络错误"}${result.error ? ` · ${result.error}` : ""}${protoSuffix} · ${new Date(result.at).toLocaleString()}`}
+    >
+      {persisted ? <Clock className="size-3" /> : <X className="size-3" />}
+      {result.status != null ? `HTTP ${result.status}` : "失败"}
+      {result.error && <span className="max-w-[12rem] truncate font-normal opacity-80">{result.error}</span>}
+    </span>
+  );
+}
+
+export function RoutesModule({
+  editModelTarget,
+  onEditModelTargetConsumed,
+}: {
+  /** v4.9.13-local-r15：总览 Top 成本模型 chip 联动 —— 目标模型名（编辑/克隆/预填新建三级回退） */
+  editModelTarget?: string | null;
+  onEditModelTargetConsumed?: () => void;
+} = {}) {
   const [data, setData] = React.useState<RoutesData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
@@ -778,6 +962,25 @@ export function RoutesModule() {
     void load();
   }, [load]);
 
+  // r17：GET 回读的 lastTest 种入 batchResults —— 快测徽标刷新后常驻（会话内已有结果的键优先，
+  // 不会被历史数据回写覆盖；source=persisted 驱动徽标淡样式）。隐式路由区同样受益。
+  const seedPersistedResults = React.useCallback((d: RoutesData) => {
+    setBatchResults((prev) => {
+      const next = { ...prev };
+      for (const r of d.routes) {
+        if (r.lastTest && !(r.model in next)) next[r.model] = fromRouteTestRecord(r.lastTest, "persisted");
+      }
+      for (const r of d.implicitRoutes ?? []) {
+        if (r.lastTest && !(r.model in next)) next[r.model] = fromRouteTestRecord(r.lastTest, "persisted");
+      }
+      return next;
+    });
+  }, []);
+
+  React.useEffect(() => {
+    if (data) seedPersistedResults(data);
+  }, [data, seedPersistedResults]);
+
   React.useEffect(() => {
     if (!notice) return;
     const t = setTimeout(() => setNotice(""), 3000);
@@ -799,8 +1002,164 @@ export function RoutesModule() {
   const [delTarget, setDelTarget] = React.useState<RouteRow | null>(null);
   const [delSaving, setDelSaving] = React.useState(false);
 
+  // v4.9.13-local：隐式代码默认路由「转为自定义」落库（逐条 busy 防双击重复提交）
+  const [materializing, setMaterializing] = React.useState<string | null>(null);
+  const materialize = async (r: ImplicitRouteRow) => {
+    if (materializing) return;
+    setMaterializing(r.model);
+    try {
+      await apiPost("/api/console/routes", {
+        model: r.model,
+        prompt: null,
+        candidates: r.candidates.map((c) => ({ providerId: c.providerId, model: c.model })),
+      });
+      setNotice(`路由「${r.model}」已转为自定义（候选链照搬，可编辑可停用）`);
+      await load();
+    } catch (e) {
+      setError(errMessage(e));
+    } finally {
+      setMaterializing(null);
+    }
+  };
+
   // v4.9.12-local-r4：行内快速测试
   const [testTarget, setTestTarget] = React.useState<RouteRow | null>(null);
+
+  // ---- v4.9.13-local-r15：路由批量快测（「全部测试」）----
+  const [testingAll, setTestingAll] = React.useState(false);
+  const testingAllRef = React.useRef(false);
+  const [testingRouteModel, setTestingRouteModel] = React.useState<string | null>(null);
+  const [batchResults, setBatchResults] = React.useState<Record<string, RouteBatchResult>>({});
+  // 批测密钥收集对话框：sessionStorage 无密钥时先弹出（与单测共用存储，输入一次两边可用）
+  const [batchKeyOpen, setBatchKeyOpen] = React.useState(false);
+  const [batchKeyDraft, setBatchKeyDraft] = React.useState("");
+  const [batchKeyError, setBatchKeyError] = React.useState("");
+
+  // 供批测循环 / 联动 effect 读取最新路由列表而不依赖闭包时序（实际同步在下方 routes 派生之后）
+  const routesRef = React.useRef<RouteRow[]>([]);
+  const implicitRoutesRef = React.useRef<ImplicitRouteRow[]>([]);
+  // ⌘K 待处理旗标 / 事件在数据未就绪时到达 → 缓冲至 pendingBatch，数据加载完成后自动执行
+  const [pendingBatch, setPendingBatch] = React.useState(false);
+  const dataReadyRef = React.useRef(false);
+
+  const runAllRouteTests = React.useCallback(async () => {
+    if (testingAllRef.current) return;
+    const apiKey = (sessionStorage.getItem(ROUTE_TEST_KEY_STORAGE) ?? "").trim();
+    if (!apiKey) {
+      setBatchKeyDraft("");
+      setBatchKeyError("");
+      setBatchKeyOpen(true);
+      return;
+    }
+    const custom = routesRef.current;
+    const implicit = implicitRoutesRef.current;
+    const targets = [...custom, ...implicit];
+    if (targets.length === 0) {
+      setNotice("尚无路由可测试 —— 请先创建模型路由");
+      return;
+    }
+    testingAllRef.current = true;
+    setTestingAll(true);
+    setBatchResults({});
+    const protocol: TestProtocol = sessionStorage.getItem(ROUTE_TEST_PROTO_STORAGE) === "anthropic" ? "anthropic" : "openai";
+    let okCount = 0;
+    let failCount = 0;
+    let skipCount = 0;
+    // r17：本轮产生的持久化记录（skipped 不落库；无候选/失败/成功均落库）
+    const records: Array<{ model: string; record: RouteTestRecord }> = [];
+    for (const r of targets) {
+      const disabled = !r.enabled;
+      const noCandidate = r.candidates.length === 0;
+      if (disabled) {
+        skipCount++;
+        setBatchResults((m) => ({ ...m, [r.model]: { ok: false, status: null, durationMs: 0, upstreamModel: null, skipped: true, at: new Date().toISOString(), protocol, source: "session" } }));
+        continue;
+      }
+      setTestingRouteModel(r.model);
+      if (noCandidate) {
+        failCount++;
+        const res: RouteBatchResult = { ok: false, status: null, durationMs: 0, upstreamModel: null, error: "无候选 —— 请求将 404", at: new Date().toISOString(), protocol, source: "session" };
+        setBatchResults((m) => ({ ...m, [r.model]: res }));
+        records.push({ model: r.model, record: toRouteTestRecord(res, protocol) });
+        continue;
+      }
+      const result = await sendRouteProbe(r.model, apiKey, protocol);
+      if (result.ok) okCount++;
+      else failCount++;
+      const stamped: RouteBatchResult = { ...result, protocol, source: "session" };
+      setBatchResults((m) => ({ ...m, [r.model]: stamped }));
+      records.push({ model: r.model, record: toRouteTestRecord(stamped, protocol) });
+    }
+    setTestingRouteModel(null);
+    setTestingAll(false);
+    testingAllRef.current = false;
+    // r17：批量落库（一次读改写；失败静默不阻断 —— 徽标本轮会话仍可见，下次 GET 回读重试）
+    if (records.length > 0) {
+      void apiPost("/api/console/routes/test-results", { results: records }).catch(() => {});
+    }
+    setNotice(`全部测试完成：${okCount} 连通 / ${failCount} 失败${skipCount > 0 ? ` / ${skipCount} 跳过（停用）` : ""}（共 ${targets.length} 条，协议 ${protocol === "anthropic" ? "Anthropic" : "OpenAI"}）· 结果已保存`);
+  }, []);
+
+  // ⌘K 面板「路由全部测试」入口：双通道防错过（与提供商批测同构）。
+  // 数据未就绪时事件/旗标先落入 pendingBatch，由下方 effect 在 data 到达后自动执行。
+  React.useEffect(() => {
+    const handler = () => {
+      if (dataReadyRef.current) void runAllRouteTests();
+      else setPendingBatch(true);
+    };
+    window.addEventListener("uag:run-route-test-all", handler);
+    try {
+      if (sessionStorage.getItem("uag:pending-route-test-all") === "1") {
+        sessionStorage.removeItem("uag:pending-route-test-all");
+        handler();
+      }
+    } catch {
+      /* sessionStorage 不可用时仅依赖事件通道 */
+    }
+    return () => window.removeEventListener("uag:run-route-test-all", handler);
+  }, [runAllRouteTests]);
+
+  // pendingBatch 缓冲执行：data 就绪后的下一渲染触发批测（覆盖 ⌘K 先于数据到达的场景）
+  React.useEffect(() => {
+    if (!pendingBatch || !data) return;
+    setPendingBatch(false);
+    void runAllRouteTests();
+  }, [pendingBatch, data, runAllRouteTests]);
+
+  // ---- v4.9.13-local-r15：总览 Top 成本模型 chip 联动 ----
+  // 数据就绪后解析目标模型：自定义路由 → 编辑；代码默认路由 → 克隆预填；都不存在 → 预填新建。
+  // 消费后立即回调清空父级 state，避免对话框关闭后重开。
+  React.useEffect(() => {
+    if (!editModelTarget || !data) return;
+    const m = editModelTarget;
+    onEditModelTargetConsumed?.();
+    const custom = routes.find((r) => r.model === m);
+    if (custom) {
+      openEdit(custom);
+      return;
+    }
+    const implicit = implicitRoutes.find((r) => r.model === m);
+    if (implicit) {
+      openClone({ model: implicit.model, prompt: null, candidates: implicit.candidates });
+      return;
+    }
+    setEditing(null);
+    setCloneSource(null);
+    setModelName(m);
+    setRouteEnabled(true);
+    setCandidates([newDraft()]);
+    setPrompt("");
+    setFormError("");
+    setDialogOpen(true);
+  }, [editModelTarget, data]);
+
+  // v4.9.12-local-r14：路由搜索筛选（模型名 / 候选模型 / 提供商名；含代码默认路由）
+  const [filter, setFilter] = React.useState("");
+  const filterQ = filter.trim().toLowerCase();
+  const filtering = filterQ.length > 0;
+
+  // v4.9.12-local-r14：克隆路由（基于现有路由/代码默认路由预填新建对话框；模型名自动去重）
+  const [cloneSource, setCloneSource] = React.useState<string | null>(null);
 
   // v4.9.12-local-r9：模型目录缓存手动失效（路由/提供商变更后元数据立即可见，不必等 5min 新鲜期）
   const [catalogRefreshing, setCatalogRefreshing] = React.useState(false);
@@ -831,6 +1190,7 @@ export function RoutesModule() {
 
   const openCreate = () => {
     setEditing(null);
+    setCloneSource(null);
     setRouteEnabled(true);
     setCandidates([newDraft()]);
     setPrompt("");
@@ -840,12 +1200,30 @@ export function RoutesModule() {
 
   const openEdit = (r: RouteRow) => {
     setEditing(r);
+    setCloneSource(null);
     setModelName(r.model);
     setRouteEnabled(r.enabled);
     setCandidates(r.candidates.map((c) => newDraft(c.providerId, c.model)));
     if (r.candidates.length === 0) setCandidates([newDraft()]);
     setFormError("");
     setPrompt(r.prompt ?? "");
+    setDialogOpen(true);
+  };
+
+  // v4.9.12-local-r14：克隆 —— 预填新建对话框（不直接落库，用户可先改模型名/候选链）。
+  // 模型名自动加 -copy 后缀并去重（-copy-2/-copy-3…）；128 位上限先截断基础名再加后缀。
+  const openClone = (r: { model: string; prompt: string | null; candidates: Array<{ providerId: string; model: string }> }) => {
+    const taken = new Set([...routes, ...implicitRoutes].map((x) => x.model));
+    const stem = r.model.length > 116 ? r.model.slice(0, 116) : r.model;
+    let name = `${stem}-copy`;
+    for (let i = 2; taken.has(name); i++) name = `${stem}-copy-${i}`;
+    setEditing(null);
+    setCloneSource(r.model);
+    setModelName(name);
+    setRouteEnabled(true);
+    setCandidates(r.candidates.length > 0 ? r.candidates.map((c) => newDraft(c.providerId, c.model)) : [newDraft()]);
+    setPrompt(r.prompt ?? "");
+    setFormError("");
     setDialogOpen(true);
   };
 
@@ -928,6 +1306,20 @@ export function RoutesModule() {
   const providers = data?.providers ?? [];
   const providerName = (id: string) => providers.find((p) => p.id === id)?.name || id;
   const routes = data?.routes ?? [];
+  // v4.9.13-local：隐式代码默认路由（运行时生效、未落库）——单独成区展示
+  const implicitRoutes = data?.implicitRoutes ?? [];
+  // v4.9.13-local-r15：批测循环读取最新列表（每次渲染同步；放在派生声明之后避免 TDZ）
+  routesRef.current = routes;
+  implicitRoutesRef.current = implicitRoutes;
+  dataReadyRef.current = data != null;
+  // v4.9.12-local-r14：筛选后的可见路由（模型名/候选模型/提供商名，含隐式路由；无筛选时全量）
+  const matchRoute = (r: { model: string; candidates: Array<{ providerId: string; model: string }> }) =>
+    !filterQ ||
+    r.model.toLowerCase().includes(filterQ) ||
+    r.candidates.some((c) => c.model.toLowerCase().includes(filterQ) || providerName(c.providerId).toLowerCase().includes(filterQ));
+  const visibleRoutes = routes.filter(matchRoute);
+  const visibleImplicit = implicitRoutes.filter(matchRoute);
+  const totalMatches = visibleRoutes.length + visibleImplicit.length;
   // v4.9.12-local-r4：24h 统计（后端可能旧版未下带 → 可选）
   const stats24h = data?.stats24h ?? {};
   // v4.9.12-local-r5：按最终命中提供商聚合（键 = providerId）
@@ -937,13 +1329,30 @@ export function RoutesModule() {
     <div className="space-y-6">
       <PageHeader
         title="模型路由"
-        description={`客户端模型 → 有序候选链（顺序即故障转移优先级）· 共 ${routes.length} 条`}
+        description={
+          implicitRoutes.length > 0
+            ? `客户端模型 → 有序候选链（顺序即故障转移优先级）· 自定义 ${routes.length} 条 + 代码默认 ${implicitRoutes.length} 条`
+            : `客户端模型 → 有序候选链（顺序即故障转移优先级）· 共 ${routes.length} 条`
+        }
         actions={
           <>
             <Button variant="outline" size="sm" onClick={load} disabled={loading}>
               <RefreshCw className={loading ? "animate-spin" : undefined} />
               刷新
             </Button>
+            {/* v4.9.13-local-r15：全部测试 —— 逐条发送最小真实请求验证候选链（复用单测密钥/协议偏好） */}
+            {routes.length + implicitRoutes.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void runAllRouteTests()}
+                disabled={testingAll}
+                title="逐条发送最小真实请求（max_tokens=64）验证每条路由的候选链与上游连通性；与普通请求一样计费并写入运行日志"
+              >
+                <Zap className={testingAll ? "animate-pulse text-amber-500" : undefined} />
+                {testingAll ? "测试中…" : "全部测试"}
+              </Button>
+            )}
             {/* v4.9.12-local-r9：目录缓存手动失效 —— 提供商/候选变更后元数据立即可见 */}
             <Button
               variant="outline"
@@ -965,6 +1374,37 @@ export function RoutesModule() {
 
       {/* v4.9.12-local-r10：目录缓存快照条（r9 建议项 ④：缓存年龄常驻可见，不再仅失效后瞬时展示） */}
       <CatalogCacheBar cache={catalogCache} />
+
+      {/* v4.9.12-local-r14：路由搜索筛选（模型名/候选模型/提供商名；含代码默认路由） */}
+      {routes.length + implicitRoutes.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative max-w-sm flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-stone-400" aria-hidden />
+            <Input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="筛选路由：模型名 / 候选模型 / 提供商名…"
+              className="h-8 pl-8 pr-8 text-xs"
+              aria-label="筛选路由"
+            />
+            {filter && (
+              <button
+                type="button"
+                onClick={() => setFilter("")}
+                aria-label="清除筛选"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-stone-400 transition-colors hover:text-stone-600"
+              >
+                <X className="size-3.5" aria-hidden />
+              </button>
+            )}
+          </div>
+          {filtering && (
+            <span className="text-[11px] tabular-nums text-stone-500" role="status" aria-live="polite">
+              {totalMatches === 0 ? "无匹配路由" : `${totalMatches}/${routes.length + implicitRoutes.length} 条匹配`}
+            </span>
+          )}
+        </div>
+      )}
 
       {notice && (
         <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
@@ -988,10 +1428,14 @@ export function RoutesModule() {
             </Button>
           }
         />
+      ) : visibleRoutes.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-stone-200 bg-stone-50/60 px-4 py-8 text-center text-xs text-muted-foreground">
+          没有匹配「{filter}」的自定义路由 —— 候选模型名与提供商名也参与匹配
+        </div>
       ) : (
         <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
           <div className="divide-y divide-stone-100">
-            {routes.map((r) => (
+            {visibleRoutes.map((r) => (
               <div key={r.id} className="px-4 py-4 transition-colors hover:bg-stone-50/70">
                 {/* 主行：开关 + 模型名 | 候选链 | 操作 */}
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -1054,6 +1498,17 @@ export function RoutesModule() {
                     >
                       <Pencil className="text-stone-400 transition-colors" />
                     </Button>
+                    {/* v4.9.12-local-r14：克隆路由 */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => openClone(r)}
+                      aria-label={`克隆路由 ${r.model}`}
+                      title="克隆：基于该路由预填新建（候选链/提示词同源，模型名自动加 -copy 后缀）"
+                      className="hover:[&_[svg]]:text-stone-800"
+                    >
+                      <Copy className="text-stone-400 transition-colors" />
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"
@@ -1067,9 +1522,10 @@ export function RoutesModule() {
                   </div>
                 </div>
 
-                {/* 统计条：近 24h 调用概览（与模型名左缘对齐） */}
-                <div className="mt-2.5 sm:pl-12">
+                {/* 统计条：近 24h 调用概览（与模型名左缘对齐）+ r15 批测结果徽标 */}
+                <div className="mt-2.5 flex flex-wrap items-center gap-2 sm:pl-12">
                   <RouteStatBadges stat={stats24h[r.model]} />
+                  <RouteBatchBadge result={batchResults[r.model]} testing={testingRouteModel === r.model} />
                 </div>
               </div>
             ))}
@@ -1081,13 +1537,142 @@ export function RoutesModule() {
         <p className="text-xs text-amber-700">尚无提供商 —— 请先在「API 中转」中创建，否则路由候选无处可选。</p>
       )}
 
+      {/* ---------- v4.9.13-local：代码默认路由（运行时回填、未落库） ----------
+          背景：backfillMissingRoutes 让发版新增的默认路由对存量配置可见（只补内存不写库），
+          这批路由真实生效（客户端可调用、总览计数包含它们）但此前在管理页完全不可见，
+          造成「总览 9 条 vs 管理页 3 条」的口径困惑。此处只读展示 + 一键落库接管。 */}
+      {visibleImplicit.length > 0 && (
+        <section
+          aria-label="代码默认路由（未落库）"
+          className="overflow-hidden rounded-xl border border-dashed border-stone-300 bg-stone-50/60"
+        >
+          <div className="flex flex-wrap items-center gap-2 border-b border-dashed border-stone-200 bg-white/70 px-4 py-3">
+            <Code2 className="size-4 text-stone-500" />
+            <h2 className="text-sm font-semibold text-stone-700">代码默认路由</h2>
+            <Badge variant="outline" className="text-[10px] text-stone-500">
+              {implicitRoutes.length} 条 · 未落库
+            </Badge>
+            <p className="w-full text-[11px] leading-relaxed text-stone-500 sm:w-auto sm:flex-1">
+              由发版内置默认回填生效（可被客户端调用，总览计数含它们），但未写入数据库 —— 需要编辑、停用或固定候选链时点击「转为自定义」落库接管。
+            </p>
+          </div>
+          <div className="divide-y divide-dashed divide-stone-200">
+            {visibleImplicit.map((r) => (
+              <div key={r.model} className="px-4 py-3.5 transition-colors hover:bg-white/80">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <div className="flex min-w-0 items-center gap-3 sm:w-72">
+                    <span
+                      className="inline-flex size-5 shrink-0 items-center justify-center rounded-full border border-stone-300 bg-white"
+                      title="代码默认路由恒为启用（回填只增不改）；落库后可在自定义区停用"
+                    >
+                      <Check className="size-3 text-emerald-600" />
+                    </span>
+                    <code className="min-w-0 truncate font-mono text-sm font-medium text-stone-700" title={r.model}>
+                      {r.model}
+                    </code>
+                    <Badge variant="outline" className="shrink-0 border-stone-300 bg-stone-50 text-[10px] text-stone-500">
+                      默认
+                    </Badge>
+                  </div>
+
+                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                    {r.candidates.length === 0 ? (
+                      <span className="text-xs text-muted-foreground">无候选（请求将 404）</span>
+                    ) : (
+                      r.candidates.map((c, i) => (
+                        <React.Fragment key={`${c.providerId}/${c.model}/${i}`}>
+                          {i > 0 && <ArrowRight className="size-3.5 text-stone-300" />}
+                          <span
+                            className="inline-flex max-w-[17rem] items-center gap-1 whitespace-nowrap rounded-md border border-stone-200 bg-white px-2 py-0.5 font-mono text-[11px] transition-colors hover:border-stone-300"
+                            title={`${providerName(c.providerId)} / ${c.model}${providerHitTitle(providerStats24h[c.providerId])}`}
+                          >
+                            <span className="shrink-0 whitespace-nowrap text-emerald-700">{providerName(c.providerId)}</span>
+                            <span className="shrink-0 text-stone-400">/</span>
+                            <span className="min-w-0 truncate">{c.model}</span>
+                            {providerHitBadge(providerStats24h[c.providerId])}
+                          </span>
+                        </React.Fragment>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="flex shrink-0 justify-end gap-1">
+                    {/* v4.9.12-local-r14：基于默认路由克隆（无需先落库即可建可编辑副本） */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => openClone({ model: r.model, prompt: null, candidates: r.candidates })}
+                      aria-label={`基于 ${r.model} 克隆`}
+                      title="克隆：基于该默认路由预填新建自定义路由（无需先落库）"
+                      className="hover:[&_[svg]]:text-stone-800"
+                    >
+                      <Copy className="text-stone-400 transition-colors" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() =>
+                        setTestTarget({
+                          id: -1,
+                          model: r.model,
+                          enabled: true,
+                          prompt: null,
+                          candidates: r.candidates.map((c, i) => ({ id: -1 - i, providerId: c.providerId, model: c.model, enabled: true, sortOrder: i })),
+                        })
+                      }
+                      aria-label={`快速测试 ${r.model}`}
+                      title="快速测试：发送一条最小真实请求验证候选链"
+                      className="group/t"
+                    >
+                      <Zap className="text-stone-400 transition-colors group-hover/t:text-amber-500" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void materialize(r)}
+                      disabled={materializing === r.model}
+                      title="把该路由及其候选链写入数据库，转为可编辑、可停用的自定义路由"
+                      className="h-7 gap-1.5 px-2 text-[11px]"
+                    >
+                      {materializing === r.model ? (
+                        <Loader2 className="size-3 animate-spin" />
+                      ) : (
+                        <HardDriveDownload className="size-3" />
+                      )}
+                      转为自定义
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="mt-2.5 flex flex-wrap items-center gap-2 sm:pl-12">
+                  <RouteStatBadges stat={stats24h[r.model]} />
+                  <RouteBatchBadge result={batchResults[r.model]} testing={testingRouteModel === r.model} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* ---------- 新增 / 编辑路由 Dialog ---------- */}
-      <Dialog open={dialogOpen} onOpenChange={(o) => !o && setDialogOpen(false)}>
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(o) => {
+          if (!o) {
+            setDialogOpen(false);
+            setCloneSource(null);
+          }
+        }}
+      >
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{editing ? `编辑路由 · ${editing.model}` : "新增模型路由"}</DialogTitle>
+            <DialogTitle>
+              {editing ? `编辑路由 · ${editing.model}` : cloneSource ? `克隆路由 · 基于 ${cloneSource}` : "新增模型路由"}
+            </DialogTitle>
             <DialogDescription>
-              候选按顺序故障转移：请求失败或模型身份错误时自动切换到下一个候选。拖动把手调整顺序。
+              {cloneSource && !editing
+                ? "候选链与提示词已从源路由预填（克隆）；模型名已自动去重，可继续调整后创建。"
+                : "候选按顺序故障转移：请求失败或模型身份错误时自动切换到下一个候选。拖动把手调整顺序。"}
             </DialogDescription>
           </DialogHeader>
 
@@ -1189,8 +1774,69 @@ export function RoutesModule() {
           providerName={providerName}
           open={!!testTarget}
           onOpenChange={(o) => !o && setTestTarget(null)}
+          onTestPersisted={(rec) =>
+            // r17：单测结果实时同步到行内徽标（source=session 实底样式；刷新后由 GET 回读转为 persisted 淡样式）
+            setBatchResults((m) => ({ ...m, [testTarget.model]: fromRouteTestRecord(rec, "session") }))
+          }
         />
       )}
+
+      {/* ---------- v4.9.13-local-r15：批测密钥收集（sessionStorage 无密钥时先弹一次；与单测共用存储） ---------- */}
+      <Dialog open={batchKeyOpen} onOpenChange={setBatchKeyOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="size-4 text-amber-500" />
+              全部测试 · 需要一个 API 密钥
+            </DialogTitle>
+            <DialogDescription>
+              批测会以每条路由的模型名发送最小真实请求（max_tokens=64），与普通请求一样计费并写入运行日志。密钥仅保存在浏览器会话内（sessionStorage），与单路由快速测试共用。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="rt-batch-key">API 密钥</Label>
+            <Input
+              id="rt-batch-key"
+              type="password"
+              value={batchKeyDraft}
+              onChange={(e) => {
+                setBatchKeyDraft(e.target.value);
+                setBatchKeyError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && batchKeyDraft.trim()) {
+                  sessionStorage.setItem(ROUTE_TEST_KEY_STORAGE, batchKeyDraft.trim());
+                  setBatchKeyOpen(false);
+                  void runAllRouteTests();
+                }
+              }}
+              placeholder="sk-uag-...（虚拟密钥或 Master Key）"
+              className="font-mono text-xs"
+              autoComplete="off"
+              spellCheck={false}
+              autoFocus
+            />
+            {batchKeyError && <p className="text-xs text-red-600">{batchKeyError}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchKeyOpen(false)}>
+              取消
+            </Button>
+            <Button
+              className="bg-stone-900 hover:bg-stone-800"
+              disabled={!batchKeyDraft.trim()}
+              onClick={() => {
+                sessionStorage.setItem(ROUTE_TEST_KEY_STORAGE, batchKeyDraft.trim());
+                setBatchKeyOpen(false);
+                void runAllRouteTests();
+              }}
+            >
+              <Zap className="size-4" />
+              开始全部测试
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ---------- 删除确认 ---------- */}
       <AlertDialog open={!!delTarget} onOpenChange={(o) => !o && setDelTarget(null)}>

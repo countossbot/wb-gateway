@@ -3,7 +3,7 @@
   "version": "0.2.1",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000 2>&1 | tee dev.log",
+    "dev": "bash scripts/dev-with-env.sh",
     "build": "bun run db:check-schemas && next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/ && mkdir -p .next/standalone/prisma && cp prisma/init.postgres.sql prisma/init.mysql.sql .next/standalone/prisma/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "db:dump-schema": "bun run db:check-schemas && bun run db:dump-schema:pg && bun run db:dump-schema:mysql",

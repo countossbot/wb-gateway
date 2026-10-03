@@ -8,6 +8,7 @@ import {
   BarChart3,
   Check,
   Code2,
+  FlaskConical,
   Gauge,
   KeyRound,
   Loader2,
@@ -45,6 +46,7 @@ import {
   CopyButton,
   EmptyState,
   ErrorAlert,
+  FailureBadge,
   HealthBadge,
   LastUsedCell,
   LoadingBlock,
@@ -54,8 +56,8 @@ import {
 } from "@/components/console/ui";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
 import { absoluteTime, fmtUsd } from "@/lib/console/format";
-import type { BillingData, CreatedKey, KeysData, VirtualKeyRow } from "@/lib/console/types";
-import { QuickTestPanel } from "@/components/console/quick-test-panel";
+import type { BillingData, CreatedKey, KeysData, RoutesData, VirtualKeyRow } from "@/lib/console/types";
+import { QuickTestPanel, type QuickTestPanelHandle } from "@/components/console/quick-test-panel";
 
 /** v3.5.0：密钥名 → 近 7 天逐日用量（sparkline 数据源）；v4.4.0：附带当日估算成本（$，未计价行不计） */
 type Usage7dMap = Map<string, Array<{ day: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cost: number }>>;
@@ -273,11 +275,33 @@ function RevealAndCopyButton({ keyId, masked }: { keyId: string; masked: string 
   );
 }
 
-export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => void } = {}) {
+export function KeysModule({
+  onViewLogs,
+  onDrillErrors,
+}: {
+  onViewLogs?: (keyName: string) => void;
+  /** v4.9.13-local-r6：健康面板失败徽标点击下钻（该密钥 + 5xx 状态大类组合筛选，与账号页同款交互）；
+   *  v4.9.13-local-r9：第二参数 errorKeyword —— tooltip 模式行点击携骨架片段时改走关键字下钻（精准命中该模式组，状态清回） */
+  onDrillErrors?: (keyName: string, errorKeyword?: string) => void;
+} = {}) {
   const [data, setData] = React.useState<KeysData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [notice, setNotice] = React.useState("");
+
+  // v4.9.13-local-r3：Playground 命令句柄 —— 密钥行「在 Playground 中测试」经此载入密钥并滚动面板
+  const playgroundRef = React.useRef<QuickTestPanelHandle | null>(null);
+  // 行按钮 spinner（同一时间只允许一个载入中；与面板内部 keyLoadingId 独立，仅驱动图标反馈）
+  const [testingKeyId, setTestingKeyId] = React.useState<string | null>(null);
+  const testInPlayground = async (k: VirtualKeyRow) => {
+    if (!k.enabled || testingKeyId) return;
+    setTestingKeyId(k.id);
+    try {
+      await playgroundRef.current?.loadKey({ id: k.id, name: k.name, keyMasked: k.keyMasked, enabled: k.enabled });
+    } finally {
+      setTestingKeyId(null);
+    }
+  };
 
   // 新建 / 编辑
   const [editOpen, setEditOpen] = React.useState(false);
@@ -643,33 +667,48 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                       <BudgetCell k={k} />
                     </TableCell>
                     <TableCell className="hidden xl:table-cell">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <HealthBadge
-                            stats24h={k.stats24h}
-                            todayTokens={
-                              k.todayStats && k.todayStats.requests > 0
-                                ? k.todayStats.inputTokens + k.todayStats.outputTokens
-                                : null
-                            }
-                            onClick={onViewLogs ? () => onViewLogs(k.name) : undefined}
-                            ariaLabel={`查看密钥 ${k.name} 近 24h 请求日志`}
-                            tooltipTitle={`近 24 小时使用该密钥的请求：${k.stats24h?.requests ?? 0} 次，成功率 ${k.stats24h?.successRate ?? 0}%`}
+                      {/* v4.9.13-local-r6：健康面板纵向堆叠 —— 徽标 + （失败>0 时）失败下钻徽章 */}
+                      <div className="flex flex-col items-start gap-1">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HealthBadge
+                              stats24h={k.stats24h}
+                              todayTokens={
+                                k.todayStats && k.todayStats.requests > 0
+                                  ? k.todayStats.inputTokens + k.todayStats.outputTokens
+                                  : null
+                              }
+                              onClick={onViewLogs ? () => onViewLogs(k.name) : undefined}
+                              ariaLabel={`查看密钥 ${k.name} 近 24h 请求日志`}
+                              tooltipTitle={`近 24 小时使用该密钥的请求：${k.stats24h?.requests ?? 0} 次，成功率 ${k.stats24h?.successRate ?? 0}%`}
+                            />
+                          </TooltipTrigger>
+                          {(k.stats24h?.requests ?? 0) > 0 && (
+                            <TooltipContent>
+                              近 24 小时使用该密钥的请求：{k.stats24h!.requests} 次，成功率 {k.stats24h!.successRate}%，失败 {k.stats24h?.failures ?? 0} 次
+                              {k.todayStats && k.todayStats.requests > 0 && (
+                                <span className="block tabular-nums text-muted-foreground">
+                                  今日：{k.todayStats.requests} 次 · 输入 {k.todayStats.inputTokens.toLocaleString()} / 输出 {k.todayStats.outputTokens.toLocaleString()}
+                                  {k.todayStats.cachedTokens > 0 ? ` · 缓存命中 ${k.todayStats.cachedTokens.toLocaleString()}` : ""} tokens
+                                </span>
+                              )}
+                              {onViewLogs ? " · 点击查看请求日志 →" : ""}
+                            </TooltipContent>
+                          )}
+                        </Tooltip>
+                        {/* v4.9.13-local-r6：24h 失败徽标 —— 仅失败 >0 时渲染（零失败零噪音，与账号页同款）； */}
+                        {/* v4.9.13-local-r8：升级共享 FailureBadge —— 悬停 tooltip 内联拉取该密钥 24h 错误模式分布（免跳转即知"失败的是什么错"），点击仍下钻 5xx； */}
+                        {/* v4.9.13-local-r9：tooltip 模式行可点击 —— 按该模式的错误关键字下钻（密钥 × 关键字组合，比 5xx 更精准） */}
+                        {(k.stats24h?.failures ?? 0) > 0 && (
+                          <FailureBadge
+                            count={k.stats24h!.failures ?? 0}
+                            ariaLabel={`查看密钥 ${k.name} 近 24h 失败请求（按 5xx 过滤）`}
+                            onClick={onDrillErrors ? () => onDrillErrors(k.name) : undefined}
+                            patternQuery={{ key: k.name }}
+                            onPickPattern={onDrillErrors ? (kw) => onDrillErrors(k.name, kw) : undefined}
                           />
-                        </TooltipTrigger>
-                        {(k.stats24h?.requests ?? 0) > 0 && (
-                          <TooltipContent>
-                            近 24 小时使用该密钥的请求：{k.stats24h!.requests} 次，成功率 {k.stats24h!.successRate}%，失败 {k.stats24h?.failures ?? 0} 次
-                            {k.todayStats && k.todayStats.requests > 0 && (
-                              <span className="block tabular-nums text-muted-foreground">
-                                今日：{k.todayStats.requests} 次 · 输入 {k.todayStats.inputTokens.toLocaleString()} / 输出 {k.todayStats.outputTokens.toLocaleString()}
-                                {k.todayStats.cachedTokens > 0 ? ` · 缓存命中 ${k.todayStats.cachedTokens.toLocaleString()}` : ""} tokens
-                              </span>
-                            )}
-                            {onViewLogs ? " · 点击查看请求日志 →" : ""}
-                          </TooltipContent>
                         )}
-                      </Tooltip>
+                      </div>
                     </TableCell>
                     <TableCell className="hidden lg:table-cell">
                       {/* v3.8.0：改用共享 LastUsedCell（与账号页「最后调用」同款组件，样式统一） */}
@@ -715,6 +754,21 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        {/* v4.9.13-local-r3：在 Playground 中测试 —— 一键载入该密钥并滚动到面板（上轮建议 #2 落地） */}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => void testInPlayground(k)}
+                          disabled={!k.enabled || !!testingKeyId}
+                          aria-label={`在 Playground 中测试 ${k.name}`}
+                          title={k.enabled ? "在 Playground 中测试（自动载入该密钥并滚动到面板）" : "密钥已停用，无法测试"}
+                        >
+                          {testingKeyId === k.id ? (
+                            <Loader2 className="animate-spin text-teal-600" />
+                          ) : (
+                            <FlaskConical className="text-teal-600" />
+                          )}
+                        </Button>
                         <Button variant="ghost" size="icon" onClick={() => setUsageKey(k)} aria-label={`查看 ${k.name} 的月度用量明细`} title="月度用量明细（分模型 token/成本）">
                           <BarChart3 className="text-stone-500" />
                         </Button>
@@ -927,7 +981,12 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
       <KeyUsageDialog usageKey={usageKey} onClose={() => setUsageKey(null)} />
 
       {/* v4.9.8：快速测试面板 —— 粘贴密钥 + 选模型 + 发送请求 + 看响应 */}
-      <QuickTestPanel />
+      {/* v4.9.13-local-r2：透传密钥清单（仅展示字段），Playground 可一键载入（按需 reveal 明文） */}
+      {/* v4.9.13-local-r3：挂 ref —— 密钥行「在 Playground 中测试」按钮经命令句柄驱动 */}
+      <QuickTestPanel
+        ref={playgroundRef}
+        keys={(data?.keys ?? []).map((k) => ({ id: k.id, name: k.name, keyMasked: k.keyMasked, enabled: k.enabled }))}
+      />
     </div>
   );
 }
@@ -938,10 +997,17 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
  * 供管理员快速把客户端接入网关。密钥仅显示掩码 —— 示例统一使用占位符，
  * 提醒替换为创建密钥时保存的完整密钥（明文不回传，符合密钥治理口径）。
  */
-const SAMPLE_MODEL = "glm-4.6"; // 网关当前主力路由；新建其他路由后可自行替换
+// v4.9.13-local：接入示例模型动态化 —— 原硬编码 "glm-4.6" 在本部署无此路由，新用户照示例接入必 404。
+// 现改为打开对话框时拉取 /api/console/routes（含 implicitRoutes 运行时隐式路由），
+// 自动选 24h 流量最高的可用模型，并支持下拉切换；拉取失败时才回落此硬编码值。
+const SAMPLE_FALLBACK_MODEL = "glm-4.6";
 const KEY_PLACEHOLDER = "sk-uag-【替换为完整密钥】";
 
-function buildSamples(origin: string, protocol: "openai" | "anthropic"): { curl: string; python: string; node: string; env: string } {
+function buildSamples(
+  origin: string,
+  protocol: "openai" | "anthropic",
+  model: string
+): { curl: string; python: string; node: string; env: string } {
   const userMsg = "你好，用一句话介绍你自己";
   if (protocol === "openai") {
     return {
@@ -949,7 +1015,7 @@ function buildSamples(origin: string, protocol: "openai" | "anthropic"): { curl:
   -H "Authorization: Bearer ${KEY_PLACEHOLDER}" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "${SAMPLE_MODEL}",
+    "model": "${model}",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "${userMsg}"}]
   }'`,
@@ -962,7 +1028,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="${SAMPLE_MODEL}",
+    model="${model}",
     max_tokens=1024,
     messages=[{"role": "user", "content": "${userMsg}"}],
 )
@@ -976,7 +1042,7 @@ const res = await fetch("${origin}/v1/chat/completions", {
     "Content-Type": "application/json",
   },
   body: JSON.stringify({
-    model: "${SAMPLE_MODEL}",
+    model: "${model}",
     max_tokens: 1024,
     messages: [{ role: "user", content: "${userMsg}" }],
   }),
@@ -994,7 +1060,7 @@ OPENAI_API_KEY=${KEY_PLACEHOLDER}`,
   -H "Authorization: Bearer ${KEY_PLACEHOLDER}" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "${SAMPLE_MODEL}",
+    "model": "${model}",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "${userMsg}"}]
   }'`,
@@ -1007,7 +1073,7 @@ client = anthropic.Anthropic(
 )
 
 msg = client.messages.create(
-    model="${SAMPLE_MODEL}",
+    model="${model}",
     max_tokens=1024,
     messages=[{"role": "user", "content": "${userMsg}"}],
 )
@@ -1021,7 +1087,7 @@ const res = await fetch("${origin}/v1/messages", {
     "Content-Type": "application/json",
   },
   body: JSON.stringify({
-    model: "${SAMPLE_MODEL}",
+    model: "${model}",
     max_tokens: 1024,
     messages: [{ role: "user", content: "${userMsg}" }],
   }),
@@ -1037,8 +1103,44 @@ ANTHROPIC_AUTH_TOKEN=${KEY_PLACEHOLDER}`,
 
 function IntegrationSamplesDialog({ sampleKey, onClose }: { sampleKey: VirtualKeyRow | null; onClose: () => void }) {
   const [protocol, setProtocol] = React.useState<"openai" | "anthropic">("openai");
+  // v4.9.13-local：示例模型动态化 —— 打开时拉取路由清单（DB 启用路由 + 运行时隐式路由），
+  // 自动选 24h 流量最高的模型；下拉可切换；拉取失败/无路由时回落 SAMPLE_FALLBACK_MODEL。
+  const [routeModels, setRouteModels] = React.useState<Array<{ model: string; requests24h: number; implicit: boolean }>>([]);
+  const [sampleModel, setSampleModel] = React.useState(SAMPLE_FALLBACK_MODEL);
+  const [modelsLoaded, setModelsLoaded] = React.useState(false);
   const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
-  const samples = React.useMemo(() => buildSamples(origin, protocol), [origin, protocol]);
+
+  React.useEffect(() => {
+    if (!sampleKey) return;
+    let alive = true;
+    setModelsLoaded(false);
+    (async () => {
+      try {
+        const d = await apiGet<RoutesData>("/api/console/routes");
+        if (!alive) return;
+        // 可用模型 = 启用的 DB 路由 + 全部隐式路由（回填只增不改，隐式恒为启用）；
+        // 停用的 DB 路由不进示例下拉（客户端调它 404）。
+        const stats = d.stats24h ?? {};
+        const combined = [
+          ...(d.routes ?? []).filter((r) => r.enabled).map((r) => ({ model: r.model, requests24h: stats[r.model]?.requests ?? 0, implicit: false })),
+          ...(d.implicitRoutes ?? []).map((r) => ({ model: r.model, requests24h: stats[r.model]?.requests ?? 0, implicit: true })),
+        ];
+        // 自动选择：24h 流量最高 → 无流量则取首个（隐式路由排后，优先用户自建）
+        combined.sort((a, b) => b.requests24h - a.requests24h || Number(a.implicit) - Number(b.implicit));
+        setRouteModels(combined);
+        if (combined.length > 0) setSampleModel(combined[0].model);
+        else setSampleModel(SAMPLE_FALLBACK_MODEL);
+      } catch {
+        // 路由拉取失败不阻断示例展示，回落硬编码值（用户可手动改示例里的 model 字段）
+        if (alive) { setRouteModels([]); setSampleModel(SAMPLE_FALLBACK_MODEL); }
+      } finally {
+        if (alive) setModelsLoaded(true);
+      }
+    })();
+    return () => { alive = false; };
+  }, [sampleKey]);
+
+  const samples = React.useMemo(() => buildSamples(origin, protocol, sampleModel), [origin, protocol, sampleModel]);
 
   React.useEffect(() => {
     if (sampleKey) setProtocol("openai");
@@ -1065,7 +1167,7 @@ function IntegrationSamplesDialog({ sampleKey, onClose }: { sampleKey: VirtualKe
         </DialogHeader>
 
         <div className="space-y-3">
-          {/* 协议切换 + 端点说明 */}
+          {/* 协议切换 + 示例模型选择 + 端点说明 */}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div role="tablist" aria-label="接入协议" className="flex rounded-lg border border-stone-200 bg-stone-50 p-0.5">
               {(["openai", "anthropic"] as const).map((p) => (
@@ -1083,9 +1185,40 @@ function IntegrationSamplesDialog({ sampleKey, onClose }: { sampleKey: VirtualKe
                 </button>
               ))}
             </div>
-            <code className="rounded bg-stone-100 px-2 py-1 font-mono text-[10px] text-stone-500">
-              POST {protocol === "openai" ? "/v1/chat/completions" : "/v1/messages"}
-            </code>
+            {/* v4.9.13-local：示例模型下拉 —— 全部为真实可用路由（含代码默认），照抄即通，不再 404 */}
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="shrink-0 text-[10px] font-medium text-stone-400">示例模型</span>
+              <Select value={sampleModel} onValueChange={setSampleModel} disabled={!modelsLoaded || routeModels.length === 0}>
+                <SelectTrigger
+                  className="h-7 min-w-0 gap-1 rounded-md border-stone-200 bg-white px-2 text-[11px] font-mono text-stone-700 hover:border-stone-300 data-[placeholder]:font-sans"
+                  aria-label="选择示例模型（当前网关可用路由）"
+                  title="片段中的 model 字段随此切换；列表为当前网关全部可用路由（含代码默认）"
+                >
+                  <SelectValue placeholder={modelsLoaded ? "无可用路由" : "加载中…"} />
+                </SelectTrigger>
+                <SelectContent className="max-h-64">
+                  {routeModels.length === 0 && (
+                    <div className="px-2 py-1.5 text-[11px] text-stone-500">
+                      无可用路由（回落 {SAMPLE_FALLBACK_MODEL}，请先在「模型路由」创建）
+                    </div>
+                  )}
+                  {routeModels.map((m) => (
+                    <SelectItem key={m.model} value={m.model} className="py-1 text-[11px]">
+                      <span className="font-mono">{m.model}</span>
+                      {m.requests24h > 0 && (
+                        <span className="ml-1.5 rounded bg-stone-100 px-1 text-[9px] tabular-nums text-stone-400">24h {m.requests24h} 次</span>
+                      )}
+                      {m.implicit && (
+                        <span className="ml-1.5 rounded border border-dashed border-stone-300 px-1 text-[9px] text-stone-400" title="代码默认路由（未落库，运行时生效）">默认</span>
+                      )}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <code className="shrink-0 rounded bg-stone-100 px-2 py-1 font-mono text-[10px] text-stone-500">
+                POST {protocol === "openai" ? "/v1/chat/completions" : "/v1/messages"}
+              </code>
+            </div>
           </div>
 
           <Tabs defaultValue="curl" key={protocol}>
@@ -1112,7 +1245,7 @@ function IntegrationSamplesDialog({ sampleKey, onClose }: { sampleKey: VirtualKe
 
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             两种协议共用同一把虚拟密钥与路由（网关自动转译请求/响应格式）；鉴权同时支持 <code className="rounded bg-stone-100 px-1 font-mono">Authorization: Bearer</code> 与 <code className="rounded bg-stone-100 px-1 font-mono">x-api-key</code> 头。
-            示例模型 {SAMPLE_MODEL} 需已在「模型路由」中配置，其他模型名按路由清单替换。
+            示例模型下拉列出当前网关全部可用路由（含代码默认），切换后片段中的 model 字段同步更新；密钥白名单不含所选模型时会被 403 拒绝。
           </p>
         </div>
 
