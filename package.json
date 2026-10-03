@@ -11,6 +11,8 @@
     "db:dump-schema:pg": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script > prisma/init.postgres.sql",
     "db:dump-schema:mysql": "prisma migrate diff --from-empty --to-schema-datamodel prisma/mysql/schema.prisma --script > prisma/init.mysql.sql",
     "lint": "eslint .",
+    "db:push-safe": "bun run scripts/db-push-safe.ts",
+    "db:check-sync": "bun run scripts/db-check-sync.ts",
     "db:push": "prisma db push --accept-data-loss",
     "db:push:mysql": "prisma db push --accept-data-loss --schema prisma/mysql/schema.prisma",
     "db:generate": "prisma generate && prisma generate --schema prisma/mysql/schema.prisma",

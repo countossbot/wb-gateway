@@ -230,6 +230,7 @@ export default function Home() {
             });
             setTab("logs");
           }}
+          onNavigate={(t) => setTab(t)}
         />
       )}
       {tab === "accounts" && (

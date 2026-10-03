@@ -53,6 +53,7 @@ import {
 } from "@/components/console/ui";
 import { Section } from "@/components/console/settings-sections";
 import { PricingSection } from "@/components/console/pricing-section";
+import { SystemInfoSection } from "@/components/console/system-info-section";
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
 import { relativeTime } from "@/lib/console/format";
 import type {
@@ -1005,6 +1006,9 @@ export function SettingsModule({ onPasswordChanged }: { onPasswordChanged: () =>
 
       {/* ---------- 模型单价 · 成本估算（v4.4.0）---------- */}
       <PricingSection />
+
+      {/* --- 系统信息（v4.9.1 新增）--- */}
+      <SystemInfoSection />
 
       {/* ---------- 操作审计（v3.2.0，v3.2.2 增保留期清理）---------- */}
       <Section

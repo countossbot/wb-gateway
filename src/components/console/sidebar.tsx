@@ -18,6 +18,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { RuntimeHealthBadge } from "@/components/console/runtime-health-badge";
+import { RssAlertBanner } from "@/components/console/rss-alert-banner";
+import { dbDialect } from "@/lib/db";
 import { cn } from "@/lib/utils";
 
 export type ConsoleTab =
@@ -120,11 +123,24 @@ export function ConsoleShell({
         <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-stone-200 bg-white px-3 py-5 lg:flex">
           <BrandBlock />
           <NavList active={active} onSelect={select} />
-          <div className="mt-auto px-2 pt-4">
-            <p className="text-[11px] text-muted-foreground">
-              Universal AI Gateway
-              <br />
-              本地部署 · SQLite
+          <div className="mt-auto space-y-2 px-2 pt-4">
+            <div className="space-y-1.5 rounded-lg border border-stone-200 bg-stone-50 p-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-stone-500">版本</span>
+                <Badge variant="outline" className="border-stone-300 bg-white px-1.5 py-0 font-mono text-[10px] text-stone-700">
+                  v{version}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-stone-500">数据库</span>
+                <Badge variant="outline" className="border-emerald-200 bg-emerald-50 px-1.5 py-0 text-[10px] text-emerald-700">
+                  {dbDialect === "mysql" ? "MySQL" : "PostgreSQL"}
+                </Badge>
+              </div>
+              <RuntimeHealthBadge />
+            </div>
+            <p className="text-center text-[10px] leading-tight text-stone-400">
+              Universal AI Gateway · 会话 12h 续期
             </p>
           </div>
         </aside>
@@ -181,6 +197,8 @@ export function ConsoleShell({
           </header>
 
           <main className="min-w-0 flex-1 px-4 py-6 lg:px-8">
+            {/* v4.9.5：RSS 高水位告警横幅 —— 仅在 RSS > 2GB 时渲染，全局可见 */}
+            <RssAlertBanner />
             <motion.div
               key={active}
               initial={{ opacity: 0, y: 8 }}

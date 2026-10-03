@@ -49,6 +49,7 @@ import {
 import { apiDelete, apiGet, apiPost, apiPut, errMessage } from "@/lib/console/api";
 import { absoluteTime, fmtUsd } from "@/lib/console/format";
 import type { CreatedKey, KeysData, VirtualKeyRow } from "@/lib/console/types";
+import { QuickTestPanel } from "@/components/console/quick-test-panel";
 
 /** v3.5.0：密钥名 → 近 7 天逐日用量（sparkline 数据源）；v4.4.0：附带当日估算成本（$，未计价行不计） */
 type Usage7dMap = Map<string, Array<{ day: string; requests: number; okRequests: number; inputTokens: number; outputTokens: number; cost: number }>>;
@@ -799,6 +800,9 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* v4.9.8：快速测试面板 —— 粘贴密钥 + 选模型 + 发送请求 + 看响应 */}
+      <QuickTestPanel />
     </div>
   );
 }

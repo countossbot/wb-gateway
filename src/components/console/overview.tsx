@@ -35,6 +35,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { OnboardingChecklist } from "@/components/console/onboarding-checklist";
 import {
   CopyButton,
   EmptyState,
@@ -1937,7 +1938,7 @@ function Trend7dCard({ days, prev, onDayClick }: { days: Trend7Day[]; prev?: Tre
   );
 }
 
-export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyClick, onModelClick }: { onHourClick?: (hourIso: string) => void; onDayClick?: (dayKey: string) => void; onTodayClick?: () => void; onKeyClick?: (keyName: string) => void; onModelClick?: (model: string) => void } = {}) {
+export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyClick, onModelClick, onNavigate }: { onHourClick?: (hourIso: string) => void; onDayClick?: (dayKey: string) => void; onTodayClick?: () => void; onKeyClick?: (keyName: string) => void; onModelClick?: (model: string) => void; onNavigate?: (tab: "providers" | "accounts" | "routes" | "keys") => void } = {}) {
   const [data, setData] = React.useState<OverviewData | null>(null);
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
@@ -2213,6 +2214,18 @@ export function OverviewModule({ onHourClick, onDayClick, onTodayClick, onKeyCli
           </div>
         }
       />
+
+      {/* v4.9.7：冷启动引导清单 —— 无 provider/account 时显示分步引导 */}
+      {onNavigate && (
+        <OnboardingChecklist
+          providersCount={data.providers_count ?? 0}
+          accountsTotal={data.accounts_total ?? 0}
+          routesCount={data.routes_count ?? 0}
+          hasVirtualKey={(data.today_top_keys?.length ?? 0) > 0}
+          hasRequestToday={(data.today_stats?.requests ?? 0) > 0}
+          onNavigate={onNavigate}
+        />
+      )}
 
       {/* 统计卡片 */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">

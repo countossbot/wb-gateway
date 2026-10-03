@@ -32,10 +32,12 @@ export async function register() {
   const { refreshRuntimeSettings } = await import("@/lib/gateway/config/runtimeSettings");
   const { ensureSystemSecrets } = await import("@/lib/gateway/config/configService");
   const { backfillUsageDaily, splitUsageDailyModelDimension } = await import("@/lib/gateway/config/requestLog");
+  const { startSystemMetricsSampler } = await import("@/lib/gateway/jobs/systemMetrics");
   try {
     await refreshRuntimeSettings();
     await ensureSystemSecrets(); // master_key / cron_secret 缺失时生成强随机值（拒绝硬编码兜底）
     startScheduler();
+    startSystemMetricsSampler(); // v4.9.2：RSS / Heap 历史采样（60s tick，30 样本窗口）
     console.log("[Instrumentation] Universal AI Gateway background services started");
     // v3.0.7：UsageDaily 历史回填（幂等：已有行的天跳过；升级后首次启动自动补齐滚动窗口内的历史）
     try {
