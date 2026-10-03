@@ -12,6 +12,9 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Copy,
+  Eye,
+  EyeOff,
   Trash2,
   Wallet,
 } from "lucide-react";
@@ -155,6 +158,114 @@ function BudgetCell({ k }: { k: VirtualKeyRow }) {
       <p className="text-[9px] leading-tight text-stone-400" title="成本按设置页模型单价表估算（非计费）；未配置单价的模型不计入；预算耗尽后网关入口 429，下月 1 日 0 点重置">
         估算口径 · 本地月重置
       </p>
+    </div>
+  );
+}
+
+// v4.9.12：密钥单元格 —— 「查看/复制完整密钥」按钮。
+// 修复点：列表接口只回掩码（k.keyMasked），旧实现直接复制掩码，用户拿到的是 sk-uag-••••XXXX。
+// 现在点击时才按 id 向后端换一次明文（单个密钥粒度，不批量下发），并可切换明文显示。
+function RevealAndCopyButton({ keyId, masked }: { keyId: string; masked: string }) {
+  const [state, setState] = React.useState<"idle" | "loading" | "copied" | "error">("idle");
+  const [revealed, setRevealed] = React.useState<string | null>(null);
+  const [showPlain, setShowPlain] = React.useState(false);
+  // 审查修复：卸载后 setState 会触发 React 警告；且 reveal 未完成时不应显示「加载中…」覆盖已有掩码。
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+  const flashState = (s: "copied" | "error", ms: number) => {
+    if (!mountedRef.current) return;
+    setState(s);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      if (mountedRef.current) setState("idle");
+    }, ms);
+  };
+
+  const fetchPlain = React.useCallback(async (): Promise<string> => {
+    if (revealed) return revealed;
+    const r = await apiGet<{ keyValue: string }>(`/api/console/keys?reveal=${encodeURIComponent(keyId)}`);
+    setRevealed(r.keyValue);
+    return r.keyValue;
+  }, [keyId, revealed]);
+
+  const onCopy = async () => {
+    setState("loading");
+    try {
+      const plain = await fetchPlain();
+      // 坑 2：非 HTTPS / 非 user-gesture 环境下 clipboard API 可能抛 NotAllowedError，用 execCommand 兜底
+      try {
+        await navigator.clipboard.writeText(plain);
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = plain;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      flashState("copied", 1500);
+    } catch {
+      flashState("error", 2500);
+    }
+  };
+
+  const onToggle = async () => {
+    if (showPlain) {
+      setShowPlain(false);
+      return;
+    }
+    setState("loading");
+    try {
+      await fetchPlain();
+      setShowPlain(true);
+      setState("idle");
+    } catch {
+      flashState("error", 2500);
+    }
+
+  };
+  return (
+    <div className="flex items-center gap-1.5">
+      <code
+        className={showPlain ? "font-mono text-xs font-semibold text-stone-900" : "font-mono text-xs text-stone-700"}
+        title={showPlain ? "完整密钥（点眼睛可隐藏）" : masked}
+      >
+        {state === "loading" ? "加载中…" : showPlain && revealed ? revealed : masked}
+      </code>
+      <Button
+        size="icon"
+        variant="ghost"
+        onClick={onToggle}
+        title={showPlain ? "隐藏密钥" : "显示完整密钥"}
+        aria-label={showPlain ? "隐藏密钥" : "显示完整密钥"}
+      >
+        {showPlain ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+      </Button>
+      <Button
+        size="icon"
+        variant="ghost"
+        onClick={onCopy}
+        disabled={state === "loading"}
+        title={state === "error" ? "复制失败，请重试" : "复制完整密钥"}
+        aria-label="复制完整密钥"
+      >
+        {state === "copied" ? (
+          <Check className="size-3.5 text-emerald-600" />
+        ) : state === "error" ? (
+          <AlertTriangle className="size-3.5 text-red-500" />
+        ) : (
+          <Copy className="size-3.5" />
+        )}
+      </Button>
     </div>
   );
 }
@@ -496,12 +607,8 @@ export function KeysModule({ onViewLogs }: { onViewLogs?: (keyName: string) => v
                       </div>
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-1.5">
-                        <code className="max-w-40 truncate rounded bg-stone-100 px-1.5 py-0.5 font-mono text-xs text-stone-700" title={k.keyMasked}>
-                          {k.keyMasked}
-                        </code>
-                        <CopyButton text={k.keyMasked} size="icon" variant="ghost" label="" />
-                      </div>
+                      {/* v4.9.12：改为「查看/复制完整密钥」—— 旧实现直接复制 k.keyMasked（掩码），用户拿不到可用密钥 */}
+                      <RevealAndCopyButton keyId={k.id} masked={k.keyMasked} />
                     </TableCell>
                     <TableCell className="hidden md:table-cell">
                       <div className="flex max-w-56 flex-wrap gap-1">

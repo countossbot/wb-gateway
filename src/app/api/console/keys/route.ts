@@ -28,6 +28,18 @@ function sanitizeBudget(raw: unknown): number {
 export async function GET(request: NextRequest) {
   const session = await requireSessionOr401(request);
   if (session instanceof Response) return session;
+  // v4.9.12：按 id 读取单把密钥的完整明文（供「复制完整密钥」按钮使用）。
+  // 安全前提：与列表同一套会话鉴权（requireSessionOr401），仅登录管理员可取；
+  // 密钥为明文存储（VirtualKey.keyValue），故此处直接返回。响应不可缓存。
+  const revealId = request.nextUrl.searchParams.get("reveal");
+  if (revealId) {
+    const k = await db.virtualKey.findUnique({ where: { id: revealId } });
+    if (!k) return fail("密钥不存在", 404);
+    const res = ok({ id: k.id, name: k.name, keyValue: k.keyValue });
+    res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    return res;
+  }
+
   const keys = await db.virtualKey.findMany({ orderBy: { createdAt: "asc" } });
 
   // v3.0.4：每把密钥近 24h 调用统计（RequestLog.apiKeyName 聚合）
